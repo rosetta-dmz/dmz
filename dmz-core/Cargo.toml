@@ -1,0 +1,20 @@
+[package]
+name = "dmz-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+git2.workspace = true
+tar.workspace = true
+zstd.workspace = true
+flate2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+sha2 = "0.10"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full"] }
+dmz-sandbox.workspace = true

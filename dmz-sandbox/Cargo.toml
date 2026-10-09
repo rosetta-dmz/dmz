@@ -1,0 +1,15 @@
+[package]
+name = "dmz-sandbox"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dmz-core.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.28", features = ["user", "sched", "mount", "process"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_System_JobObjects", "Win32_Security"] }

@@ -1,0 +1,16 @@
+[package]
+name = "dmz-supervisor"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dmz-core.workspace = true
+dmz-sandbox.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+interprocess = "2.0" # Cross-platform Unix domain sockets & Windows Named Pipes
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

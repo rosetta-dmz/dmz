@@ -1,0 +1,15 @@
+[package]
+name = "dmz-gui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dmz-core.workspace = true
+dmz-sandbox.workspace = true
+dmz-supervisor.workspace = true
+eframe = "0.31"
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber = "0.3"
+serde.workspace = true
+serde_json.workspace = true
