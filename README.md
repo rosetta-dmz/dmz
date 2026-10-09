@@ -2,7 +2,7 @@
 
 > **Daemonless Sandbox & Air-Gapped Workspace Engine**
 
-Named after military terminology, DMZ is a high-performance, standalone sandbox and workspace management platform. It provides isolated developer environments, secure proxy-audited AI agent execution, and deterministic air-gapped closure imports with **zero host system dependencies** (no pre-installed Python, Node, Docker, or system Git needed).
+Named after military terminology, DMZ is a high-performance, standalone sandbox and workspace management platform. It provides isolated developer environments, secure proxy-audited AI agent execution, and deterministic air-gapped closure imports with no host system dependencies. No pre-installed Python, Node, Docker, or system Git needed.
 
 Of course, it's still recommended to use a daemon when necessary, however DMZ provides a lightweight solution to ensure workspace interoperability and reproducibility across Windows/Linux/MacOS regardless of connectivity, programming language, or dependencies used. We focus on eliminating the need to have a ridiculous amount of tools to manage the most important aspect of software development -- supply chain/SBOM visibility, management, and vulnerability analysis, stack-wide.
 
