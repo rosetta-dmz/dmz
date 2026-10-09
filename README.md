@@ -6,7 +6,7 @@ DMZ is a high-performance, standalone sandbox and workspace management platform 
 
 ---
 
-## Key Features
+## Features
 
 * **Zero Host Dependencies:** Ships as a single self-contained binary embedding `libgit2` for deterministic repository cloning and offline management.
 * **Air-Gap Capable:** Pack, cryptographically verify, and extract complete `.tar.zst` dependency closures for completely offline environments.
