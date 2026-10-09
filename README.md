@@ -23,7 +23,7 @@ DMZ is a high-performance, standalone sandbox and workspace management platform 
    * **Linux (`musl`):** `dmz-x86_64-unknown-linux-musl`
    * **macOS (Apple Silicon):** `dmz-aarch64-apple-darwin`
    * **Windows:** `dmz-x86_64-pc-windows-msvc.exe`
-3. Make the binary executable (Linux/macOS):
+3. Make the binary executable (Linux/MacOS):
    ```bash
    chmod +x dmz-*
 
