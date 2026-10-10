@@ -3,6 +3,10 @@ name = "dmz-cli"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "dmz"
+path = "src/main.rs"
+
 [dependencies]
 dmz-core.workspace = true
 dmz-sandbox.workspace = true
