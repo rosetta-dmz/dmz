@@ -19,12 +19,12 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([960.0, 680.0])
             .with_min_inner_size([800.0, 500.0])
-            .with_title("DMZ — Universal Daemonless Factory"),
+            .with_title("DMZ"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "DMZ Engine",
+        "DMZ",
         options,
         Box::new(|_cc| Ok(Box::new(DmzGuiApp::default()))),
     )
