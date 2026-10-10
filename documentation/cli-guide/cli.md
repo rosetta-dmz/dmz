@@ -89,8 +89,15 @@ dmz sandbox run [OPTIONS] -- <COMMAND> [ARGS...]
 * `-e, --env <KEY=VALUE>` — Inject environment variables into the sandbox runtime (can be specified multiple times).
 * `--timeout <SECONDS>` — Maximum allowed execution time before forced process termination.
 * `--no-net` — Strips all outbound network access for complete runtime air-gapping.
+* `--diagnose` — Enables automated error categorization to distinguish between platform/kernel faults and user code/dependency errors, providing plain-language remediation steps.
 
-#### **Example**
+#### **Example 1**
+
+```bash
+dmz sandbox run --workspace ./my-app --diagnose -- cargo build --release
+```
+
+#### **Example 2**
 
 ```bash
 dmz sandbox run --workspace ./my-app --timeout 300 --no-net -- cargo build --release
