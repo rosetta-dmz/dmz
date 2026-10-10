@@ -79,6 +79,10 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         allow_network: bool,
 
+        /// Enable automated diagnostic error categorization
+        #[arg(long, default_value_t = false)]
+        diagnose: bool,
+
         /// Binary or script command to execute
         #[arg(default_value = "/bin/sh")]
         exec_command: String,
@@ -219,6 +223,7 @@ fn main() {
             workspace,
             closure,
             allow_network,
+            diagnose,
             exec_command,
             args,
         } => {
@@ -238,8 +243,25 @@ fn main() {
                     }
                 }
                 Err(e) => {
-                    error!("Sandbox execution error: {}", e);
-                    exit(1);
+                    if diagnose {
+                        // Pass &e directly as a standard error reference
+                        let diag = dmz_core::diagnostics::DiagnosticError::classify(&e);
+                        
+                        match diag.category {
+                            dmz_core::diagnostics::ErrorCategory::PlatformFault => {
+                                eprintln!("\x1b[31m[DMZ PLATFORM FAULT]\x1b[0m");
+                            }
+                            dmz_core::diagnostics::ErrorCategory::UserCodeFault => {
+                                eprintln!("\x1b[33m[USER CODE / DEPENDENCY FAULT]\x1b[0m");
+                            }
+                        }
+                        eprintln!("Details: {}", diag.message);
+                        eprintln!("Remediation: \x1b[1m{}\x1b[0m", diag.remediation);
+                        exit(1);
+                    } else {
+                        error!("Sandbox execution error: {}", e);
+                        exit(1);
+                    }
                 }
             }
         }
