@@ -1,10 +1,10 @@
 # **Architectural Blueprint**
 
-### **1\. The Statically Compiled Engine (The Core)**
+### Statically Compiled Engine (Core)**
 
 To achieve the "zero dependency factory" where open-source contributors can download a single binary and immediately compile the platform itself, **Rust** is the optimal choice over Go or Zig. Rust provides zero-cost abstractions, deterministic cross-platform compilation, and deeply granular control over system-level process sandboxing (via `libc` and platform-specific kernel APIs).
 
-**The Compilation Strategy:**
+**Compilation Strategy:**
 
 * **Target:** `x86_64-unknown-linux-musl` (Linux), `x86_64-pc-windows-msvc` (Windows), and `aarch64-apple-darwin` (macOS).  
 * **Static Linking (`musl`):** By compiling the Linux binary against `musl` instead of the standard `glibc`, you completely sever the binary's dependence on the host machine's C library version.  
@@ -12,7 +12,7 @@ To achieve the "zero dependency factory" where open-source contributors can down
   * *Git:* Embed `libgit2` (via the `git2-rs` crate) to handle repository cloning, hashing, and version control without requiring `git` to be installed on the host.  
   * *Archive/Compression:* Embed `tar` and `zstd` compression crates natively so the engine can pack and unpack `.nar` closures and OCI images offline.
 
-### **2\. The Daemonless Sandbox Engine (The Workspace)**
+### Daemonless Sandbox Engine (Workspace)**
 
 Because we are stripping out the Docker daemon, the engine must leverage the native isolation features of the host operating system directly. When a developer clicks "Start Workspace", the single Rust binary acts as the local orchestrator:
 
@@ -22,7 +22,7 @@ Because we are stripping out the Docker daemon, the engine must leverage the nat
 
 ### 
 
-### **3\. The AI Agent Sandbox (The Supervisor)**
+### Agent Sandbox (Supervisor)**
 
 AI agents require continuous execution, network access, and isolated scratchpads. To accommodate this without a global system daemon, the architecture introduces a **Workspace Supervisor**—an isolated, lightweight thread spawned by the main Rust binary when the environment starts.
 
