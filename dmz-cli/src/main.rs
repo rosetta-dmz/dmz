@@ -38,6 +38,14 @@ enum Commands {
         output: PathBuf,
     },
 
+    /// Fetch and cache locked dependencies into the secure store
+    Fetch {
+        #[arg(long, default_value = "dmz.lock")]
+        lockfile: PathBuf,
+        #[arg(long, default_value = ".dmz/store")]
+        store: PathBuf,
+    },
+
     /// Build deterministic package artifacts (Target A: Deps, Target B: App, Target C: Unified)
     Build {
         /// Build target specification
@@ -181,6 +189,22 @@ fn main() {
                 }
                 Err(e) => {
                     error!("Dependency resolution failed: {}", e);
+                    exit(1);
+                }
+            }
+        }
+
+        Commands::Fetch { lockfile, store } => {
+            info!("Fetching dependencies from lockfile {:?}", lockfile);
+            match ResolverEngine::fetch_dependencies(&lockfile, &store) {
+                Ok(fetched_count) => {
+                    info!(
+                        "Successfully fetched {} dependencies into store {:?}",
+                        fetched_count, store
+                    );
+                }
+                Err(e) => {
+                    error!("Dependency fetch failed: {}", e);
                     exit(1);
                 }
             }
