@@ -28,6 +28,15 @@ dmz export [OPTIONS]
 dmz export --workspace /path/to/project --output /secure/transfer/project-closure.tar.zst --compression-level 9
 ```
 
+## Air-Gap Export Command (`dmz airgap export`)
+
+Bundles project workspace code, lockfiles, and secure dependency stores into a compressed, cryptographically verifiable `.tar.zst` archive.
+
+### Usage
+```bash
+dmz airgap export [OPTIONS]
+```
+
 ---
 
 ### 2. Importing & Verifying a Closure (`dmz import`)

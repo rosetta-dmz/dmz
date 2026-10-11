@@ -394,10 +394,12 @@ impl DmzGuiApp {
         ui.horizontal(|ui| {
             if ui.button("Export Air-Gap Bundle").clicked() {
                 let config = ExportConfig {
+                    workspace_path: PathBuf::from(&self.workspace_path),
                     lockfile_path: PathBuf::from(&self.lockfile_path),
                     store_dir: PathBuf::from(&self.store_dir),
                     output_path: PathBuf::from(&self.airgap_archive_path),
                     zstd_level: self.zstd_level,
+                    mode: dmz_core::archive::exporter::ExportMode::Unified,
                 };
 
                 match AirGapExporter::export(&config) {

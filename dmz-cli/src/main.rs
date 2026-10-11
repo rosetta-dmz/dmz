@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use dmz_core::archive::exporter::ExportMode as CoreExportMode;
 use dmz_core::archive::{AirGapExporter, AirGapImporter, ExportConfig, ImportConfig};
 use dmz_core::packaging::{BuildConfig, BuildTarget, PackageBuilder};
 use dmz_core::resolver::ResolverEngine;
@@ -127,10 +128,34 @@ impl From<TargetMode> for BuildTarget {
     }
 }
 
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum CliExportMode {
+    /// Workspace source code + dependency store archives
+    Unified,
+    /// Workspace source code only (no dependencies)
+    CodeOnly,
+    /// Dependency store archives only (no source code)
+    DepsOnly,
+}
+
+impl From<CliExportMode> for CoreExportMode {
+    fn from(mode: CliExportMode) -> Self {
+        match mode {
+            CliExportMode::Unified => CoreExportMode::Unified,
+            CliExportMode::CodeOnly => CoreExportMode::CodeOnly,
+            CliExportMode::DepsOnly => CoreExportMode::DepsOnly,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum AirgapCommands {
     /// Bundle store items and dmz.lock into a portable air-gap archive (.tar.zst)
     Export {
+        /// Path to workspace root directory
+        #[arg(short, long, default_value = ".")]
+        workspace: PathBuf,
+
         /// Path to dmz.lock closure specification
         #[arg(short, long, default_value = "dmz.lock")]
         lockfile: PathBuf,
@@ -146,6 +171,10 @@ enum AirgapCommands {
         /// Zstd compression level (1-22)
         #[arg(long, default_value_t = 3)]
         zstd_level: i32,
+
+        /// Air-gap export target mode
+        #[arg(long, value_enum, default_value_t = CliExportMode::Unified)]
+        mode: CliExportMode,
     },
 
     /// Unpack and cryptographically verify an air-gap bundle into local store
@@ -167,7 +196,7 @@ enum AirgapCommands {
 fn main() {
     let cli = Cli::parse();
 
-    // 1. Initialize logging output subscriber
+    // Initialize logging output subscriber[cite: 1]
     let log_level = if cli.verbose { Level::DEBUG } else { Level::INFO };
     let subscriber = FmtSubscriber::builder()
         .with_max_level(log_level)
@@ -175,7 +204,7 @@ fn main() {
     tracing::subscriber::set_global_default(subscriber)
         .expect("Failed to set tracing subscriber");
 
-    // 2. Dispatch CLI commands
+    // Dispatch CLI commands[cite: 1]
     match cli.command {
         Commands::Resolve { workspace, output } => {
             info!("Resolving workspace dependencies at {:?}", workspace);
@@ -195,17 +224,14 @@ fn main() {
         }
 
         Commands::Fetch { lockfile, store } => {
-            info!("Fetching dependencies from lockfile {:?}", lockfile);
-            match ResolverEngine::fetch_dependencies(&lockfile, &store) {
-                Ok(fetched_count) => {
-                    info!(
-                        "Successfully fetched {} dependencies into store {:?}",
-                        fetched_count, store
-                    );
+            info!("Starting dependency fetch from lockfile: {:?}", lockfile);
+            match dmz_core::ResolverEngine::fetch_dependencies(&lockfile, &store) {
+                Ok(count) => {
+                    info!("Successfully fetched {} dependencies into store {:?}", count, store);
                 }
                 Err(e) => {
                     error!("Dependency fetch failed: {}", e);
-                    exit(1);
+                    std::process::exit(1);
                 }
             }
         }
@@ -268,7 +294,6 @@ fn main() {
                 }
                 Err(e) => {
                     if diagnose {
-                        // Pass &e directly as a standard error reference
                         let diag = dmz_core::diagnostics::DiagnosticError::classify(&e);
                         
                         match diag.category {
@@ -292,16 +317,20 @@ fn main() {
 
         Commands::Airgap { action } => match action {
             AirgapCommands::Export {
+                workspace,
                 lockfile,
                 store,
                 output,
                 zstd_level,
+                mode,
             } => {
                 let config = ExportConfig {
+                    workspace_path: workspace,
                     lockfile_path: lockfile,
                     store_dir: store,
                     output_path: output,
                     zstd_level,
+                    mode: mode.into(),
                 };
 
                 match AirGapExporter::export(&config) {
