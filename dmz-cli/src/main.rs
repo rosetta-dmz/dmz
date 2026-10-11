@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use dmz_core::ecosystem::EcosystemRegistry;
 use dmz_core::archive::exporter::ExportMode as CoreExportMode;
 use dmz_core::archive::{AirGapExporter, AirGapImporter, ExportConfig, ImportConfig};
 use dmz_core::packaging::{BuildConfig, BuildTarget, PackageBuilder};
@@ -106,6 +107,22 @@ enum Commands {
         #[command(subcommand)]
         action: AirgapCommands,
     },
+
+    /// Inspect and manage multi-ecosystem workspace stacks (Rust, Node, Go, Python, etc.)
+    Ecosystem {
+        #[command(subcommand)]
+        action: EcosystemAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum EcosystemAction {
+    /// Automatically discover active ecosystems in a workspace
+    Discover {
+        /// Path to workspace root directory
+        #[arg(short, long, default_value = ".")]
+        workspace: PathBuf,
+    },
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,7 +213,7 @@ enum AirgapCommands {
 fn main() {
     let cli = Cli::parse();
 
-    // Initialize logging output subscriber[cite: 1]
+    // Initialize logging output subscriber[cite: 2]
     let log_level = if cli.verbose { Level::DEBUG } else { Level::INFO };
     let subscriber = FmtSubscriber::builder()
         .with_max_level(log_level)
@@ -204,7 +221,7 @@ fn main() {
     tracing::subscriber::set_global_default(subscriber)
         .expect("Failed to set tracing subscriber");
 
-    // Dispatch CLI commands[cite: 1]
+    // Dispatch CLI commands[cite: 2]
     match cli.command {
         Commands::Resolve { workspace, output } => {
             info!("Resolving workspace dependencies at {:?}", workspace);
@@ -370,6 +387,22 @@ fn main() {
                     }
                     Err(e) => {
                         error!("Air-gap import failed: {}", e);
+                        exit(1);
+                    }
+                }
+            }
+        },
+
+        Commands::Ecosystem { action } => match action {
+            EcosystemAction::Discover { workspace } => {
+                info!("Scanning workspace for active ecosystems at {:?}", workspace);
+                let registry = EcosystemRegistry::new();
+                match registry.process_workspace(&workspace) {
+                    Ok(stacks) => {
+                        info!(active_stacks = ?stacks, "Ecosystem discovery completed successfully");
+                    }
+                    Err(e) => {
+                        error!("Ecosystem discovery failed: {}", e);
                         exit(1);
                     }
                 }

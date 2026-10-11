@@ -1,3 +1,4 @@
+pub mod ecosystem;
 pub mod archive;
 pub mod packaging;
 pub mod resolver;

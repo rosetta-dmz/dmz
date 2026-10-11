@@ -1,5 +1,6 @@
 use crate::archive::exporter::AirGapManifest;
 use crate::resolver::lockfile::DmzLockfile;
+use crate::ecosystem::EcosystemRegistry;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Read;
@@ -179,6 +180,17 @@ impl AirGapImporter {
                 entry
                     .unpack_in(&config.target_workspace_dir)
                     .map_err(|e| ImportError::ExtractionError(format!("Failed to unpack workspace file: {}", e)))?;
+            }
+        }
+
+        // 4. Run post-import ecosystem validation using the registry
+        let registry = EcosystemRegistry::new();
+        match registry.process_workspace(&config.target_workspace_dir) {
+            Ok(stacks) => {
+                info!(active_stacks = ?stacks, "Post-import ecosystem discovery complete");
+            }
+            Err(e) => {
+                info!(error = %e, "Ecosystem post-processing check note");
             }
         }
 

@@ -1,4 +1,5 @@
 use crate::resolver::lockfile::DmzLockfile;
+use crate::ecosystem::EcosystemRegistry;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -69,7 +70,7 @@ impl std::error::Error for ExportError {}
 pub struct AirGapExporter;
 
 impl AirGapExporter {
-    /// Bundles store packages and dmz.lock into a cryptographically verifiable air-gap archive
+    /// Bundles store packages, dmz.lock, and discovered ecosystem caches into a cryptographically verifiable air-gap archive
     pub fn export(config: &ExportConfig) -> Result<AirGapManifest, ExportError> {
         info!(
             lockfile = ?config.lockfile_path,
@@ -77,11 +78,23 @@ impl AirGapExporter {
             "Initiating air-gap package export"
         );
 
-        // 1. Verify dmz.lock integrity before exporting
+        // 1. Automatically discover active workspace ecosystems & gather generalized caches
+        let workspace_root = &config.workspace_path;
+        let registry = EcosystemRegistry::new();
+        
+        let detected_stacks = registry.process_workspace(workspace_root)
+            .map_err(|e| ExportError::ArchiveError(format!("Ecosystem discovery failed: {}", e)))?;
+        
+        info!(stacks = ?detected_stacks, "Discovered active workspace ecosystems");
+        
+        let cache_paths = registry.gather_all_caches(workspace_root);
+        info!(caches = ?cache_paths, "Gathered generalized ecosystem cache paths for archiving");
+
+        // 2. Verify dmz.lock integrity before exporting
         let lockfile = DmzLockfile::load_and_verify(&config.lockfile_path)
             .map_err(|e| ExportError::LockfileError(e.to_string()))?;
 
-        // 2. Ensure parent output directory exists
+        // 3. Ensure parent output directory exists
         if let Some(parent) = config.output_path.parent() {
             if !parent.exists() {
                 fs::create_dir_all(parent)
@@ -89,7 +102,7 @@ impl AirGapExporter {
             }
         }
 
-        // 3. Prepare archive output stream
+        // 4. Prepare archive output stream
         let file = File::create(&config.output_path)
             .map_err(|e| ExportError::IoError(format!("Failed to create export archive: {}", e)))?;
 
