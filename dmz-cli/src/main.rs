@@ -357,6 +357,7 @@ fn main() {
                     archive_path: archive,
                     target_store_dir: store,
                     verify_closure_hash: !skip_verify,
+                    ..ImportConfig::default()
                 };
 
                 match AirGapImporter::import(&config) {

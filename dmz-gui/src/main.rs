@@ -421,6 +421,7 @@ impl DmzGuiApp {
                     archive_path: PathBuf::from(&self.airgap_archive_path),
                     target_store_dir: PathBuf::from(&self.store_dir),
                     verify_closure_hash: true,
+                    ..ImportConfig::default()
                 };
 
                 match AirGapImporter::import(&config) {

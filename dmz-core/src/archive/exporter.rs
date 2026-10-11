@@ -103,23 +103,28 @@ impl AirGapExporter {
             .append_path_with_name(&config.lockfile_path, "dmz.lock")
             .map_err(|e| ExportError::ArchiveError(format!("Failed to pack dmz.lock: {}", e)))?;
 
-// Append store items (if mode is Unified or DepsOnly)
+        // Append store items (if mode is Unified or DepsOnly)
         let mut packed_count = 0;
         if config.mode == ExportMode::Unified || config.mode == ExportMode::DepsOnly {
-            for (pkg_key, _pkg_info) in &lockfile.packages { // Fixed unused variable warning
-                let pkg_store_path = config.store_dir.join(pkg_key); // Match package name directory
+            for (_pkg_key, pkg_info) in &lockfile.packages {
+                // Skip local path dependencies/workspace members since they are in the workspace source
+                if pkg_info.version.starts_with("path:") || pkg_info.version.contains("path") {
+                    continue;
+                }
+
+                let pkg_store_path = config.store_dir.join(&pkg_info.name); // Use pkg_info.name to match store directory layout
                 if pkg_store_path.exists() {
-                    let archive_dest = Path::new("store").join(pkg_key);
+                    let archive_dest = Path::new("store").join(&pkg_info.name);
                     if pkg_store_path.is_dir() {
                         Self::append_dir_all(&mut tar_builder, &pkg_store_path, &archive_dest)?;
                     } else {
                         tar_builder
                             .append_path_with_name(&pkg_store_path, &archive_dest)
-                            .map_err(|e| ExportError::ArchiveError(format!("Failed to pack package {}: {}", pkg_key, e)))?;
+                            .map_err(|e| ExportError::ArchiveError(format!("Failed to pack package {}: {}", pkg_info.name, e)))?;
                     }
                     packed_count += 1;
                 } else {
-                    warn!(package = %pkg_key, "Store item missing during export");
+                    warn!(package = %pkg_info.name, "Store item missing during export package");
                 }
             }
         }
@@ -127,7 +132,7 @@ impl AirGapExporter {
         // Append workspace source code (if mode is Unified or CodeOnly)
         if config.mode == ExportMode::Unified || config.mode == ExportMode::CodeOnly {
             info!(path = ?config.workspace_path, "Appending workspace source code to archive");
-            let workspace_dest = Path::new("workspace");
+            let workspace_dest = Path::new("");
             if config.workspace_path.is_dir() {
                 Self::append_dir_all(&mut tar_builder, &config.workspace_path, workspace_dest)?;
             }
@@ -200,6 +205,13 @@ impl AirGapExporter {
             let entry = entry.map_err(|e| ExportError::IoError(e.to_string()))?;
             let path = entry.path();
             let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+
+            // --- SKIP HEAVY BUILD ARTIFACTS & CACHES ---
+            if path.is_dir() && (name_str == "target" || name_str == "node_modules" || name_str == ".git" || name_str == "dist" || name_str == ".dmz") {
+                continue;
+            }
+
             let rel_dest = dest_prefix.join(name);
 
             if path.is_dir() {

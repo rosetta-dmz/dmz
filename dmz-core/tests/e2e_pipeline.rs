@@ -82,6 +82,7 @@ fn test_e2e_unified_airgap_export_and_import() {
         archive_path: bundle_path,
         target_store_dir: target_store.clone(),
         verify_closure_hash: true,
+        ..ImportConfig::default()
     };
 
     let import_result = AirGapImporter::import(&import_config)
