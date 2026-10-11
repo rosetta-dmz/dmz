@@ -1,5 +1,6 @@
 use crate::archive::exporter::AirGapManifest;
 use crate::resolver::lockfile::DmzLockfile;
+use crate::ecosystem::EcosystemRegistry;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Read;
@@ -12,6 +13,7 @@ use zstd::stream::read::Decoder as ZstdDecoder;
 pub struct ImportConfig {
     pub archive_path: PathBuf,
     pub target_store_dir: PathBuf,
+    pub target_workspace_dir: PathBuf, // Destination for workspace source code & metadata
     pub verify_closure_hash: bool,
 }
 
@@ -20,6 +22,7 @@ impl Default for ImportConfig {
         Self {
             archive_path: PathBuf::from("airgap_bundle.tar.zst"),
             target_store_dir: PathBuf::from(".dmz/store"),
+            target_workspace_dir: PathBuf::from("workspace"), // Sub-folder default 
             verify_closure_hash: true,
         }
     }
@@ -54,11 +57,12 @@ impl std::error::Error for ImportError {}
 pub struct AirGapImporter;
 
 impl AirGapImporter {
-    /// Verifies and unpacks an air-gap bundle into the target offline store
+    /// Verifies and unpacks an air-gap bundle into the target store and workspace directory
     pub fn import(config: &ImportConfig) -> Result<ImportResult, ImportError> {
         info!(
             archive = ?config.archive_path,
-            target = ?config.target_store_dir,
+            store = ?config.target_store_dir,
+            workspace = ?config.target_workspace_dir,
             "Starting air-gap archive import"
         );
 
@@ -69,10 +73,15 @@ impl AirGapImporter {
             )));
         }
 
-        // 1. Prepare target store directory
+        // 1. Prepare target directories
         if !config.target_store_dir.exists() {
             fs::create_dir_all(&config.target_store_dir)
                 .map_err(|e| ImportError::IoError(format!("Failed to create target store: {}", e)))?;
+        }
+
+        if !config.target_workspace_dir.exists() {
+            fs::create_dir_all(&config.target_workspace_dir)
+                .map_err(|e| ImportError::IoError(format!("Failed to create target workspace: {}", e)))?;
         }
 
         // 2. Open archive and initialize zstd stream
@@ -84,10 +93,10 @@ impl AirGapImporter {
 
         let mut archive = TarArchive::new(zstd_decoder);
 
-        // 3. Perform pass to inspect manifest and lockfile
         let mut closure_signature = String::new();
         let mut imported_count = 0;
 
+        // 3. Single-pass entry iteration, extraction, and verification
         let entries = archive
             .entries()
             .map_err(|e| ImportError::ExtractionError(format!("Failed to read tar entries: {}", e)))?;
@@ -116,6 +125,12 @@ impl AirGapImporter {
                     version = %manifest.dmz_version,
                     "Air-gap manifest verified"
                 );
+
+                let dest = config.target_workspace_dir.join(&path);
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent).map_err(|e| ImportError::IoError(e.to_string()))?;
+                }
+                fs::write(&dest, content).map_err(|e| ImportError::IoError(e.to_string()))?;
             } else if path == Path::new("dmz.lock") {
                 let mut content = String::new();
                 entry
@@ -134,6 +149,12 @@ impl AirGapImporter {
                         )));
                     }
                 }
+
+                let dest = config.target_workspace_dir.join(&path);
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent).map_err(|e| ImportError::IoError(e.to_string()))?;
+                }
+                fs::write(&dest, content).map_err(|e| ImportError::IoError(e.to_string()))?;
             } else if path.starts_with("store") {
                 let rel_path = path.strip_prefix("store").unwrap_or(&path);
                 if rel_path.as_os_str().is_empty() {
@@ -154,6 +175,22 @@ impl AirGapImporter {
                     .map_err(|e| ImportError::ExtractionError(format!("Failed to unpack file {:?}: {}", dest_path, e)))?;
 
                 imported_count += 1;
+            } else {
+                // Workspace source files (Cargo.toml, src/, etc.)
+                entry
+                    .unpack_in(&config.target_workspace_dir)
+                    .map_err(|e| ImportError::ExtractionError(format!("Failed to unpack workspace file: {}", e)))?;
+            }
+        }
+
+        // 4. Run post-import ecosystem validation using the registry
+        let registry = EcosystemRegistry::new();
+        match registry.process_workspace(&config.target_workspace_dir) {
+            Ok(stacks) => {
+                info!(active_stacks = ?stacks, "Post-import ecosystem discovery complete");
+            }
+            Err(e) => {
+                info!(error = %e, "Ecosystem post-processing check note");
             }
         }
 

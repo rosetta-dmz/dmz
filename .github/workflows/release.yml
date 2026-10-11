@@ -32,7 +32,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build Release Binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --package dmz-cli --target ${{ matrix.target }}
 
       - name: Package Artifact
         shell: bash

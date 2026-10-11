@@ -1,4 +1,5 @@
 use crate::resolver::lockfile::DmzLockfile;
+use crate::ecosystem::EcosystemRegistry;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -7,6 +8,13 @@ use std::path::{Path, PathBuf};
 use tar::Builder as TarBuilder;
 use tracing::{info, warn};
 use zstd::stream::write::Encoder as ZstdEncoder;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportMode {
+    Unified,   // Workspace source code + dependency store archives
+    CodeOnly,  // Workspace source code only (no dependencies)
+    DepsOnly,  // Dependency store archives only (no source code)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AirGapManifest {
@@ -19,19 +27,23 @@ pub struct AirGapManifest {
 
 #[derive(Debug, Clone)]
 pub struct ExportConfig {
+    pub workspace_path: PathBuf,
     pub lockfile_path: PathBuf,
     pub store_dir: PathBuf,
     pub output_path: PathBuf,
     pub zstd_level: i32,
+    pub mode: ExportMode,
 }
 
 impl Default for ExportConfig {
     fn default() -> Self {
         Self {
+            workspace_path: PathBuf::from("."),
             lockfile_path: PathBuf::from("dmz.lock"),
             store_dir: PathBuf::from(".dmz/store"),
             output_path: PathBuf::from("dist/airgap_bundle.tar.zst"),
             zstd_level: 3,
+            mode: ExportMode::Unified,
         }
     }
 }
@@ -58,7 +70,7 @@ impl std::error::Error for ExportError {}
 pub struct AirGapExporter;
 
 impl AirGapExporter {
-    /// Bundles store packages and dmz.lock into a cryptographically verifiable air-gap archive
+    /// Bundles store packages, dmz.lock, and discovered ecosystem caches into a cryptographically verifiable air-gap archive
     pub fn export(config: &ExportConfig) -> Result<AirGapManifest, ExportError> {
         info!(
             lockfile = ?config.lockfile_path,
@@ -66,11 +78,23 @@ impl AirGapExporter {
             "Initiating air-gap package export"
         );
 
-        // 1. Verify dmz.lock integrity before exporting
+        // 1. Automatically discover active workspace ecosystems & gather generalized caches
+        let workspace_root = &config.workspace_path;
+        let registry = EcosystemRegistry::new();
+        
+        let detected_stacks = registry.process_workspace(workspace_root)
+            .map_err(|e| ExportError::ArchiveError(format!("Ecosystem discovery failed: {}", e)))?;
+        
+        info!(stacks = ?detected_stacks, "Discovered active workspace ecosystems");
+        
+        let cache_paths = registry.gather_all_caches(workspace_root);
+        info!(caches = ?cache_paths, "Gathered generalized ecosystem cache paths for archiving");
+
+        // 2. Verify dmz.lock integrity before exporting
         let lockfile = DmzLockfile::load_and_verify(&config.lockfile_path)
             .map_err(|e| ExportError::LockfileError(e.to_string()))?;
 
-        // 2. Ensure parent output directory exists
+        // 3. Ensure parent output directory exists
         if let Some(parent) = config.output_path.parent() {
             if !parent.exists() {
                 fs::create_dir_all(parent)
@@ -78,7 +102,7 @@ impl AirGapExporter {
             }
         }
 
-        // 3. Prepare archive output stream
+        // 4. Prepare archive output stream
         let file = File::create(&config.output_path)
             .map_err(|e| ExportError::IoError(format!("Failed to create export archive: {}", e)))?;
 
@@ -87,31 +111,47 @@ impl AirGapExporter {
 
         let mut tar_builder = TarBuilder::new(zstd_encoder);
 
-        // 4. Append lockfile
+        // Append lockfile
         tar_builder
             .append_path_with_name(&config.lockfile_path, "dmz.lock")
             .map_err(|e| ExportError::ArchiveError(format!("Failed to pack dmz.lock: {}", e)))?;
 
-        // 5. Append store items
+        // Append store items (if mode is Unified or DepsOnly)
         let mut packed_count = 0;
-        for (pkg_key, pkg_info) in &lockfile.packages {
-            let pkg_store_path = config.store_dir.join(&pkg_info.sha256);
-            if pkg_store_path.exists() {
-                let archive_dest = Path::new("store").join(&pkg_info.sha256);
-                if pkg_store_path.is_dir() {
-                    Self::append_dir_all(&mut tar_builder, &pkg_store_path, &archive_dest)?;
-                } else {
-                    tar_builder
-                        .append_path_with_name(&pkg_store_path, &archive_dest)
-                        .map_err(|e| ExportError::ArchiveError(format!("Failed to pack package {}: {}", pkg_key, e)))?;
+        if config.mode == ExportMode::Unified || config.mode == ExportMode::DepsOnly {
+            for (_pkg_key, pkg_info) in &lockfile.packages {
+                // Skip local path dependencies/workspace members since they are in the workspace source
+                if pkg_info.version.starts_with("path:") || pkg_info.version.contains("path") {
+                    continue;
                 }
-                packed_count += 1;
-            } else {
-                warn!(package = %pkg_key, hash = %pkg_info.sha256, "Store item missing during export");
+
+                let pkg_store_path = config.store_dir.join(&pkg_info.name); // Use pkg_info.name to match store directory layout
+                if pkg_store_path.exists() {
+                    let archive_dest = Path::new("store").join(&pkg_info.name);
+                    if pkg_store_path.is_dir() {
+                        Self::append_dir_all(&mut tar_builder, &pkg_store_path, &archive_dest)?;
+                    } else {
+                        tar_builder
+                            .append_path_with_name(&pkg_store_path, &archive_dest)
+                            .map_err(|e| ExportError::ArchiveError(format!("Failed to pack package {}: {}", pkg_info.name, e)))?;
+                    }
+                    packed_count += 1;
+                } else {
+                    warn!(package = %pkg_info.name, "Store item missing during export package");
+                }
             }
         }
 
-        // 6. Write air-gap manifest header
+        // Append workspace source code (if mode is Unified or CodeOnly)
+        if config.mode == ExportMode::Unified || config.mode == ExportMode::CodeOnly {
+            info!(path = ?config.workspace_path, "Appending workspace source code to archive");
+            let workspace_dest = Path::new("");
+            if config.workspace_path.is_dir() {
+                Self::append_dir_all(&mut tar_builder, &config.workspace_path, workspace_dest)?;
+            }
+        }
+
+        // Write air-gap manifest header
         let manifest = AirGapManifest {
             dmz_version: env!("CARGO_PKG_VERSION").to_string(),
             closure_signature: lockfile.closure_signature.clone(),
@@ -135,16 +175,24 @@ impl AirGapExporter {
             .append_data(&mut header, "airgap_manifest.json", manifest_json.as_bytes())
             .map_err(|e| ExportError::ArchiveError(format!("Failed to embed airgap manifest: {}", e)))?;
 
-        // 7. Flush streams
-        let zstd_encoder = tar_builder
-            .into_inner()
-            .map_err(|e| ExportError::ArchiveError(format!("Failed to finalize tar stream: {}", e)))?;
+        // Finish streams and ensure file handle is fully closed
+        { // Removed unused 'let file =' binding to clear compiler warning
+            let zstd_encoder = tar_builder
+                .into_inner()
+                .map_err(|e| ExportError::ArchiveError(format!("Failed to finalize tar stream: {}", e)))?;
 
-        zstd_encoder
-            .finish()
-            .map_err(|e| ExportError::ArchiveError(format!("Failed to finish zstd compression: {}", e)))?;
+            let mut inner_file = zstd_encoder
+                .finish()
+                .map_err(|e| format!("Failed to finish zstd compression: {}", e))
+                .map_err(ExportError::ArchiveError)?;
 
-        // 8. Compute final archive checksum
+            inner_file.flush()
+                .map_err(|e| ExportError::IoError(e.to_string()))?;
+                
+            inner_file
+        }; // File handle drops/closes here, flushing bytes to disk safely
+
+        // Compute final archive checksum
         let archive_sha256 = Self::calculate_file_sha256(&config.output_path)?;
         let mut final_manifest = manifest;
         final_manifest.archive_sha256 = archive_sha256;
@@ -170,6 +218,13 @@ impl AirGapExporter {
             let entry = entry.map_err(|e| ExportError::IoError(e.to_string()))?;
             let path = entry.path();
             let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+
+            // --- SKIP HEAVY BUILD ARTIFACTS & CACHES ---
+            if path.is_dir() && (name_str == "target" || name_str == "node_modules" || name_str == ".git" || name_str == "dist" || name_str == ".dmz") {
+                continue;
+            }
+
             let rel_dest = dest_prefix.join(name);
 
             if path.is_dir() {

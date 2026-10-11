@@ -1,56 +1,52 @@
+```markdown
 # DMZ Command-Line Interface (CLI) Guide
 
-DMZ provides a robust, self-contained CLI for orchestrating zero-dependency sandboxes, managing supervisor services, and executing air-gap closure transfers.
+DMZ provides a robust, self-contained CLI for orchestrating zero-dependency sandboxes, managing supervisor services, and executing air-gap closure transfers[cite: 2].
 
 ---
 
 ## Air-Gap Commands
 
-The air-gap command group (`dmz export` and `dmz import`) allows you to bundle an entire project workspace along with its locked dependency closures into a compressed, cryptographically verifiable archive for transfer across disconnected networks.
+The air-gap command group (`dmz airgap export` and `dmz airgap import`) allows you to bundle an entire project workspace along with its locked dependency closures into a compressed, cryptographically verifiable archive for transfer across disconnected networks.
 
-### 1. Exporting a Closure (`dmz export`)
+### Exporting an Air-Gap Bundle (`dmz airgap export`)
 
-Bundles the current workspace, including source files and the `dmz.lock` dependency manifest, into an optimized `.tar.zst` archive.
+Bundles project workspace code, lockfiles, and secure dependency stores into a compressed, cryptographically verifiable `.tar.zst` archive.
 
 ```bash
-dmz export [OPTIONS]
+dmz airgap export [OPTIONS]
 ```
 
 #### **Options**
 
-* `-w, --workspace <PATH>` — Path to the source workspace root. *(Defaults to the current working directory)*
-* `-o, --output <PATH>` — Destination path for the generated `.tar.zst` archive. *(Defaults to `./closure.tar.zst`)*
-* `-c, --compression-level <LEVEL>` — Zstd compression level from `1` (fastest) to `21` (maximum compression). *(Default: `3`)*
+* `-o, --output <PATH>` — Destination path for the generated `.tar.zst` archive. *(Defaults to `dist/workspace_closure.tar.zst`)*
+* `-s, --store <PATH>` — Path to the offline dependency store directory. *(Default: `.dmz/store`)*
 
 #### **Example**
 
 ```bash
-dmz export --workspace /path/to/project --output /secure/transfer/project-closure.tar.zst --compression-level 9
+dmz airgap export --output dist/workspace_closure.tar.zst --store .dmz/store
 ```
 
 ---
 
-### 2. Importing & Verifying a Closure (`dmz import`)
+### Importing & Verifying an Air-Gap Bundle (`dmz airgap import`)
 
-Verifies the cryptographic SHA-256 hash of an imported archive, validates the internal `dmz.lock` signature, and safely extracts the workspace onto an offline target machine.
+Verifies the cryptographic closure hash, validates the internal `dmz.lock` signature, extracts dependency packages into the offline store, and unpacks the workspace source code into the clean `workspace/` sub-directory.
 
 ```bash
-dmz import [OPTIONS]
+dmz airgap import [OPTIONS]
 ```
 
 #### **Options**
 
 * `-a, --archive <PATH>` — Path to the imported `.tar.zst` closure archive. **[Required]**
-* `-s, --sha256 <HASH>` — Expected SHA-256 cryptographic checksum of the archive. **[Required]**
-* `-t, --target <PATH>` — Destination directory where the workspace and lockfile will be unpacked. **[Required]**
+* `-s, --store <PATH>` — Target directory for the offline dependency store. *(Default: `.dmz/store`)*
 
 #### **Example**
 
 ```bash
-dmz import \
-  --archive ./project-closure.tar.zst \
-  --sha256 4c378397e78464329d42b543b944d2824cdd9856abac26c0f26e323587289ab6 \
-  --target /var/lib/dmz/workspaces/offline-project
+dmz airgap import --archive ../dist/workspace_closure.tar.zst --store ./offline_store
 ```
 
 ---
@@ -73,9 +69,13 @@ In addition to air-gap packaging, DMZ provides specialized command groups for se
 
 ## Sandbox Execution Commands (`dmz sandbox`)
 
+
+
 The sandbox command group manages secure, isolated execution environments with zero host system leakage, ensuring that toolchains, AI agents, or builds run within controlled parameters.
 
-### 1. Running a Command in Isolation (`dmz sandbox run`)
+### Running a Command in Isolation (`dmz sandbox run`)
+
+
 
 Executes a command inside a secure sandbox instance.
 
@@ -86,10 +86,19 @@ dmz sandbox run [OPTIONS] -- <COMMAND> [ARGS...]
 #### **Options**
 
 * `-w, --workspace <PATH>` — Working directory context for the sandbox instance. *(Defaults to current directory)*
+
 * `-e, --env <KEY=VALUE>` — Inject environment variables into the sandbox runtime (can be specified multiple times).
+
+
 * `--timeout <SECONDS>` — Maximum allowed execution time before forced process termination.
+
+
 * `--no-net` — Strips all outbound network access for complete runtime air-gapping.
+
+
 * `--diagnose` — Enables automated error categorization to distinguish between platform/kernel faults and user code/dependency errors, providing plain-language remediation steps.
+
+
 
 #### **Example 1**
 
@@ -105,7 +114,9 @@ dmz sandbox run --workspace ./my-app --timeout 300 --no-net -- cargo build --rel
 
 ---
 
-### 2. Listing Active Sandboxes (`dmz sandbox list`)
+### Listing Active Sandboxes (`dmz sandbox list`)
+
+
 
 Displays active or backgrounded sandbox processes managed by the local runtime.
 
@@ -117,9 +128,13 @@ dmz sandbox list
 
 ## Network Proxy Management (`dmz proxy`)
 
+
+
 The proxy command group controls the volatile outbound network proxy auditor. It monitors and enforces strict domain whitelists for agentic and tool-driven workloads.
 
-### 1. Starting the Proxy Audit Server (`dmz proxy start`)
+### Starting the Proxy Audit Server (`dmz proxy start`)
+
+
 
 Launches the local proxy auditor service to intercept and inspect outbound traffic against your defined security policy.
 
@@ -130,8 +145,13 @@ dmz proxy start [OPTIONS]
 #### **Options**
 
 * `-p, --port <PORT>` — Local port for the proxy server. *(Default: `8080`)*
+
 * `-l, --log-file <PATH>` — Path to write request audit trails and violation logs.
+
+
 * `--strict` — Blocks any unlisted outbound domains by default.
+
+
 
 #### **Example**
 
@@ -141,7 +161,9 @@ dmz proxy start --port 9090 --log-file /var/log/dmz/proxy-audit.log --strict
 
 ---
 
-### 2. Managing Whitelist Rules (`dmz proxy whitelist`)
+### Managing Whitelist Rules (`dmz proxy whitelist`)
+
+
 
 Adds or removes approved outbound domains for agent execution.
 
@@ -152,8 +174,14 @@ dmz proxy whitelist [COMMAND]
 #### **Subcommands**
 
 * `add <DOMAIN>` — Add a trusted domain to the outbound whitelist (e.g., `github.com`, `crates.io`).
+
+
 * `remove <DOMAIN>` — Revoke a domain from the whitelist.
+
+
 * `list` — Display all currently whitelisted domains.
+
+
 
 #### **Example**
 
@@ -161,5 +189,3 @@ dmz proxy whitelist [COMMAND]
 dmz proxy whitelist add crates.io
 dmz proxy whitelist list
 ```
-
----

@@ -1,0 +1,158 @@
+{
+  "version": 1,
+  "closure_signature": "a55ff295bdecbb66033290ca7a60929db4ab70d9af8cdd9cd1d935e039926fc9",
+  "packages": {
+    "clap:4.5": {
+      "name": "clap",
+      "version": "4.5",
+      "ecosystem": "Cargo",
+      "sha256": "ac7441edf4f8af5e21341958b4f7b34c743d7dcdef35f681e29b5d4f8d07a070",
+      "source_url": null,
+      "dependencies": []
+    },
+    "dmz-core:path:./dmz-core": {
+      "name": "dmz-core",
+      "version": "path:./dmz-core",
+      "ecosystem": "Cargo",
+      "sha256": "8c68a66772bf439e36ef5aa71c33dd6817b8e4c7733bafdc4f3ee9e2d28cd6fd",
+      "source_url": null,
+      "dependencies": []
+    },
+    "dmz-sandbox:path:./dmz-sandbox": {
+      "name": "dmz-sandbox",
+      "version": "path:./dmz-sandbox",
+      "ecosystem": "Cargo",
+      "sha256": "6fa231afb1b5094a205bc593148c0ac338750ad728fa6768f9930782c63e3230",
+      "source_url": null,
+      "dependencies": []
+    },
+    "dmz-supervisor:path:./dmz-supervisor": {
+      "name": "dmz-supervisor",
+      "version": "path:./dmz-supervisor",
+      "ecosystem": "Cargo",
+      "sha256": "ebd714efd4add0d4cecf53bc3f5d9e23bfe91127470e9183d91c4b72f8879365",
+      "source_url": null,
+      "dependencies": []
+    },
+    "eframe:0.31": {
+      "name": "eframe",
+      "version": "0.31",
+      "ecosystem": "Cargo",
+      "sha256": "a5e1a87c49819461ff37c827e4e78333e6976001c401b4c089f98d473a20d379",
+      "source_url": null,
+      "dependencies": []
+    },
+    "flate2:1.0": {
+      "name": "flate2",
+      "version": "1.0",
+      "ecosystem": "Cargo",
+      "sha256": "4dd8321bc7ddef67aed321e713b11ef8470f12f1cb5093705ec37d5543eac927",
+      "source_url": null,
+      "dependencies": []
+    },
+    "git2:0.19": {
+      "name": "git2",
+      "version": "0.19",
+      "ecosystem": "Cargo",
+      "sha256": "955f830fc7a3e4c042233b7df21157324207ccf6222a604dd259b5d432a4cfe0",
+      "source_url": null,
+      "dependencies": []
+    },
+    "interprocess:2.0": {
+      "name": "interprocess",
+      "version": "2.0",
+      "ecosystem": "Cargo",
+      "sha256": "9b606e5f58f69b6a3b5ce50a53193153f03e8cd346e617e3296871a846569386",
+      "source_url": null,
+      "dependencies": []
+    },
+    "reqwest:0.12": {
+      "name": "reqwest",
+      "version": "0.12",
+      "ecosystem": "Cargo",
+      "sha256": "4768e7b3942a88ec3f254e19cc8a5960c44ceac2dc3e0d174107c9796b550d99",
+      "source_url": null,
+      "dependencies": []
+    },
+    "rfd:0.15": {
+      "name": "rfd",
+      "version": "0.15",
+      "ecosystem": "Cargo",
+      "sha256": "a132c5f56de56a16350f88595b6ba9212221de7c54094fbea4378461069079ca",
+      "source_url": null,
+      "dependencies": []
+    },
+    "serde:1.0": {
+      "name": "serde",
+      "version": "1.0",
+      "ecosystem": "Cargo",
+      "sha256": "3b82a30a6b1505fda5bbcabaf3d1aa40a4abd08fd37a3bf048d3b4691ce874eb",
+      "source_url": null,
+      "dependencies": []
+    },
+    "serde_json:1.0": {
+      "name": "serde_json",
+      "version": "1.0",
+      "ecosystem": "Cargo",
+      "sha256": "22f213e30aacae59e1024dddb43ebb566be6cc072636003c83f38efa39bbeeda",
+      "source_url": null,
+      "dependencies": []
+    },
+    "sha2:0.10": {
+      "name": "sha2",
+      "version": "0.10",
+      "ecosystem": "Cargo",
+      "sha256": "9f020c98dbfa671c3d90d170e594f8bf738e133fa72f02d80d99eabfd5c70ade",
+      "source_url": null,
+      "dependencies": []
+    },
+    "tar:0.4": {
+      "name": "tar",
+      "version": "0.4",
+      "ecosystem": "Cargo",
+      "sha256": "099dfe019b7dbda2d1e491cebdd0ed54b5ca6524321735ac2376ed38e08d6e09",
+      "source_url": null,
+      "dependencies": []
+    },
+    "tokio:1.38": {
+      "name": "tokio",
+      "version": "1.38",
+      "ecosystem": "Cargo",
+      "sha256": "3e69839c16ff4c3b702f97da009280cdbac3ea2ee7a41038123378df409aabf7",
+      "source_url": null,
+      "dependencies": []
+    },
+    "toml:0.8": {
+      "name": "toml",
+      "version": "0.8",
+      "ecosystem": "Cargo",
+      "sha256": "a74a344aedec5a7b54713be14b85f0281ee74597eb7bf0f1e9668f49de31b88d",
+      "source_url": null,
+      "dependencies": []
+    },
+    "tracing-subscriber:0.3": {
+      "name": "tracing-subscriber",
+      "version": "0.3",
+      "ecosystem": "Cargo",
+      "sha256": "63e02b644844b738466d23c9a0d8ec6a55c8f621f7a627b8ffac3a2428464810",
+      "source_url": null,
+      "dependencies": []
+    },
+    "tracing:0.1": {
+      "name": "tracing",
+      "version": "0.1",
+      "ecosystem": "Cargo",
+      "sha256": "fed9bf0314b89bec609a7700956ac145b41fc646762e543eeb2da0f4f0599f14",
+      "source_url": null,
+      "dependencies": []
+    },
+    "zstd:0.13": {
+      "name": "zstd",
+      "version": "0.13",
+      "ecosystem": "Cargo",
+      "sha256": "09cea35f175884e091bbfe45da8ff43ec8e2f4a588bf545e80b73b35e7f7abb3",
+      "source_url": null,
+      "dependencies": []
+    }
+  }
+}
