@@ -36,6 +36,7 @@ pub enum PlatformError {
     NamespaceError(String),
     SeatbeltError(String),
     JobObjectError(String),
+    WindowsError(String), // Added to match windows.rs
     ExecutionFailed(std::io::Error),
 }
 
@@ -45,6 +46,7 @@ impl std::fmt::Display for PlatformError {
             Self::NamespaceError(msg) => write!(f, "Linux Namespace Error: {}", msg),
             Self::SeatbeltError(msg) => write!(f, "macOS Seatbelt Error: {}", msg),
             Self::JobObjectError(msg) => write!(f, "Windows JobObject Error: {}", msg),
+            Self::WindowsError(msg) => write!(f, "Windows Error: {}", msg), // Added display match
             Self::ExecutionFailed(err) => write!(f, "Process Execution Failed: {}", err),
         }
     }
