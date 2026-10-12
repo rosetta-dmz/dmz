@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build-release:
     name: Build & Package (${{ matrix.target }})
@@ -30,6 +33,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Install Linux Musl Tools
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
 
       - name: Build Release Binary
         run: cargo build --release --package dmz-cli --target ${{ matrix.target }}
