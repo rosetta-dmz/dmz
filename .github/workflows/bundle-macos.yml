@@ -1,0 +1,87 @@
+name: Package macOS App Bundle
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    name: Build macOS App Bundle (.app & .icns)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Build dmz-gui release binary
+        run: cargo build --release -p dmz-gui
+
+      - name: Create .app directory structure
+        run: |
+          mkdir -p DMZ.app/Contents/MacOS
+          mkdir -p DMZ.app/Contents/Resources
+
+      - name: Copy compiled binary
+        run: |
+          cp target/release/dmz-gui DMZ.app/Contents/MacOS/dmz-gui
+          chmod +x DMZ.app/Contents/MacOS/dmz-gui
+
+      - name: Generate Apple .icns icon from PNG
+        run: |
+          mkdir -p icon.iconset
+          sips -z 16 16     assets/dmz-icon.png --out icon.iconset/icon_16x16.png
+          sips -z 32 32     assets/dmz-icon.png --out icon.iconset/icon_16x16@2x.png
+          sips -z 32 32     assets/dmz-icon.png --out icon.iconset/icon_32x32.png
+          sips -z 64 64     assets/dmz-icon.png --out icon.iconset/icon_32x32@2x.png
+          sips -z 128 128   assets/dmz-icon.png --out icon.iconset/icon_128x128.png
+          sips -z 256 256   assets/dmz-icon.png --out icon.iconset/icon_128x128@2x.png
+          sips -z 256 256   assets/dmz-icon.png --out icon.iconset/icon_256x256.png
+          sips -z 512 512   assets/dmz-icon.png --out icon.iconset/icon_256x256@2x.png
+          sips -z 512 512   assets/dmz-icon.png --out icon.iconset/icon_512x512.png
+          iconutil -c icns icon.iconset -o DMZ.app/Contents/Resources/AppIcon.icns
+          rm -rf icon.iconset
+
+      - name: Create Info.plist configuration
+        run: |
+          cat << 'EOF' > DMZ.app/Contents/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleName</key>
+              <string>DMZ</string>
+              <key>CFBundleDisplayName</key>
+              <string>DMZ</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.dmz.sandbox</string>
+              <key>CFBundleVersion</key>
+              <string>${{ github.event.release.tag_name || '1.0.3' }}</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleExecutable</key>
+              <string>dmz-gui</string>
+              <key>CFBundleIconFile</key>
+              <string>AppIcon.icns</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>10.13</string>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Compress app bundle into release zip
+        run: |
+          zip -r DMZ-macOS.zip DMZ.app
+
+      - name: Upload asset to GitHub Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: DMZ-macOS.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
