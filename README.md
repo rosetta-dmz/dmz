@@ -32,8 +32,7 @@ Yes, there's a desktop client and CLI because the dev community deserves better 
    ```
    chmod +x dmz-*
 
-DMZ's multi-ecosystem workflow
-automatically detects project ecosystems in your workspace root, handles offline resolution, and verifies builds securely:
+DMZ's multi-ecosystem workflow automatically detects project ecosystems in your workspace root, handles offline resolution, and verifies builds securely via:
 
 ```
 # Scan and discover active ecosystem stacks (Rust, Node, Go, Python, etc.)
