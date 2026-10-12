@@ -127,11 +127,11 @@ jobs:
 
       - name: Package Windows GUI
         if: matrix.os == 'windows-latest'
-        shell: bash
+        shell: pwsh
         run: |
-          mkdir -p dist-gui
-          cp target/release/dmz-gui.exe dist-gui/dmz-gui.exe
-          cd dist-gui && zip ../DMZ-GUI-Windows.zip dmz-gui.exe
+          New-Item -ItemType Directory -Force -Path dist-gui
+          Copy-Item target/release/dmz-gui.exe dist-gui/dmz-gui.exe
+          Compress-Archive -Path dist-gui/dmz-gui.exe -DestinationPath DMZ-GUI-Windows.zip -Force
 
       - name: Package Linux GUI
         if: matrix.os == 'ubuntu-latest'
