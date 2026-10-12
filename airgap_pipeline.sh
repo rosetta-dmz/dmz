@@ -12,6 +12,11 @@ echo "=================================================="
 dmz resolve
 
 echo "=================================================="
+echo "=== Discovering active ecosystem stacks ==="
+echo "=================================================="
+dmz ecosystem discover
+
+echo "=================================================="
 echo "=== Fetching and hashing offline dependencies ==="
 echo "=================================================="
 dmz fetch --store .dmz/store
@@ -29,17 +34,19 @@ echo "=================================================="
 mkdir -p airgap-test-env
 cd airgap-test-env
 
-# Import the archive (unpacks store and places source code into 'workspace/')
+# Import the archive (unpacks store, places source code into 'workspace/')
 dmz airgap import \
     --archive ../dist/workspace_closure.tar.zst \
     --store ./offline_store
 
 echo "=================================================="
-echo "=== Verifying offline compilation (Cargo Check) ==="
+echo "=== Verifying offline workspace via DMZ engine ==="
 echo "=================================================="
 cd workspace
-cargo check --offline
+
+# Execute engine-driven ecosystem verification (native)
+dmz ecosystem verify
 
 echo "=================================================="
-echo "End-to-end air-gap pipeline completed successfully!"
+echo "End-to-end multi-ecosystem air-gap pipeline completed!"
 echo "=================================================="

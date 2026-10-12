@@ -11,17 +11,59 @@ impl EcosystemHandler for RustEcosystem {
     fn resolution_command(&self) -> Option<CommandSpec> {
         Some(CommandSpec { program: "cargo".into(), args: vec!["fetch".into()] })
     }
+    fn verification_command(&self, _root: &Path) -> Option<CommandSpec> {
+        Some(CommandSpec { program: "cargo".into(), args: vec!["check".into(), "--offline".into()] })
+    }
 }
 
-pub struct NodeEcosystem;
-impl EcosystemHandler for NodeEcosystem {
-    fn name(&self) -> &str { "node" }
-    fn detect(&self, root: &Path) -> bool { root.join("package.json").exists() }
+pub struct PnpmEcosystem;
+impl EcosystemHandler for PnpmEcosystem {
+    fn name(&self) -> &str { "pnpm" }
+    fn detect(&self, root: &Path) -> bool {
+        root.join("package.json").exists() && root.join("pnpm-lock.yaml").exists()
+    }
+    fn cache_paths(&self, root: &Path) -> Vec<PathBuf> {
+        vec![root.join("node_modules"), root.join(".pnpm-store")]
+    }
+    fn resolution_command(&self) -> Option<CommandSpec> {
+        Some(CommandSpec { program: "pnpm".into(), args: vec!["install".into(), "--frozen-lockfile".into(), "--offline".into()] })
+    }
+    fn verification_command(&self, _root: &Path) -> Option<CommandSpec> {
+        Some(CommandSpec { program: "pnpm".into(), args: vec!["test".into(), "--offline".into()] })
+    }
+}
+
+pub struct YarnEcosystem;
+impl EcosystemHandler for YarnEcosystem {
+    fn name(&self) -> &str { "yarn" }
+    fn detect(&self, root: &Path) -> bool {
+        root.join("package.json").exists() && root.join("yarn.lock").exists() && !root.join("pnpm-lock.yaml").exists()
+    }
+    fn cache_paths(&self, root: &Path) -> Vec<PathBuf> {
+        vec![root.join("node_modules")]
+    }
+    fn resolution_command(&self) -> Option<CommandSpec> {
+        Some(CommandSpec { program: "yarn".into(), args: vec!["install".into(), "--frozen-lockfile".into(), "--offline".into()] })
+    }
+    fn verification_command(&self, _root: &Path) -> Option<CommandSpec> {
+        Some(CommandSpec { program: "yarn".into(), args: vec!["test".into()] })
+    }
+}
+
+pub struct NpmEcosystem;
+impl EcosystemHandler for NpmEcosystem {
+    fn name(&self) -> &str { "npm" }
+    fn detect(&self, root: &Path) -> bool {
+        root.join("package.json").exists() && !root.join("pnpm-lock.yaml").exists() && !root.join("yarn.lock").exists()
+    }
     fn cache_paths(&self, root: &Path) -> Vec<PathBuf> {
         vec![root.join("node_modules")]
     }
     fn resolution_command(&self) -> Option<CommandSpec> {
         Some(CommandSpec { program: "npm".into(), args: vec!["ci".into()] })
+    }
+    fn verification_command(&self, _root: &Path) -> Option<CommandSpec> {
+        Some(CommandSpec { program: "npm".into(), args: vec!["test".into(), "--no-audit".into()] })
     }
 }
 
@@ -34,6 +76,9 @@ impl EcosystemHandler for GoEcosystem {
     }
     fn resolution_command(&self) -> Option<CommandSpec> {
         Some(CommandSpec { program: "go".into(), args: vec!["mod".into(), "download".into()] })
+    }
+    fn verification_command(&self, _root: &Path) -> Option<CommandSpec> {
+        Some(CommandSpec { program: "go".into(), args: vec!["build".into(), "-mod=readonly".into(), "./...".into()] })
     }
 }
 
@@ -48,5 +93,8 @@ impl EcosystemHandler for PythonEcosystem {
     }
     fn resolution_command(&self) -> Option<CommandSpec> {
         Some(CommandSpec { program: "pip".into(), args: vec!["install".into(), "--no-deps".into(), "-r".into(), "requirements.txt".into()] })
+    }
+    fn verification_command(&self, _root: &Path) -> Option<CommandSpec> {
+        Some(CommandSpec { program: "python3".into(), args: vec!["-m".into(), "py_compile".into(), ".".into()] })
     }
 }

@@ -12,11 +12,11 @@ Yes, there's a desktop client and CLI because the dev community deserves better 
 
 ## Features
 
-* **Zero Host Dependencies:** Ships as a single self-contained binary embedding `libgit2` for deterministic repository cloning and offline management.
-* **Air-Gap Capable:** Pack, cryptographically verify, and extract complete `.tar.zst` dependency closures for completely offline environments.
-* **Network Proxy Whitelisting:** Enforces strict domain whitelists for AI agent outbound network calls.
-* **Supervisor & IPC Sockets:** Manages collateral stack services (e.g., databases) and exposes local API sockets for IDE integrations (VS Code, JetBrains).
-* **Granular Pinning & Telemetry:** Precise version control and low-overhead resource monitoring via an intuitive GUI control center.
+- **Multi-Ecosystem Support:** Native discovery, dependency resolution, and sandbox verification for Rust (`Cargo.toml`), Node.js (`pnpm`, `yarn`, `npm`), Go (`go.mod`), and Python (`pyproject.toml`, `requirements.txt`).
+- **Zero Host Dependencies:** Ships as a single self-contained binary embedding deterministic package handling for offline management.
+- **Air-Gap Capable:** Pack, cryptographically verify, and extract complete `.tar.zst` dependency closures for completely offline environments.
+- **Engine-Driven Verification:** Programmatically validates imported workspaces using native ecosystem rules via `dmz ecosystem verify`.
+- **Supervisor & IPC Sockets:** Manages collateral stack services and exposes local API sockets for tool and IDE integrations.
 
 ---
 
@@ -27,22 +27,41 @@ Yes, there's a desktop client and CLI because the dev community deserves better 
    * **Linux (`musl`):** `dmz-x86_64-unknown-linux-musl`
    * **macOS (Apple Silicon):** `dmz-aarch64-apple-darwin`
    * **Windows:** `dmz-x86_64-pc-windows-msvc.exe`
-3. Make the binary executable (Linux/MacOS):
-   ```bash
+3. Make the binary executable (Linux/macOS):
+
+   ```
    chmod +x dmz-*
 
----
-
-## Air-Gap Import Usage
-
-To verify and unpack an isolated closure archive offline:
+DMZ's multi-ecosystem workflow
+automatically detects project ecosystems in your workspace root, handles offline resolution, and verifies builds securely:
 
 ```
-Bash
-dmz import --archive closure.tar.zst --sha256 <expected_sha256_hash> --target /path/to/workspace
+# Scan and discover active ecosystem stacks (Rust, Node, Go, Python, etc.)
+dmz ecosystem discover
+
+# Resolve workspace dependency closures into a deterministic lockfile
+dmz resolve
+
+# Fetch and cache locked dependencies into your secure local store
+dmz fetch --store .dmz/store
+
+# Verify workspace integrity using native engine rules
+dmz ecosystem verify
 ```
 
----
+## Air-Gap Import & Pipeline Usage
+
+To unpack and verify an isolated closure archive offline:
+
+```
+dmz airgap import --archive dist/workspace_closure.tar.zst --store ./offline_store
+```
+
+To run the complete end-to-end multi-ecosystem air-gap pipeline script:
+
+```
+./airgap_pipeline.sh
+```
 
 ## License
 

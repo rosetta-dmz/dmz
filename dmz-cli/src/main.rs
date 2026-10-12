@@ -123,6 +123,12 @@ enum EcosystemAction {
         #[arg(short, long, default_value = ".")]
         workspace: PathBuf,
     },
+    /// Verify active ecosystems using native engine rules
+    Verify {
+        /// Path to workspace root directory
+        #[arg(short, long, default_value = ".")]
+        workspace: PathBuf,
+    },
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -406,6 +412,33 @@ fn main() {
                         exit(1);
                     }
                 }
+            }
+            EcosystemAction::Verify { workspace } => {
+                info!("Verifying workspace ecosystems at {:?}", workspace);
+                let registry = EcosystemRegistry::new();
+                let active = registry.discover_active(&workspace);
+                for eco in active {
+                    if let Some(cmd) = eco.verification_command(&workspace) {
+                        info!("Running verification for '{}': {} {}", eco.name(), cmd.program, cmd.args.join(" "));
+                        match std::process::Command::new(&cmd.program)
+                            .args(&cmd.args)
+                            .current_dir(&workspace)
+                            .status()
+                        {
+                            Ok(status) => {
+                                if !status.success() {
+                                    error!("Ecosystem verification failed for '{}'", eco.name());
+                                    exit(1);
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to execute verification command for '{}': {}", eco.name(), e);
+                                exit(1);
+                            }
+                        }
+                    }
+                }
+                info!("All ecosystem verifications passed successfully!");
             }
         },
     }

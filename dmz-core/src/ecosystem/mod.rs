@@ -3,7 +3,8 @@ pub mod handlers;
 use std::path::{Path, PathBuf};
 use anyhow::Result;
 
-/// Represents a standardized command configuration for delegated resolution.
+/// Represents a standardized command configuration for delegated resolution and verification.
+#[derive(Debug, Clone)]
 pub struct CommandSpec {
     pub program: String,
     pub args: Vec<String>,
@@ -11,7 +12,7 @@ pub struct CommandSpec {
 
 /// The core trait defining a pluggable workspace ecosystem handler.
 pub trait EcosystemHandler: Send + Sync {
-    /// Unique identifier for the ecosystem (e.g., "rust", "node", "go", "python")
+    /// Unique identifier for the ecosystem (e.g., "rust", "pnpm", "yarn", "npm", "go", "python")
     fn name(&self) -> &str;
 
     /// Automatically detects if this ecosystem is present in the workspace root.
@@ -22,6 +23,9 @@ pub trait EcosystemHandler: Send + Sync {
 
     /// Returns the optional default command to resolve/fetch dependencies offline.
     fn resolution_command(&self) -> Option<CommandSpec>;
+
+    /// Returns the native command spec to verify workspace integrity/offline build.
+    fn verification_command(&self, workspace_root: &Path) -> Option<CommandSpec>;
 }
 
 /// Registry that aggregates and orchestrates all ecosystem handlers.
@@ -34,7 +38,9 @@ impl EcosystemRegistry {
         Self {
             handlers: vec![
                 Box::new(handlers::RustEcosystem),
-                Box::new(handlers::NodeEcosystem),
+                Box::new(handlers::PnpmEcosystem),
+                Box::new(handlers::YarnEcosystem),
+                Box::new(handlers::NpmEcosystem),
                 Box::new(handlers::GoEcosystem),
                 Box::new(handlers::PythonEcosystem),
             ],
