@@ -90,7 +90,7 @@ impl IpcServer {
         Ok(())
     }
 
-    #[cfg(windows)]
+#[cfg(windows)]
     async fn listen_windows(&self) -> Result<(), String> {
         use tokio::net::windows::named_pipe::ServerOptions;
 
@@ -100,7 +100,7 @@ impl IpcServer {
         while self.is_running.load(Ordering::SeqCst) {
             let server = ServerOptions::new()
                 .first_pipe_instance(true)
-                .create(&pipe_name)
+                .create(&*pipe_name)
                 .map_err(|e| format!("Failed to create Windows Named Pipe: {}", e))?;
 
             match server.connect().await {
