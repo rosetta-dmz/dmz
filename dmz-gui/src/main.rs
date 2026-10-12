@@ -23,20 +23,18 @@ fn main() -> eframe::Result<()> {
     // macOS handles app icons natively via the .app bundle (Info.plist -> AppIcon.icns).
     // Window-level icons are used primarily for Windows and Linux.
     #[cfg(not(target_os = "macos"))]
-    {
-        let icon_data = {
-            let image = image::load_from_memory(include_bytes!("../../assets/dmz-icon.png"))
-                .expect("Failed to load dmz-icon.png from workspace root assets directory")
-                .into_rgba8();
-            let (width, height) = image.dimensions();
-            egui::IconData {
-                rgba: image.into_raw(),
-                width,
-                height,
-            }
+    let viewport_builder = {
+        let image = image::load_from_memory(include_bytes!("../../assets/dmz-icon.png"))
+            .expect("Failed to load dmz-icon.png from workspace root assets directory")
+            .into_rgba8();
+        let (width, height) = image.dimensions();
+        let icon_data = egui::IconData {
+            rgba: image.into_raw(),
+            width,
+            height,
         };
-        viewport_builder = viewport_builder.with_icon(std::sync::Arc::new(icon_data));
-    }
+        viewport_builder.with_icon(std::sync::Arc::new(icon_data))
+    };
 
     let options = eframe::NativeOptions {
         viewport: viewport_builder,
