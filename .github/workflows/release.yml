@@ -10,20 +10,17 @@ permissions:
 
 jobs:
   build-cli:
-    name: Build & Package CLI (${{ matrix.target }})
+    name: Build CLI (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            binary_name: dmz
           - os: macos-latest
             target: aarch64-apple-darwin
-            binary_name: dmz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            binary_name: dmz.exe
 
     steps:
       - name: Checkout Repository
@@ -43,7 +40,7 @@ jobs:
       - name: Build Release Binary
         run: cargo build --release --package dmz-cli --target ${{ matrix.target }}
 
-      - name: Package Artifact
+      - name: Package CLI Artifact
         shell: bash
         run: |
           mkdir -p dist
@@ -54,26 +51,24 @@ jobs:
             chmod +x dist/dmz-${{ matrix.target }}
           fi
 
-      - name: Upload CLI Release Artifact
-        uses: softprops/action-gh-release@v1
+      - name: Upload CLI Artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: dist/*
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: cli-${{ matrix.target }}
+          path: dist/*
 
   build-gui:
-    name: Build & Package GUI (${{ matrix.os }})
+    name: Build GUI (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
-            asset_name: DMZ-GUI-Linux.tar.gz
+            artifact_name: DMZ-GUI-Linux.tar.gz
           - os: macos-latest
-            asset_name: DMZ-GUI-macOS.zip
+            artifact_name: DMZ-GUI-macOS.zip
           - os: windows-latest
-            asset_name: DMZ-GUI-Windows.zip
+            artifact_name: DMZ-GUI-Windows.zip
 
     steps:
       - name: Checkout Repository
@@ -82,28 +77,25 @@ jobs:
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build GUI Release Binary
+      - name: Build GUI Binary
         run: cargo build --release --package dmz-gui
 
       - name: Package macOS App Bundle
         if: matrix.os == 'macos-latest'
         run: |
-          mkdir -p DMZ.app/Contents/MacOS
-          mkdir -p DMZ.app/Contents/Resources
+          mkdir -p DMZ.app/Contents/MacOS DMZ.app/Contents/Resources
           cp target/release/dmz-gui DMZ.app/Contents/MacOS/dmz-gui
           chmod +x DMZ.app/Contents/MacOS/dmz-gui
 
-          # Generate Apple Icon (.icns)
           mkdir -p icon.iconset
           sips -z 16 16     assets/dmz-icon.png --out icon.iconset/icon_16x16.png || true
           sips -z 32 32     assets/dmz-icon.png --out icon.iconset/icon_32x32.png || true
           sips -z 128 128   assets/dmz-icon.png --out icon.iconset/icon_128x128.png || true
-          sips -z 256 256   assets/dmz-icon.png --out icon.iconset/icon_256x256.png || true
+          sips -z 256 256   assets/dmz-icon.png --out icon.iconset/icon_128x128.png || true
           sips -z 512 512   assets/dmz-icon.png --out icon.iconset/icon_512x512.png || true
           iconutil -c icns icon.iconset -o DMZ.app/Contents/Resources/AppIcon.icns || true
           rm -rf icon.iconset
 
-          # Create Info.plist
           cat << 'EOF' > DMZ.app/Contents/Info.plist
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -133,7 +125,7 @@ jobs:
 
           zip -r DMZ-GUI-macOS.zip DMZ.app
 
-      - name: Package Windows Binary
+      - name: Package Windows GUI
         if: matrix.os == 'windows-latest'
         shell: bash
         run: |
@@ -141,7 +133,7 @@ jobs:
           cp target/release/dmz-gui.exe dist-gui/dmz-gui.exe
           cd dist-gui && zip ../DMZ-GUI-Windows.zip dmz-gui.exe
 
-      - name: Package Linux Binary
+      - name: Package Linux GUI
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
@@ -150,9 +142,30 @@ jobs:
           chmod +x dist-gui/dmz-gui
           tar -czvf DMZ-GUI-Linux.tar.gz -C dist-gui dmz-gui
 
-      - name: Upload GUI Release Artifact
-        uses: softprops/action-gh-release@v1
+      - name: Upload GUI Artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: ${{ matrix.asset_name }}
+          name: gui-${{ matrix.os }}
+          path: ${{ matrix.artifact_name }}
+
+  release:
+    name: Publish GitHub Release
+    needs: [build-cli, build-gui]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: final-release-assets
+          merge-multiple: true
+
+      - name: Publish Release & Upload Assets
+        uses: softprops/action-gh-release@v3
+        with:
+          files: final-release-assets/*
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
