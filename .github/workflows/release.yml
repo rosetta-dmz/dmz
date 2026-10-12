@@ -123,6 +123,8 @@ jobs:
           </plist>
           EOF
 
+          codesign --force --deep -s - DMZ.app
+
           zip -r DMZ-GUI-macOS.zip DMZ.app
 
       - name: Package Windows GUI
