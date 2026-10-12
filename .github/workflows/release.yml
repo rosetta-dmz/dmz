@@ -9,8 +9,8 @@ permissions:
   contents: write
 
 jobs:
-  build-release:
-    name: Build & Package (${{ matrix.target }})
+  build-cli:
+    name: Build & Package CLI (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -54,9 +54,105 @@ jobs:
             chmod +x dist/dmz-${{ matrix.target }}
           fi
 
-      - name: Upload Release Artifact
+      - name: Upload CLI Release Artifact
         uses: softprops/action-gh-release@v1
         with:
           files: dist/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-gui:
+    name: Build & Package GUI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset_name: DMZ-GUI-Linux.tar.gz
+          - os: macos-latest
+            asset_name: DMZ-GUI-macOS.zip
+          - os: windows-latest
+            asset_name: DMZ-GUI-Windows.zip
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build GUI Release Binary
+        run: cargo build --release --package dmz-gui
+
+      - name: Package macOS App Bundle
+        if: matrix.os == 'macos-latest'
+        run: |
+          mkdir -p DMZ.app/Contents/MacOS
+          mkdir -p DMZ.app/Contents/Resources
+          cp target/release/dmz-gui DMZ.app/Contents/MacOS/dmz-gui
+          chmod +x DMZ.app/Contents/MacOS/dmz-gui
+
+          # Generate Apple Icon (.icns)
+          mkdir -p icon.iconset
+          sips -z 16 16     assets/dmz-icon.png --out icon.iconset/icon_16x16.png || true
+          sips -z 32 32     assets/dmz-icon.png --out icon.iconset/icon_32x32.png || true
+          sips -z 128 128   assets/dmz-icon.png --out icon.iconset/icon_128x128.png || true
+          sips -z 256 256   assets/dmz-icon.png --out icon.iconset/icon_256x256.png || true
+          sips -z 512 512   assets/dmz-icon.png --out icon.iconset/icon_512x512.png || true
+          iconutil -c icns icon.iconset -o DMZ.app/Contents/Resources/AppIcon.icns || true
+          rm -rf icon.iconset
+
+          # Create Info.plist
+          cat << 'EOF' > DMZ.app/Contents/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleName</key>
+              <string>DMZ</string>
+              <key>CFBundleDisplayName</key>
+              <string>DMZ</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.dmz.sandbox</string>
+              <key>CFBundleVersion</key>
+              <string>${{ github.ref_name }}</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleExecutable</key>
+              <string>dmz-gui</string>
+              <key>CFBundleIconFile</key>
+              <string>AppIcon.icns</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>10.13</string>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+
+          zip -r DMZ-GUI-macOS.zip DMZ.app
+
+      - name: Package Windows Binary
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          mkdir -p dist-gui
+          cp target/release/dmz-gui.exe dist-gui/dmz-gui.exe
+          cd dist-gui && zip ../DMZ-GUI-Windows.zip dmz-gui.exe
+
+      - name: Package Linux Binary
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          mkdir -p dist-gui
+          cp target/release/dmz-gui dist-gui/dmz-gui
+          chmod +x dist-gui/dmz-gui
+          tar -czvf DMZ-GUI-Linux.tar.gz -C dist-gui dmz-gui
+
+      - name: Upload GUI Release Artifact
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ matrix.asset_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
