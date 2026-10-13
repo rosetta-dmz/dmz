@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
+use std::fs;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ecosystem {
@@ -62,11 +62,9 @@ impl ManifestScanner {
             let content = fs::read_to_string(&cargo_path)
                 .map_err(|e| ManifestError::IoError(format!("Failed to read root Cargo.toml: {}", e)))?;
             
-            // Use native toml::Value instead of serde_json::Value
             let root_val: toml::Value = toml::from_str(&content)
                 .map_err(|e| ManifestError::ParseError(format!("Invalid root Cargo.toml: {}", e)))?;
 
-            // 1. Extract workspace dependencies table from [workspace.dependencies]
             let mut workspace_deps = HashMap::new();
             if let Some(ws_deps) = root_val.get("workspace")
                 .and_then(|w| w.get("dependencies"))
@@ -77,7 +75,6 @@ impl ManifestScanner {
                 }
             }
 
-            // 2. Parse root dependencies if present under [dependencies]
             let root_deps = Self::extract_dependencies(root_val.get("dependencies"), &workspace_deps);
             if !root_deps.is_empty() {
                 results.push(ManifestInfo {
@@ -87,7 +84,6 @@ impl ManifestScanner {
                 });
             }
 
-            // 3. Extract workspace members and scan them recursively
             if let Some(members) = root_val.get("workspace")
                 .and_then(|w| w.get("members"))
                 .and_then(|m| m.as_array()) 
@@ -117,7 +113,6 @@ impl ManifestScanner {
             }
         }
 
-        // 4. package.json and requirements.txt checks...
         let package_json_path = root_path.join("package.json");
         if package_json_path.exists() {
             results.extend(Self::parse_package_json(&package_json_path)?);
@@ -131,7 +126,6 @@ impl ManifestScanner {
         Ok(results)
     }
 
-    // Helper to extract dependencies and handle `workspace = true` inheritance using toml::Value
     fn extract_dependencies(
         deps_value: Option<&toml::Value>,
         workspace_deps: &HashMap<String, toml::Value>,
@@ -145,7 +139,6 @@ impl ManifestScanner {
         for (name, val) in deps_table {
             let mut resolved_val = val;
 
-            // Check if dependency uses workspace inheritance: e.g., tokio = { workspace = true }
             if let Some(map) = val.as_table() {
                 if map.get("workspace").and_then(|w| w.as_bool()) == Some(true) {
                     if let Some(ws_val) = workspace_deps.get(name) {
@@ -180,6 +173,29 @@ impl ManifestScanner {
         dependencies
     }
 
+    fn sanitize_npm_version(raw: &str) -> String {
+        let trimmed = raw.trim();
+        if trimmed.starts_with("file:") || trimmed.starts_with("workspace:") || trimmed.starts_with("link:") || trimmed.starts_with("git+") {
+            return trimmed.to_string();
+        }
+
+        let cleaned = trimmed
+            .trim_start_matches('^')
+            .trim_start_matches('~')
+            .trim_start_matches(">=")
+            .trim_start_matches("<=")
+            .trim_start_matches('>')
+            .trim_start_matches('<')
+            .trim_start_matches('=')
+            .trim();
+
+        if cleaned.is_empty() || cleaned == "*" {
+            "*".to_string()
+        } else {
+            cleaned.to_string()
+        }
+    }
+
     fn parse_package_json(path: &Path) -> Result<Vec<ManifestInfo>, ManifestError> {
         let mut results = Vec::new();
         let content = fs::read_to_string(path)
@@ -192,7 +208,8 @@ impl ManifestScanner {
 
         if let Some(deps) = value.get("dependencies").and_then(|d| d.as_object()) {
             for (name, val) in deps {
-                let ver = val.as_str().unwrap_or("*").to_string();
+                let raw_ver = val.as_str().unwrap_or("*");
+                let ver = Self::sanitize_npm_version(raw_ver);
                 dependencies.push(DependencySpec {
                     name: name.clone(),
                     version_req: ver,
@@ -204,7 +221,8 @@ impl ManifestScanner {
 
         if let Some(dev_deps) = value.get("devDependencies").and_then(|d| d.as_object()) {
             for (name, val) in dev_deps {
-                let ver = val.as_str().unwrap_or("*").to_string();
+                let raw_ver = val.as_str().unwrap_or("*");
+                let ver = Self::sanitize_npm_version(raw_ver);
                 dependencies.push(DependencySpec {
                     name: name.clone(),
                     version_req: ver,
@@ -221,7 +239,6 @@ impl ManifestScanner {
             dependencies,
         });
 
-        // --- WORKSPACE AWARENESS FOR NPM/YARN/PNPM ---
         let workspaces_array = value.get("workspaces")
             .and_then(|w| w.as_array())
             .or_else(|| value.get("workspaces").and_then(|w| w.get("packages")).and_then(|p| p.as_array()));
@@ -263,13 +280,16 @@ impl ManifestScanner {
                 continue;
             }
 
-            let parts: Vec<&str> = line.split("==").collect();
-            let name = parts[0].trim().to_string();
-            let version_req = if parts.len() > 1 {
-                parts[1].trim().to_string()
-            } else {
-                "*".to_string()
-            };
+            let mut name = line.to_string();
+            let mut version_req = "*".to_string();
+
+            for op in &["==", ">=", "<=", "~=", ">", "<", "!="] {
+                if let Some(idx) = line.find(op) {
+                    name = line[..idx].trim().to_string();
+                    version_req = line[idx + op.len()..].trim().to_string();
+                    break;
+                }
+            }
 
             dependencies.push(DependencySpec {
                 name,

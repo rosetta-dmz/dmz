@@ -120,14 +120,17 @@ impl AirGapExporter {
         let mut packed_count = 0;
         if config.mode == ExportMode::Unified || config.mode == ExportMode::DepsOnly {
             for (_pkg_key, pkg_info) in &lockfile.packages {
-                // Skip local path dependencies/workspace members since they are in the workspace source
+                // Skip local path dependencies/workspace members since they are in the workspace source[cite: 14]
                 if pkg_info.version.starts_with("path:") || pkg_info.version.contains("path") {
                     continue;
                 }
 
-                let pkg_store_path = config.store_dir.join(&pkg_info.name); // Use pkg_info.name to match store directory layout
+                // --- USE SAFE FLATTENED NAME FOR SCOPED PACKAGES ---
+                let safe_pkg_name = pkg_info.name.replace('/', "__");
+
+                let pkg_store_path = config.store_dir.join(&safe_pkg_name);
                 if pkg_store_path.exists() {
-                    let archive_dest = Path::new("store").join(&pkg_info.name);
+                    let archive_dest = Path::new("store").join(&safe_pkg_name);
                     if pkg_store_path.is_dir() {
                         Self::append_dir_all(&mut tar_builder, &pkg_store_path, &archive_dest)?;
                     } else {

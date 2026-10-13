@@ -117,7 +117,9 @@ impl ResolverEngine {
                 }
             }
 
-            let pkg_dir = store_path.join(&pkg.name);
+            let safe_pkg_name = pkg.name.replace('/', "__");
+
+            let pkg_dir = store_path.join(&safe_pkg_name);
             std::fs::create_dir_all(&pkg_dir)
                 .map_err(|e| format!("Failed to create package directory: {}", e))?;
 
@@ -129,10 +131,53 @@ impl ResolverEngine {
                             "https://static.crates.io/crates/{}/{}-{}.crate",
                             pkg.name, pkg.name, concrete_version
                         ),
-                        "npm" | "node" => format!(
-                            "https://registry.npmjs.org/{}/-/{}-{}.tgz",
-                            pkg.name, pkg.name, concrete_version
-                        ),
+                        "npm" | "node" => {
+                            let encoded_name = pkg.name.replace('/', "%2F");
+                            let meta_url = format!("https://registry.npmjs.org/{}", encoded_name);
+                            let mut resolved_tarball = String::new();
+
+                            if let Ok(resp) = client.get(&meta_url).send() {
+                                if resp.status().is_success() {
+                                    if let Ok(text) = resp.text() {
+                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                            if let Some(tarball) = json.get("versions")
+                                                .and_then(|v| v.get(&concrete_version))
+                                                .and_then(|ver| ver.get("dist"))
+                                                .and_then(|d| d.get("tarball"))
+                                                .and_then(|t| t.as_str()) 
+                                            {
+                                                resolved_tarball = tarball.to_string();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if resolved_tarball.is_empty() {
+                                if pkg.name.starts_with('@') {
+                                    if let Some(idx) = pkg.name.find('/') {
+                                        let scope = &pkg.name[..idx];
+                                        let short_name = &pkg.name[idx + 1..];
+                                        format!(
+                                            "https://registry.npmjs.org/{}%2F{}/-/{}-{}.tgz",
+                                            scope, short_name, short_name, concrete_version
+                                        )
+                                    } else {
+                                        format!(
+                                            "https://registry.npmjs.org/{}/-/{}-{}.tgz",
+                                            pkg.name, pkg.name, concrete_version
+                                        )
+                                    }
+                                } else {
+                                    format!(
+                                        "https://registry.npmjs.org/{}/-/{}-{}.tgz",
+                                        pkg.name, pkg.name, concrete_version
+                                    )
+                                }
+                            } else {
+                                resolved_tarball
+                            }
+                        }
                         _ => {
                             info!(name = %pkg.name, ecosystem = %eco_str, "No source URL and unknown ecosystem, skipping download");
                             continue;
@@ -162,11 +207,10 @@ impl ResolverEngine {
             hasher.update(&bytes);
             let computed_hash = format!("{:x}", hasher.finalize());
 
-            // --- UPDATE WITH THE REAL COMPUTED HASH ---
             let mut updated_pkg = pkg.clone();
             updated_pkg.sha256 = computed_hash.clone();
 
-            let artifact_filename = format!("{}-{}.archive", pkg.name, concrete_version);
+            let artifact_filename = format!("{}-{}.archive", safe_pkg_name, concrete_version);
             let artifact_path = pkg_dir.join(artifact_filename);
             std::fs::write(&artifact_path, &bytes)
                 .map_err(|e| format!("Failed to write artifact file for {}: {}", pkg.name, e))?;
