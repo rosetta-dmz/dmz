@@ -32,6 +32,20 @@ Yes, there's a desktop client and CLI because the dev community deserves better 
    ```
    chmod +x dmz-*
 
+### MacOS GUI Quick Install Note:
+
+Apple designed modern macOS (from Catalina through Sequoia and beyond) to hard-block any application downloaded from the web unless it's notarized by Apple with a Developer ID. You can bypass using the quick install command here:
+
+```
+curl -sSL [https://raw.githubusercontent.com/rosetta-dmz/dmz/main/install-gui.sh](https://raw.githubusercontent.com/rosetta-dmz/dmz/main/install-gui.sh) | bash
+```
+
+Inside install-gui.sh, the script downloads the tarball/zip, extracts it into /Applications, and automatically runs:
+
+```
+xattr -cr /Applications/DMZ.app
+```
+
 DMZ's multi-ecosystem workflow automatically detects project ecosystems in your workspace root, handles offline resolution, and verifies builds securely via:
 
 ```
