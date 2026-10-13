@@ -133,3 +133,55 @@ fn test_mixed_cargo_workspace_and_paths() {
     assert!(lockfile.packages.contains_key("tokio:1.38"));
     assert!(lockfile.packages.contains_key("serde:1.0"));
 }
+
+#[test]
+fn test_version_range_sanitization_and_operators() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+
+    // 1. Create a package.json with semver ranges (^ and ~)
+    let root_pkg = r#"{
+        "name": "sanitization-test",
+        "dependencies": {
+            "react": "^18.2.0",
+            "lodash": "~4.17.21"
+        }
+    }"#;
+    fs::write(root.join("package.json"), root_pkg).unwrap();
+
+    // 2. Create requirements.txt with various comparison operators (>=, ~=, ==)
+    let reqs = r#"
+        requests >= 2.28.0
+        flask ~= 2.2.0
+        numpy == 1.24.3
+    "#;
+    fs::write(root.join("requirements.txt"), reqs).unwrap();
+
+    // 3. Resolve workspace
+    let lockfile_result = ResolverEngine::resolve_workspace(root);
+    assert!(lockfile_result.is_ok(), "Resolver failed on semver range sanitization test");
+
+    let lockfile = lockfile_result.unwrap();
+
+    // 4. Verify version requirements are clean and range/comparison symbols are stripped
+    assert!(
+        lockfile.packages.contains_key("react:18.2.0"),
+        "Caret symbol '^' should be stripped from react:^18.2.0, expected react:18.2.0"
+    );
+    assert!(
+        lockfile.packages.contains_key("lodash:4.17.21"),
+        "Tilde symbol '~' should be stripped from lodash:~4.17.21, expected lodash:4.17.21"
+    );
+    assert!(
+        lockfile.packages.contains_key("requests:2.28.0"),
+        "Operator '>=' should be parsed out from requests>=2.28.0, expected requests:2.28.0"
+    );
+    assert!(
+        lockfile.packages.contains_key("flask:2.2.0"),
+        "Operator '~=' should be parsed out from flask~=2.2.0, expected flask:2.2.0"
+    );
+    assert!(
+        lockfile.packages.contains_key("numpy:1.24.3"),
+        "Operator '==' should be parsed out from numpy==1.24.3, expected numpy:1.24.3"
+    );
+}

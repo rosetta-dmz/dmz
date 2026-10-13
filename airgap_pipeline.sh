@@ -22,11 +22,17 @@ echo "=================================================="
 dmz fetch --store .dmz/store
 
 echo "=================================================="
+echo "=== Building unified package artifacts ==="
+echo "=================================================="
+dmz build --target unified --output dist --name workspace_closure
+
+echo "=================================================="
 echo "=== Exporting the air-gap bundle (Unified) ==="
 echo "=================================================="
 dmz airgap export \
     --output dist/workspace_closure.tar.zst \
-    --store .dmz/store
+    --store .dmz/store \
+    --mode unified
 
 echo "=================================================="
 echo "=== Simulating isolated air-gap import ==="
@@ -44,7 +50,7 @@ echo "=== Verifying offline workspace via DMZ engine ==="
 echo "=================================================="
 cd workspace
 
-# Execute engine-driven ecosystem verification (native)
+# Execute engine-driven ecosystem verification natively
 dmz ecosystem verify
 
 echo "=================================================="
