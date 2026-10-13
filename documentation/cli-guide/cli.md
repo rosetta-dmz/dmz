@@ -1,4 +1,3 @@
-```markdown
 # DMZ Command-Line Interface (CLI) Guide
 
 DMZ provides a robust, self-contained CLI for orchestrating zero-dependency sandboxes, managing supervisor services, and executing air-gap closure transfers[cite: 2].
