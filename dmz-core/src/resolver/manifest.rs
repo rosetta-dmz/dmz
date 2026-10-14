@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::fs;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ecosystem {
@@ -63,23 +63,27 @@ impl ManifestScanner {
 
         let cargo_path = root_path.join("Cargo.toml");
         if cargo_path.exists() {
-            let content = fs::read_to_string(&cargo_path)
-                .map_err(|e| ManifestError::IoError(format!("Failed to read root Cargo.toml: {}", e)))?;
-            
-            let root_val: toml::Value = toml::from_str(&content)
-                .map_err(|e| ManifestError::ParseError(format!("Invalid root Cargo.toml: {}", e)))?;
+            let content = fs::read_to_string(&cargo_path).map_err(|e| {
+                ManifestError::IoError(format!("Failed to read root Cargo.toml: {}", e))
+            })?;
+
+            let root_val: toml::Value = toml::from_str(&content).map_err(|e| {
+                ManifestError::ParseError(format!("Invalid root Cargo.toml: {}", e))
+            })?;
 
             let mut workspace_deps = HashMap::new();
-            if let Some(ws_deps) = root_val.get("workspace")
+            if let Some(ws_deps) = root_val
+                .get("workspace")
                 .and_then(|w| w.get("dependencies"))
-                .and_then(|d| d.as_table()) 
+                .and_then(|d| d.as_table())
             {
                 for (name, val) in ws_deps {
                     workspace_deps.insert(name.clone(), val.clone());
                 }
             }
 
-            let root_deps = Self::extract_dependencies(root_val.get("dependencies"), &workspace_deps);
+            let root_deps =
+                Self::extract_dependencies(root_val.get("dependencies"), &workspace_deps);
             if !root_deps.is_empty() {
                 results.push(ManifestInfo {
                     ecosystem: Ecosystem::Cargo,
@@ -88,22 +92,36 @@ impl ManifestScanner {
                 });
             }
 
-            if let Some(members) = root_val.get("workspace")
+            if let Some(members) = root_val
+                .get("workspace")
                 .and_then(|w| w.get("members"))
-                .and_then(|m| m.as_array()) 
+                .and_then(|m| m.as_array())
             {
                 for member in members {
                     if let Some(member_str) = member.as_str() {
                         let member_cargo_path = root_path.join(member_str).join("Cargo.toml");
                         if member_cargo_path.exists() {
-                            let member_content = fs::read_to_string(&member_cargo_path)
-                                .map_err(|e| ManifestError::IoError(format!("Failed to read member Cargo.toml: {}", e)))?;
-                            
-                            let member_val: toml::Value = toml::from_str(&member_content)
-                                .map_err(|e| ManifestError::ParseError(format!("Invalid member Cargo.toml: {}", e)))?;
+                            let member_content =
+                                fs::read_to_string(&member_cargo_path).map_err(|e| {
+                                    ManifestError::IoError(format!(
+                                        "Failed to read member Cargo.toml: {}",
+                                        e
+                                    ))
+                                })?;
 
-                            let member_deps = Self::extract_dependencies(member_val.get("dependencies"), &workspace_deps);
-                            
+                            let member_val: toml::Value =
+                                toml::from_str(&member_content).map_err(|e| {
+                                    ManifestError::ParseError(format!(
+                                        "Invalid member Cargo.toml: {}",
+                                        e
+                                    ))
+                                })?;
+
+                            let member_deps = Self::extract_dependencies(
+                                member_val.get("dependencies"),
+                                &workspace_deps,
+                            );
+
                             tracing::info!(member = %member_str, dep_count = member_deps.len(), "Scanned workspace member manifest");
 
                             results.push(ManifestInfo {
@@ -169,7 +187,7 @@ impl ManifestScanner {
                 }
             }
 
-            let version_req = match resolved_val {
+            let raw_version_req = match resolved_val {
                 toml::Value::String(s) => s.clone(),
                 toml::Value::Table(map) => {
                     if let Some(path_str) = map.get("path").and_then(|p| p.as_str()) {
@@ -182,6 +200,17 @@ impl ManifestScanner {
                     }
                 }
                 _ => "*".to_string(),
+            };
+
+            let version_req = if raw_version_req.starts_with("path:") {
+                raw_version_req
+            } else {
+                raw_version_req
+                    .trim_start_matches('=')
+                    .trim_start_matches('^')
+                    .trim_start_matches('~')
+                    .trim()
+                    .to_string()
             };
 
             dependencies.push(DependencySpec {
@@ -197,7 +226,11 @@ impl ManifestScanner {
 
     fn sanitize_npm_version(raw: &str) -> String {
         let trimmed = raw.trim();
-        if trimmed.starts_with("file:") || trimmed.starts_with("workspace:") || trimmed.starts_with("link:") || trimmed.starts_with("git+") {
+        if trimmed.starts_with("file:")
+            || trimmed.starts_with("workspace:")
+            || trimmed.starts_with("link:")
+            || trimmed.starts_with("git+")
+        {
             return trimmed.to_string();
         }
 
@@ -261,9 +294,15 @@ impl ManifestScanner {
             dependencies,
         });
 
-        let workspaces_array = value.get("workspaces")
+        let workspaces_array = value
+            .get("workspaces")
             .and_then(|w| w.as_array())
-            .or_else(|| value.get("workspaces").and_then(|w| w.get("packages")).and_then(|p| p.as_array()));
+            .or_else(|| {
+                value
+                    .get("workspaces")
+                    .and_then(|w| w.get("packages"))
+                    .and_then(|p| p.as_array())
+            });
 
         if let Some(patterns) = workspaces_array {
             for pattern in patterns {
@@ -276,7 +315,9 @@ impl ManifestScanner {
                             for entry in entries.flatten() {
                                 let sub_pkg_json = entry.path().join("package.json");
                                 if sub_pkg_json.exists() {
-                                    if let Ok(sub_manifests) = Self::parse_package_json(&sub_pkg_json) {
+                                    if let Ok(sub_manifests) =
+                                        Self::parse_package_json(&sub_pkg_json)
+                                    {
                                         results.extend(sub_manifests);
                                     }
                                 }
@@ -291,8 +332,9 @@ impl ManifestScanner {
     }
 
     fn parse_requirements_txt(path: &Path) -> Result<ManifestInfo, ManifestError> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| ManifestError::IoError(format!("Failed to read requirements.txt: {}", e)))?;
+        let content = fs::read_to_string(path).map_err(|e| {
+            ManifestError::IoError(format!("Failed to read requirements.txt: {}", e))
+        })?;
 
         let mut dependencies = Vec::new();
 
@@ -370,7 +412,8 @@ impl ManifestScanner {
                         .trim_start_matches("gem")
                         .trim()
                         .trim_matches(|c| c == '\'' || c == '"');
-                    let version_req = parts.get(1)
+                    let version_req = parts
+                        .get(1)
                         .map(|v| v.trim().trim_matches(|c| c == '\'' || c == '"'))
                         .unwrap_or("*")
                         .to_string();
@@ -401,7 +444,8 @@ impl ManifestScanner {
             if let Some(end_idx) = chunk.find("</dependency>") {
                 let dep_block = &chunk[..end_idx];
                 let artifact_id = Self::extract_xml_tag(dep_block, "artifactId");
-                let version = Self::extract_xml_tag(dep_block, "version").unwrap_or_else(|| "*".to_string());
+                let version =
+                    Self::extract_xml_tag(dep_block, "version").unwrap_or_else(|| "*".to_string());
 
                 if let Some(artifact) = artifact_id {
                     dependencies.push(DependencySpec {

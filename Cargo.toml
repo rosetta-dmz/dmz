@@ -18,7 +18,10 @@ license = "MIT"
 # Shared Core Dependencies (Statically Linked)
 tempfile = "3.10"
 git2 = { version = "0.19", default-features = false, features = ["vendored-openssl"] }
-flate2 = { version = "1.0", default-features = false, features = ["zlib-ng"] }
+flate2 = { version = "=1.0.35", default-features = false, features = ["zlib-ng"] }
+nix = { version = "0.28", features = ["process", "mount", "sched", "user"] }
+windows-sys = { version = "0.52", features = ["Win32_System_Threading", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Security"] }
+libc = "0.2"
 tar = "0.4"
 zstd = "0.13"
 serde = { version = "1.0", features = ["derive"] }

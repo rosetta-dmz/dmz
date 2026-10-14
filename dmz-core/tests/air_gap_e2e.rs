@@ -12,8 +12,14 @@ fn test_multiecosystem_airgap_roundtrip() -> anyhow::Result<()> {
     fs::create_dir_all(&workspace_path)?;
 
     // Drop mock manifests for Rust and Node ecosystems
-    fs::write(workspace_path.join("Cargo.toml"), "[package]\nname = \"test-rust\"\nversion = \"1.0.8\"")?;
-    fs::write(workspace_path.join("package.json"), "{\"name\": \"test-node\", \"version\": \"1.0.0\"}")?;
+    fs::write(
+        workspace_path.join("Cargo.toml"),
+        "[package]\nname = \"test-rust\"\nversion = \"1.0.8\"",
+    )?;
+    fs::write(
+        workspace_path.join("package.json"),
+        "{\"name\": \"test-node\", \"version\": \"1.0.0\"}",
+    )?;
 
     // Create a valid JSON mock lockfile with an empty package map required by the exporter
     let lockfile_path = workspace_path.join("dmz.lock");
@@ -63,9 +69,18 @@ fn test_multiecosystem_airgap_roundtrip() -> anyhow::Result<()> {
     AirGapImporter::import(&import_config)?;
 
     // 6. Assertions: verify files landed correctly and multi-ecosystem detection works post-import
-    assert!(import_target.join("Cargo.toml").exists(), "Cargo.toml should be unpacked");
-    assert!(import_target.join("package.json").exists(), "package.json should be unpacked");
-    assert!(import_target.join(".cargo").exists(), "Ecosystem cache should be preserved");
+    assert!(
+        import_target.join("Cargo.toml").exists(),
+        "Cargo.toml should be unpacked"
+    );
+    assert!(
+        import_target.join("package.json").exists(),
+        "package.json should be unpacked"
+    );
+    assert!(
+        import_target.join(".cargo").exists(),
+        "Ecosystem cache should be preserved"
+    );
 
     Ok(())
 }

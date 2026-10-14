@@ -15,20 +15,20 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     cmd.stdout(Stdio::inherit());
     cmd.stderr(Stdio::inherit());
 
-    let status = cmd
-        .status()
-        .map_err(|err| PlatformError::SeatbeltError(format!("Failed to execute sandbox-exec: {}", err)))?;
+    let status = cmd.status().map_err(|err| {
+        PlatformError::SeatbeltError(format!("Failed to execute sandbox-exec: {}", err))
+    })?;
 
     Ok(status)
 }
 
 fn generate_seatbelt_profile(config: &SandboxConfig) -> String {
-    let canonical_workspace = fs::canonicalize(&config.workspace_path)
-        .unwrap_or_else(|_| config.workspace_path.clone());
+    let canonical_workspace =
+        fs::canonicalize(&config.workspace_path).unwrap_or_else(|_| config.workspace_path.clone());
     let workspace = canonical_workspace.to_string_lossy();
 
-    let canonical_closure = fs::canonicalize(&config.closure_path)
-        .unwrap_or_else(|_| config.closure_path.clone());
+    let canonical_closure =
+        fs::canonicalize(&config.closure_path).unwrap_or_else(|_| config.closure_path.clone());
     let closure = canonical_closure.to_string_lossy();
 
     let network_rule = if config.allow_network {

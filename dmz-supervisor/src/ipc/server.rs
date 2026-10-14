@@ -60,8 +60,12 @@ impl IpcServer {
             let _ = std::fs::remove_file(&self.config.socket_path);
         }
 
-        let listener = UnixListener::bind(&self.config.socket_path)
-            .map_err(|e| format!("Failed to bind Unix socket at {:?}: {}", self.config.socket_path, e))?;
+        let listener = UnixListener::bind(&self.config.socket_path).map_err(|e| {
+            format!(
+                "Failed to bind Unix socket at {:?}: {}",
+                self.config.socket_path, e
+            )
+        })?;
 
         info!(path = ?self.config.socket_path, "DMZ Unix IPC server listening");
 
@@ -90,7 +94,7 @@ impl IpcServer {
         Ok(())
     }
 
-#[cfg(windows)]
+    #[cfg(windows)]
     async fn listen_windows(&self) -> Result<(), String> {
         use tokio::net::windows::named_pipe::ServerOptions;
 
@@ -134,7 +138,9 @@ impl IpcServer {
                     let request_res: Result<IpcRequest, _> = serde_json::from_str(line.trim());
                     let response = match request_res {
                         Ok(req) => Self::dispatch_request(req, &is_running).await,
-                        Err(err) => IpcResponse::error(format!("Invalid IPC JSON payload: {}", err)),
+                        Err(err) => {
+                            IpcResponse::error(format!("Invalid IPC JSON payload: {}", err))
+                        }
                     };
 
                     if let Ok(mut resp_bytes) = serde_json::to_vec(&response) {

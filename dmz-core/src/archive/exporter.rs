@@ -1,5 +1,5 @@
-use crate::resolver::lockfile::DmzLockfile;
 use crate::ecosystem::EcosystemRegistry;
+use crate::resolver::lockfile::DmzLockfile;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -11,9 +11,9 @@ use zstd::stream::write::Encoder as ZstdEncoder;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportMode {
-    Unified,   // Workspace source code + dependency store archives
-    CodeOnly,  // Workspace source code only (no dependencies)
-    DepsOnly,  // Dependency store archives only (no source code)
+    Unified,  // Workspace source code + dependency store archives
+    CodeOnly, // Workspace source code only (no dependencies)
+    DepsOnly, // Dependency store archives only (no source code)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,12 +81,13 @@ impl AirGapExporter {
         // 1. Automatically discover active workspace ecosystems & gather generalized caches
         let workspace_root = &config.workspace_path;
         let registry = EcosystemRegistry::new();
-        
-        let detected_stacks = registry.process_workspace(workspace_root)
+
+        let detected_stacks = registry
+            .process_workspace(workspace_root)
             .map_err(|e| ExportError::ArchiveError(format!("Ecosystem discovery failed: {}", e)))?;
-        
+
         info!(stacks = ?detected_stacks, "Discovered active workspace ecosystems");
-        
+
         let cache_paths = registry.gather_all_caches(workspace_root);
         info!(caches = ?cache_paths, "Gathered generalized ecosystem cache paths for archiving");
 
@@ -97,8 +98,9 @@ impl AirGapExporter {
         // 3. Ensure parent output directory exists
         if let Some(parent) = config.output_path.parent() {
             if !parent.exists() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| ExportError::IoError(format!("Failed to create parent dir: {}", e)))?;
+                fs::create_dir_all(parent).map_err(|e| {
+                    ExportError::IoError(format!("Failed to create parent dir: {}", e))
+                })?;
             }
         }
 
@@ -136,7 +138,12 @@ impl AirGapExporter {
                     } else {
                         tar_builder
                             .append_path_with_name(&pkg_store_path, &archive_dest)
-                            .map_err(|e| ExportError::ArchiveError(format!("Failed to pack package {}: {}", pkg_info.name, e)))?;
+                            .map_err(|e| {
+                                ExportError::ArchiveError(format!(
+                                    "Failed to pack package {}: {}",
+                                    pkg_info.name, e
+                                ))
+                            })?;
                     }
                     packed_count += 1;
                 } else {
@@ -175,23 +182,31 @@ impl AirGapExporter {
         header.set_cksum();
 
         tar_builder
-            .append_data(&mut header, "airgap_manifest.json", manifest_json.as_bytes())
-            .map_err(|e| ExportError::ArchiveError(format!("Failed to embed airgap manifest: {}", e)))?;
+            .append_data(
+                &mut header,
+                "airgap_manifest.json",
+                manifest_json.as_bytes(),
+            )
+            .map_err(|e| {
+                ExportError::ArchiveError(format!("Failed to embed airgap manifest: {}", e))
+            })?;
 
         // Finish streams and ensure file handle is fully closed
-        { // Removed unused 'let file =' binding to clear compiler warning
-            let zstd_encoder = tar_builder
-                .into_inner()
-                .map_err(|e| ExportError::ArchiveError(format!("Failed to finalize tar stream: {}", e)))?;
+        {
+            // Removed unused 'let file =' binding to clear compiler warning
+            let zstd_encoder = tar_builder.into_inner().map_err(|e| {
+                ExportError::ArchiveError(format!("Failed to finalize tar stream: {}", e))
+            })?;
 
             let mut inner_file = zstd_encoder
                 .finish()
                 .map_err(|e| format!("Failed to finish zstd compression: {}", e))
                 .map_err(ExportError::ArchiveError)?;
 
-            inner_file.flush()
+            inner_file
+                .flush()
                 .map_err(|e| ExportError::IoError(e.to_string()))?;
-                
+
             inner_file
         }; // File handle drops/closes here, flushing bytes to disk safely
 
@@ -214,8 +229,9 @@ impl AirGapExporter {
         src_dir: &Path,
         dest_prefix: &Path,
     ) -> Result<(), ExportError> {
-        let entries = fs::read_dir(src_dir)
-            .map_err(|e| ExportError::IoError(format!("Directory read failed {:?}: {}", src_dir, e)))?;
+        let entries = fs::read_dir(src_dir).map_err(|e| {
+            ExportError::IoError(format!("Directory read failed {:?}: {}", src_dir, e))
+        })?;
 
         for entry in entries {
             let entry = entry.map_err(|e| ExportError::IoError(e.to_string()))?;
@@ -224,7 +240,13 @@ impl AirGapExporter {
             let name_str = name.to_string_lossy();
 
             // --- SKIP HEAVY BUILD ARTIFACTS & CACHES ---
-            if path.is_dir() && (name_str == "target" || name_str == "node_modules" || name_str == ".git" || name_str == "dist" || name_str == ".dmz") {
+            if path.is_dir()
+                && (name_str == "target"
+                    || name_str == "node_modules"
+                    || name_str == ".git"
+                    || name_str == "dist"
+                    || name_str == ".dmz")
+            {
                 continue;
             }
 
@@ -233,8 +255,9 @@ impl AirGapExporter {
             if path.is_dir() {
                 Self::append_dir_all(tar, &path, &rel_dest)?;
             } else {
-                tar.append_path_with_name(&path, &rel_dest)
-                    .map_err(|e| ExportError::ArchiveError(format!("Failed to add file {:?}: {}", path, e)))?;
+                tar.append_path_with_name(&path, &rel_dest).map_err(|e| {
+                    ExportError::ArchiveError(format!("Failed to add file {:?}: {}", path, e))
+                })?;
             }
         }
 
@@ -248,9 +271,9 @@ impl AirGapExporter {
         let mut buffer = [0u8; 65536];
 
         loop {
-            let count = file
-                .read(&mut buffer)
-                .map_err(|e| ExportError::IoError(format!("File read error during hashing: {}", e)))?;
+            let count = file.read(&mut buffer).map_err(|e| {
+                ExportError::IoError(format!("File read error during hashing: {}", e))
+            })?;
             if count == 0 {
                 break;
             }

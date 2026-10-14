@@ -1,6 +1,6 @@
+use dmz_core::resolver::ResolverEngine;
 use std::fs;
 use tempfile::tempdir;
-use dmz_core::resolver::ResolverEngine;
 
 #[test]
 fn test_workspace_resolution_fail_fast_and_inheritance() {
@@ -33,7 +33,10 @@ fn test_workspace_resolution_fail_fast_and_inheritance() {
 
     // 3. Run resolver engine and verify packages are correctly populated
     let lockfile_result = ResolverEngine::resolve_workspace(root);
-    assert!(lockfile_result.is_ok(), "Resolver failed on valid workspace structure");
+    assert!(
+        lockfile_result.is_ok(),
+        "Resolver failed on valid workspace structure"
+    );
 
     let lockfile = lockfile_result.unwrap();
     assert!(
@@ -84,7 +87,10 @@ fn test_npm_workspace_resolution() {
 
     // 3. Resolve workspace and verify npm packages are captured
     let lockfile_result = ResolverEngine::resolve_workspace(root);
-    assert!(lockfile_result.is_ok(), "Resolver failed on valid NPM workspace structure");
+    assert!(
+        lockfile_result.is_ok(),
+        "Resolver failed on valid NPM workspace structure"
+    );
 
     let lockfile = lockfile_result.unwrap();
     assert!(
@@ -159,7 +165,10 @@ fn test_version_range_sanitization_and_operators() {
 
     // 3. Resolve workspace
     let lockfile_result = ResolverEngine::resolve_workspace(root);
-    assert!(lockfile_result.is_ok(), "Resolver failed on semver range sanitization test");
+    assert!(
+        lockfile_result.is_ok(),
+        "Resolver failed on semver range sanitization test"
+    );
 
     let lockfile = lockfile_result.unwrap();
 

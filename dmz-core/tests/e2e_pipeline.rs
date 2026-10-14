@@ -48,7 +48,11 @@ fn setup_mock_workspace() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     // Create a dummy cached artifact in the store matching the package key "serde"
     let serde_store_dir = store_path.join("serde");
     fs::create_dir_all(&serde_store_dir).unwrap();
-    fs::write(serde_store_dir.join("serde-1.0.archive"), b"dummy_serde_archive_bytes").unwrap();
+    fs::write(
+        serde_store_dir.join("serde-1.0.archive"),
+        b"dummy_serde_archive_bytes",
+    )
+    .unwrap();
 
     (tmp_dir, workspace_path, store_path, output_dir)
 }
@@ -69,9 +73,8 @@ fn test_e2e_unified_airgap_export_and_import() {
         mode: ExportMode::Unified,
     };
 
-    let manifest = AirGapExporter::export(&export_config)
-        .expect("Unified air-gap export failed");
-    
+    let manifest = AirGapExporter::export(&export_config).expect("Unified air-gap export failed");
+
     assert!(bundle_path.exists());
     assert_eq!(manifest.package_count, 1);
     assert!(!manifest.archive_sha256.is_empty());
@@ -85,8 +88,7 @@ fn test_e2e_unified_airgap_export_and_import() {
         ..ImportConfig::default()
     };
 
-    let import_result = AirGapImporter::import(&import_config)
-        .expect("Air-gap import failed");
+    let import_result = AirGapImporter::import(&import_config).expect("Air-gap import failed");
 
     assert_eq!(import_result.imported_packages, 1);
     assert!(target_store.join("serde").exists());

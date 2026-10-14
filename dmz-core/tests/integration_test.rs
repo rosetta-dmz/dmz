@@ -10,10 +10,10 @@ use tempfile::TempDir;
 fn test_end_to_end_dmz_pipeline() {
     // Setup temporary isolated test directory
     let temp_dir = TempDir::new().expect("Failed to create temp test directory");
-    
+
     // Canonicalize path to eliminate platform symlink mismatches
-    let workspace_path = fs::canonicalize(temp_dir.path())
-        .unwrap_or_else(|_| temp_dir.path().to_path_buf());
+    let workspace_path =
+        fs::canonicalize(temp_dir.path()).unwrap_or_else(|_| temp_dir.path().to_path_buf());
     let dist_path = workspace_path.join("dist");
     let lockfile_path = workspace_path.join("dmz.lock");
 
@@ -24,8 +24,8 @@ fn test_end_to_end_dmz_pipeline() {
     // Step 1: Test Dependency Resolution & Lockfile Generation
     // ------------------------------------------------------------------------
     println!("[2/4] Executing ResolverEngine::resolve_workspace...");
-    let lockfile = ResolverEngine::resolve_workspace(&workspace_path)
-        .expect("Dependency resolution failed");
+    let lockfile =
+        ResolverEngine::resolve_workspace(&workspace_path).expect("Dependency resolution failed");
 
     assert!(
         !lockfile.packages.is_empty(),
@@ -63,8 +63,7 @@ fn test_end_to_end_dmz_pipeline() {
         zstd_level: 3,
     };
 
-    let build_result = PackageBuilder::build(&build_config)
-        .expect("Packaging Target C failed");
+    let build_result = PackageBuilder::build(&build_config).expect("Packaging Target C failed");
 
     assert_eq!(build_result.target, BuildTarget::Unified);
     assert!(
@@ -88,10 +87,7 @@ fn test_end_to_end_dmz_pipeline() {
     #[cfg(unix)]
     let (cmd, args) = (
         "/bin/sh",
-        vec![
-            "-c".to_string(),
-            "echo 'DMZ Sandbox Active'".to_string(),
-        ],
+        vec!["-c".to_string(), "echo 'DMZ Sandbox Active'".to_string()],
     );
 
     #[cfg(windows)]
@@ -142,8 +138,7 @@ edition = "2021"
 [dependencies]
 serde = "1.0"
 "#;
-    fs::write(workspace.join("Cargo.toml"), cargo_toml)
-        .expect("Failed to write dummy Cargo.toml");
+    fs::write(workspace.join("Cargo.toml"), cargo_toml).expect("Failed to write dummy Cargo.toml");
 
     let package_json = r#"{
   "name": "e2e-test-app",
@@ -157,6 +152,9 @@ serde = "1.0"
 
     let src_dir = workspace.join("src");
     fs::create_dir_all(&src_dir).expect("Failed to create src dir");
-    fs::write(src_dir.join("main.rs"), "fn main() { println!(\"Hello DMZ\"); }")
-        .expect("Failed to write main.rs");
+    fs::write(
+        src_dir.join("main.rs"),
+        "fn main() { println!(\"Hello DMZ\"); }",
+    )
+    .expect("Failed to write main.rs");
 }

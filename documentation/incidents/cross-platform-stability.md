@@ -4,11 +4,11 @@ This document records the root cause of the platform execution and test harness 
 
 ---
 
-### 1. The Incident Summary
+### Incident Summary
 
 During end-to-end integration testing (`cargo test -p dmz-core --test integration_test`), sandboxed process execution consistently failed under Unix/macOS runtimes with exit status `None` and signal termination `Some(6)` (`SIGABRT`).
 
-### 2. Root Causes Identified
+### Root Causes
 
 * **macOS Symlink Mismatch (`/var` vs. `/private/var`):**
 Temporary workspace directories created by `tempfile::TempDir` reside under `/var/folders/...` on macOS, which is a symbolic link to `/private/var/folders/...`. When Apple's Seatbelt (`sandbox-exec`) evaluated paths, the string prefix mismatch caused access denials (`EACCES`), crashing the wrapper process.
@@ -19,7 +19,7 @@ Directly mapping raw `waitpid` process return codes into Rust's `ExitStatus::fro
 
 ---
 
-### 3. Solutions & Preventative Design Patterns
+### Solutions & Preventative Design Patterns
 
 To prevent these issues in future development, adhere to the following architectural rules:
 
@@ -32,5 +32,4 @@ When wrapping low-level Unix process execution via `nix::sys::wait`, ensure wait
 ```rust
 let raw_status = (code & 0xff) << 8; // For normal exits
 let raw_status = (sig as i32) & 0x7f; // For signal terminations
-
 ```

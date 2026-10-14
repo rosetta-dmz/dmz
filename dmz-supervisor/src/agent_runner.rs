@@ -59,14 +59,16 @@ impl AgentRunner {
         // 2. Prepare command and inject sandbox environment variables
         let mut cmd = Command::new(&config.binary_or_script);
         cmd.args(&config.args)
-           .envs(&config.envs)
-           .env("DMZ_AGENT_ID", &agent_id)
-           .env("DMZ_AGENT_SCRATCHPAD", &scratchpad_dir)
-           .current_dir(&scratchpad_dir);
+            .envs(&config.envs)
+            .env("DMZ_AGENT_ID", &agent_id)
+            .env("DMZ_AGENT_SCRATCHPAD", &scratchpad_dir)
+            .current_dir(&scratchpad_dir);
 
         info!(agent = %agent_id, scratchpad = ?scratchpad_dir, "Launching agent process tree");
 
-        let child = cmd.spawn().map_err(|e| format!("Failed to spawn agent process: {}", e))?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to spawn agent process: {}", e))?;
 
         let active_agent = ActiveAgent {
             config: config.clone(),
@@ -91,10 +93,7 @@ impl AgentRunner {
     }
 
     /// Watcher task that waits for process termination and cleans up the sandbox
-    async fn watch_agent(
-        agents: Arc<RwLock<HashMap<String, ActiveAgent>>>,
-        agent_id: String,
-    ) {
+    async fn watch_agent(agents: Arc<RwLock<HashMap<String, ActiveAgent>>>, agent_id: String) {
         let child_opt: Option<Child> = {
             let mut guard = agents.write().await;
             if guard.get_mut(&agent_id).is_some() {

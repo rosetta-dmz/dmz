@@ -210,44 +210,6 @@ dmz build [OPTIONS]
 
 ---
 
-## End-to-End Air-Gap Import & Installation Walkthrough
-
-Here is the complete sequence for preparing, transferring, and installing an air-gapped workspace into a fresh target directory (such as `dmz-import`):
-
-```bash
-# 1. Resolve and lock workspace dependencies
-dmz resolve
-
-# 2. Pre-fetch dependencies into local cache
-dmz fetch --store .dmz/store
-
-# 3. Export unified air-gap archive
-dmz airgap export \
-    --output dist/workspace_closure.tar.zst \
-    --store .dmz/store \
-    --mode unified
-
-# 4. Simulate isolated air-gap target environment
-mkdir -p dmz-import
-cd dmz-import
-
-# 5. Import and verify archive
-dmz airgap import \
-    --archive ../dist/workspace_closure.tar.zst \
-    --store ./offline_store
-
-# 6. Install dependencies into project layouts without network access
-cd workspace
-dmz install \
-    --store ../offline_store \
-    --lockfile dmz.lock
-
-# 7. Run native engine verification offline
-dmz ecosystem verify
-```
-
----
-
 ## Sandbox Execution Commands (`dmz sandbox`)
 
 The sandbox command group executes commands within isolated, daemonless operating system sandboxes with zero host leakage.

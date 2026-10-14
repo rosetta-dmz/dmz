@@ -1,6 +1,6 @@
 use crate::archive::exporter::AirGapManifest;
-use crate::resolver::lockfile::DmzLockfile;
 use crate::ecosystem::EcosystemRegistry;
+use crate::resolver::lockfile::DmzLockfile;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Read;
@@ -22,7 +22,7 @@ impl Default for ImportConfig {
         Self {
             archive_path: PathBuf::from("airgap_bundle.tar.zst"),
             target_store_dir: PathBuf::from(".dmz/store"),
-            target_workspace_dir: PathBuf::from("workspace"), // Sub-folder default 
+            target_workspace_dir: PathBuf::from("workspace"), // Sub-folder default
             verify_closure_hash: true,
         }
     }
@@ -46,7 +46,9 @@ impl std::fmt::Display for ImportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::IoError(msg) => write!(f, "Import IO Error: {}", msg),
-            Self::VerificationFailed(msg) => write!(f, "Cryptographic Verification Failed: {}", msg),
+            Self::VerificationFailed(msg) => {
+                write!(f, "Cryptographic Verification Failed: {}", msg)
+            }
             Self::ExtractionError(msg) => write!(f, "Archive Extraction Failed: {}", msg),
         }
     }
@@ -75,21 +77,24 @@ impl AirGapImporter {
 
         // 1. Prepare target directories
         if !config.target_store_dir.exists() {
-            fs::create_dir_all(&config.target_store_dir)
-                .map_err(|e| ImportError::IoError(format!("Failed to create target store: {}", e)))?;
+            fs::create_dir_all(&config.target_store_dir).map_err(|e| {
+                ImportError::IoError(format!("Failed to create target store: {}", e))
+            })?;
         }
 
         if !config.target_workspace_dir.exists() {
-            fs::create_dir_all(&config.target_workspace_dir)
-                .map_err(|e| ImportError::IoError(format!("Failed to create target workspace: {}", e)))?;
+            fs::create_dir_all(&config.target_workspace_dir).map_err(|e| {
+                ImportError::IoError(format!("Failed to create target workspace: {}", e))
+            })?;
         }
 
         // 2. Open archive and initialize zstd stream
         let file = File::open(&config.archive_path)
             .map_err(|e| ImportError::IoError(format!("Failed to open archive: {}", e)))?;
 
-        let zstd_decoder = ZstdDecoder::new(file)
-            .map_err(|e| ImportError::ExtractionError(format!("Failed to initialize zstd decoder: {}", e)))?;
+        let zstd_decoder = ZstdDecoder::new(file).map_err(|e| {
+            ImportError::ExtractionError(format!("Failed to initialize zstd decoder: {}", e))
+        })?;
 
         let mut archive = TarArchive::new(zstd_decoder);
 
@@ -97,9 +102,9 @@ impl AirGapImporter {
         let mut imported_count = 0;
 
         // 3. Single-pass entry iteration, extraction, and verification
-        let entries = archive
-            .entries()
-            .map_err(|e| ImportError::ExtractionError(format!("Failed to read tar entries: {}", e)))?;
+        let entries = archive.entries().map_err(|e| {
+            ImportError::ExtractionError(format!("Failed to read tar entries: {}", e))
+        })?;
 
         for entry_res in entries {
             let mut entry = entry_res
@@ -112,12 +117,13 @@ impl AirGapImporter {
 
             if path == Path::new("airgap_manifest.json") {
                 let mut content = String::new();
-                entry
-                    .read_to_string(&mut content)
-                    .map_err(|e| ImportError::ExtractionError(format!("Failed to read manifest: {}", e)))?;
+                entry.read_to_string(&mut content).map_err(|e| {
+                    ImportError::ExtractionError(format!("Failed to read manifest: {}", e))
+                })?;
 
-                let manifest: AirGapManifest = serde_json::from_str(&content)
-                    .map_err(|e| ImportError::VerificationFailed(format!("Invalid airgap_manifest.json: {}", e)))?;
+                let manifest: AirGapManifest = serde_json::from_str(&content).map_err(|e| {
+                    ImportError::VerificationFailed(format!("Invalid airgap_manifest.json: {}", e))
+                })?;
 
                 closure_signature = manifest.closure_signature;
                 info!(
@@ -133,12 +139,13 @@ impl AirGapImporter {
                 fs::write(&dest, content).map_err(|e| ImportError::IoError(e.to_string()))?;
             } else if path == Path::new("dmz.lock") {
                 let mut content = String::new();
-                entry
-                    .read_to_string(&mut content)
-                    .map_err(|e| ImportError::ExtractionError(format!("Failed to read lockfile: {}", e)))?;
+                entry.read_to_string(&mut content).map_err(|e| {
+                    ImportError::ExtractionError(format!("Failed to read lockfile: {}", e))
+                })?;
 
-                let lockfile: DmzLockfile = serde_json::from_str(&content)
-                    .map_err(|e| ImportError::VerificationFailed(format!("Invalid embedded dmz.lock: {}", e)))?;
+                let lockfile: DmzLockfile = serde_json::from_str(&content).map_err(|e| {
+                    ImportError::VerificationFailed(format!("Invalid embedded dmz.lock: {}", e))
+                })?;
 
                 if config.verify_closure_hash {
                     let computed = DmzLockfile::compute_closure_hash(&lockfile.packages);
@@ -165,21 +172,28 @@ impl AirGapImporter {
 
                 if let Some(parent) = dest_path.parent() {
                     if !parent.exists() {
-                        fs::create_dir_all(parent)
-                            .map_err(|e| ImportError::IoError(format!("Failed to create path {:?}: {}", parent, e)))?;
+                        fs::create_dir_all(parent).map_err(|e| {
+                            ImportError::IoError(format!(
+                                "Failed to create path {:?}: {}",
+                                parent, e
+                            ))
+                        })?;
                     }
                 }
 
-                entry
-                    .unpack(&dest_path)
-                    .map_err(|e| ImportError::ExtractionError(format!("Failed to unpack file {:?}: {}", dest_path, e)))?;
+                entry.unpack(&dest_path).map_err(|e| {
+                    ImportError::ExtractionError(format!(
+                        "Failed to unpack file {:?}: {}",
+                        dest_path, e
+                    ))
+                })?;
 
                 imported_count += 1;
             } else {
                 // Workspace source files (Cargo.toml, src/, etc.)
-                entry
-                    .unpack_in(&config.target_workspace_dir)
-                    .map_err(|e| ImportError::ExtractionError(format!("Failed to unpack workspace file: {}", e)))?;
+                entry.unpack_in(&config.target_workspace_dir).map_err(|e| {
+                    ImportError::ExtractionError(format!("Failed to unpack workspace file: {}", e))
+                })?;
             }
         }
 

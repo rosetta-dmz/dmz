@@ -1,13 +1,13 @@
+use std::collections::HashMap;
+use std::error::Error;
+use std::fmt;
 use std::path::PathBuf;
 use std::process::ExitStatus;
-use std::fmt;
-use std::error::Error;
-use std::collections::HashMap;
 
-#[cfg(target_os = "macos")]
-mod macos;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -82,5 +82,7 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     return windows::run_sandboxed(&resolved_config);
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    Err(PlatformError::UnsupportedPlatform("Current operating system is not supported by DMZ sandbox".into()))
+    Err(PlatformError::UnsupportedPlatform(
+        "Current operating system is not supported by DMZ sandbox".into(),
+    ))
 }

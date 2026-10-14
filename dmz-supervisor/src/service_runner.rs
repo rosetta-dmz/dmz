@@ -53,7 +53,9 @@ impl ServiceRunner {
         {
             let services = self.services.read().await;
             if let Some(existing) = services.get(&name) {
-                if existing.status == ServiceStatus::Healthy || existing.status == ServiceStatus::Starting {
+                if existing.status == ServiceStatus::Healthy
+                    || existing.status == ServiceStatus::Starting
+                {
                     return Err(format!("Service '{}' is already running", name));
                 }
             }
@@ -63,10 +65,12 @@ impl ServiceRunner {
 
         let mut cmd = Command::new(&config.command);
         cmd.args(&config.args)
-           .envs(&config.envs)
-           .current_dir(&config.working_dir);
+            .envs(&config.envs)
+            .current_dir(&config.working_dir);
 
-        let child = cmd.spawn().map_err(|e| format!("Failed to spawn service '{}': {}", name, e))?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to spawn service '{}': {}", name, e))?;
 
         let managed = ManagedService {
             config: config.clone(),
@@ -130,7 +134,7 @@ impl ServiceRunner {
         if let Some(mut service) = services.remove(name) {
             if let Some(mut child) = service.child.take() {
                 info!(service = %name, "Terminating background collateral service");
-                
+
                 #[cfg(unix)]
                 {
                     if let Some(pid) = child.id() {

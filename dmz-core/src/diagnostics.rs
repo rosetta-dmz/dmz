@@ -1,4 +1,3 @@
-
 // Structured error wrapper that intercepts raw errors and
 // classifies them before printing.
 
@@ -20,8 +19,12 @@ pub struct DiagnosticError {
 impl DiagnosticError {
     pub fn classify(err: &dyn std::error::Error) -> Self {
         let err_str = err.to_string();
-        
-        if err_str.contains("unshare") || err_str.contains("seatbelt") || err_str.contains("Job Object") || err_str.contains("zstd stream") {
+
+        if err_str.contains("unshare")
+            || err_str.contains("seatbelt")
+            || err_str.contains("Job Object")
+            || err_str.contains("zstd stream")
+        {
             Self {
                 category: ErrorCategory::PlatformFault,
                 message: format!("Engine/Kernel execution error: {}", err_str),

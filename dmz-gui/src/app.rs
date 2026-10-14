@@ -96,14 +96,12 @@ impl eframe::App for DmzGuiApp {
         });
 
         // Central Content Viewport
-        egui::CentralPanel::default().show(ctx, |ui| {
-            match self.active_tab {
-                Tab::Resolver => self.show_resolver_tab(ui),
-                Tab::Builder => self.show_builder_tab(ui),
-                Tab::AgentSandbox => self.show_agent_tab(ui),
-                Tab::AirGap => self.show_airgap_tab(ui),
-                Tab::Supervisor => self.show_supervisor_tab(ui),
-            }
+        egui::CentralPanel::default().show(ctx, |ui| match self.active_tab {
+            Tab::Resolver => self.show_resolver_tab(ui),
+            Tab::Builder => self.show_builder_tab(ui),
+            Tab::AgentSandbox => self.show_agent_tab(ui),
+            Tab::AirGap => self.show_airgap_tab(ui),
+            Tab::Supervisor => self.show_supervisor_tab(ui),
         });
     }
 }
@@ -253,7 +251,9 @@ impl DmzGuiApp {
 
     fn show_agent_tab(&mut self, ui: &mut egui::Ui) {
         ui.heading("Autonomous Agent Sub-Sandbox");
-        ui.label("Configure volatile in-memory scratchpads and egress domain filter rules for agents.");
+        ui.label(
+            "Configure volatile in-memory scratchpads and egress domain filter rules for agents.",
+        );
         ui.add_space(10.0);
 
         egui::Grid::new("agent_grid")
@@ -428,13 +428,19 @@ impl DmzGuiApp {
                     self.supervisor_active = false;
                     self.postgres_service = false;
                     self.redis_service = false;
-                    self.status_message = String::from("Workspace Supervisor terminated. Footprint: 0% CPU, 0 MB RAM.");
+                    self.status_message = String::from(
+                        "Workspace Supervisor terminated. Footprint: 0% CPU, 0 MB RAM.",
+                    );
                 }
             } else {
-                ui.colored_label(egui::Color32::GRAY, "INACTIVE (Zero Idle Footprint: 0% CPU, 0 MB RAM)");
+                ui.colored_label(
+                    egui::Color32::GRAY,
+                    "INACTIVE (Zero Idle Footprint: 0% CPU, 0 MB RAM)",
+                );
                 if ui.button("Start Supervisor Session").clicked() {
                     self.supervisor_active = true;
-                    self.status_message = String::from("Workspace Supervisor spawned successfully.");
+                    self.status_message =
+                        String::from("Workspace Supervisor spawned successfully.");
                 }
             }
         });
@@ -445,8 +451,14 @@ impl DmzGuiApp {
         ui.heading("Collateral Stack Services & IDE IPC Sockets");
         ui.add_space(5.0);
 
-        ui.checkbox(&mut self.postgres_service, "Local Postgres Service (Managed by Supervisor)");
-        ui.checkbox(&mut self.redis_service, "Local Redis Service (Managed by Supervisor)");
+        ui.checkbox(
+            &mut self.postgres_service,
+            "Local Postgres Service (Managed by Supervisor)",
+        );
+        ui.checkbox(
+            &mut self.redis_service,
+            "Local Redis Service (Managed by Supervisor)",
+        );
 
         ui.add_space(10.0);
 
@@ -461,11 +473,19 @@ impl DmzGuiApp {
         ui.group(|ui| {
             ui.label(format!(
                 "Supervisor State: {}",
-                if self.supervisor_active { "RUNNING" } else { "IDLE" }
+                if self.supervisor_active {
+                    "RUNNING"
+                } else {
+                    "IDLE"
+                }
             ));
             ui.label(format!(
                 "Active Stack Services: Postgres [{}], Redis [{}]",
-                if self.postgres_service { "UP" } else { "STOPPED" },
+                if self.postgres_service {
+                    "UP"
+                } else {
+                    "STOPPED"
+                },
                 if self.redis_service { "UP" } else { "STOPPED" }
             ));
             ui.label("Connected IDE Clients: 1 (GUI Desktop)");

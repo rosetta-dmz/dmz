@@ -15,8 +15,11 @@ tracing.workspace = true
 reqwest = { version = "0.12", features = ["blocking"] }
 sha2 = "0.10"
 toml = "0.8"
+libc.workspace = true
+windows-sys.workspace = true
+nix.workspace = true
+tempfile = { workspace = true }
 
 [dev-dependencies]
-tempfile.workspace = true
 tokio = { workspace = true, features = ["full"] }
 dmz-sandbox.workspace = true

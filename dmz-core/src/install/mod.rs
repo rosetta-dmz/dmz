@@ -1,10 +1,10 @@
 pub mod mappers;
-
+pub mod rust_vendor;
 use crate::resolver::lockfile::DmzLockfile;
 use crate::resolver::manifest::Ecosystem;
-use std::path::PathBuf;
-use std::fs;
 use sha2::{Digest, Sha256};
+use std::fs;
+use std::path::PathBuf;
 use tracing::info;
 
 #[derive(Debug, Clone)]
@@ -39,7 +39,9 @@ impl std::fmt::Display for InstallError {
                 "Missing cached store artifact for package '{}' at path {:?}",
                 package, path
             ),
-            Self::UnsupportedEcosystem(eco) => write!(f, "Ecosystem not supported for offline install: {}", eco),
+            Self::UnsupportedEcosystem(eco) => {
+                write!(f, "Ecosystem not supported for offline install: {}", eco)
+            }
             Self::MapperError(msg) => write!(f, "Ecosystem Mapper Error: {}", msg),
         }
     }
@@ -131,9 +133,17 @@ impl InstallerEngine {
                 Ecosystem::Npm => {
                     let pnpm_lock_exists = config.workspace_path.join("pnpm-lock.yaml").exists();
                     if pnpm_lock_exists {
-                        mappers::PnpmMapper::map_package(&config.workspace_path, &pkg, &archive_path)?;
+                        mappers::PnpmMapper::map_package(
+                            &config.workspace_path,
+                            &pkg,
+                            &archive_path,
+                        )?;
                     } else {
-                        mappers::NpmMapper::map_package(&config.workspace_path, &pkg, &archive_path)?;
+                        mappers::NpmMapper::map_package(
+                            &config.workspace_path,
+                            &pkg,
+                            &archive_path,
+                        )?;
                     }
                 }
                 Ecosystem::Cargo => {
@@ -146,10 +156,18 @@ impl InstallerEngine {
                     mappers::GoMapper::map_package(&config.workspace_path, &pkg, &archive_path)?;
                 }
                 Ecosystem::Composer => {
-                    mappers::ComposerMapper::map_package(&config.workspace_path, &pkg, &archive_path)?;
+                    mappers::ComposerMapper::map_package(
+                        &config.workspace_path,
+                        &pkg,
+                        &archive_path,
+                    )?;
                 }
                 Ecosystem::Bundler => {
-                    mappers::BundlerMapper::map_package(&config.workspace_path, &pkg, &archive_path)?;
+                    mappers::BundlerMapper::map_package(
+                        &config.workspace_path,
+                        &pkg,
+                        &archive_path,
+                    )?;
                 }
                 Ecosystem::MavenGradle => {
                     mappers::MavenMapper::map_package(&config.workspace_path, &pkg, &archive_path)?;
@@ -158,7 +176,10 @@ impl InstallerEngine {
                     return Err(InstallError::UnsupportedEcosystem(eco.clone()));
                 }
                 _ => {
-                    return Err(InstallError::UnsupportedEcosystem(format!("{:?}", pkg.ecosystem)));
+                    return Err(InstallError::UnsupportedEcosystem(format!(
+                        "{:?}",
+                        pkg.ecosystem
+                    )));
                 }
             }
 
@@ -166,7 +187,10 @@ impl InstallerEngine {
             info!(name = %pkg.name, version = %pkg.version, "Successfully installed package offline");
         }
 
-        info!(installed = installed_count, "DMZ offline installation completed successfully");
+        info!(
+            installed = installed_count,
+            "DMZ offline installation completed successfully"
+        );
         Ok(installed_count)
     }
 }
