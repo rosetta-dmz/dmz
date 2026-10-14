@@ -1,6 +1,6 @@
 use crate::platform::{PlatformError, SandboxConfig};
 use std::fs;
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
 
 pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError> {
     let profile_str = generate_seatbelt_profile(config);
@@ -9,7 +9,11 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     cmd.arg("-p").arg(profile_str);
     cmd.arg(&config.command);
     cmd.args(&config.args);
-    cmd.envs(&config.envs);
+    cmd.envs(config.envs.iter().map(|(k, v)| (k, v)));
+    cmd.current_dir(&config.workspace_path);
+    cmd.stdin(Stdio::inherit());
+    cmd.stdout(Stdio::inherit());
+    cmd.stderr(Stdio::inherit());
 
     let status = cmd
         .status()
@@ -27,6 +31,12 @@ fn generate_seatbelt_profile(config: &SandboxConfig) -> String {
         .unwrap_or_else(|_| config.closure_path.clone());
     let closure = canonical_closure.to_string_lossy();
 
+    let network_rule = if config.allow_network {
+        "(allow network*)"
+    } else {
+        "(deny network*)"
+    };
+
     format!(
         r#"
 (version 1)
@@ -35,14 +45,19 @@ fn generate_seatbelt_profile(config: &SandboxConfig) -> String {
 (allow process*)
 (allow sysctl-read)
 (allow signal (target self))
-(allow network*)
+(allow mach-lookup)
+(allow ipc-posix*)
+{}
 
 (allow file-read*
+    (literal "/")
     (subpath "/bin")
     (subpath "/sbin")
     (subpath "/usr")
     (subpath "/System")
     (subpath "/Library")
+    (subpath "/opt/homebrew")
+    (subpath "/usr/local")
     (subpath "/private/var/db/dyld")
     (subpath "/private/etc")
     (subpath "/private/tmp")
@@ -57,6 +72,6 @@ fn generate_seatbelt_profile(config: &SandboxConfig) -> String {
 (allow file-read* file-write* (subpath "{}"))
 (allow file-read* (subpath "{}"))
 "#,
-        workspace, closure
+        network_rule, workspace, closure
     )
 }

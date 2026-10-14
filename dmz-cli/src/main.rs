@@ -5,7 +5,7 @@ use dmz_core::archive::{AirGapExporter, AirGapImporter, ExportConfig, ImportConf
 use dmz_core::packaging::{BuildConfig, BuildTarget, PackageBuilder};
 use dmz_core::resolver::ResolverEngine;
 use dmz_sandbox::platform::{run_sandboxed, SandboxConfig};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::exit;
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -45,6 +45,21 @@ enum Commands {
         #[arg(long, default_value = "dmz.lock")]
         lockfile: PathBuf,
         #[arg(long, default_value = ".dmz/store")]
+        store: PathBuf,
+    },
+
+    /// Install locked dependencies offline from store into project layouts
+    Install {
+        /// Path to project workspace root
+        #[arg(short, long, default_value = ".")]
+        workspace: PathBuf,
+
+        /// Path to input lockfile
+        #[arg(short, long, default_value = "dmz.lock")]
+        lockfile: PathBuf,
+
+        /// Path to local dependency store directory
+        #[arg(short, long, default_value = ".dmz/store")]
         store: PathBuf,
     },
 
@@ -173,6 +188,38 @@ impl From<CliExportMode> for CoreExportMode {
 
 #[derive(Subcommand)]
 enum AirgapCommands {
+    /// One-shot resolution, dependency fetching, and export into an air-gap bundle (.tar.zst)
+    #[command(alias = "pack")]
+    Bundle {
+        /// Path to workspace root directory
+        #[arg(short, long, default_value = ".")]
+        workspace: PathBuf,
+
+        /// Destination path for generated lockfile
+        #[arg(short, long, default_value = "dmz.lock")]
+        lockfile: PathBuf,
+
+        /// Path to local dependency store directory
+        #[arg(short, long, default_value = ".dmz/store")]
+        store: PathBuf,
+
+        /// Destination path for generated output archive
+        #[arg(short, long, default_value = "dist/workspace_closure.tar.zst")]
+        output: PathBuf,
+
+        /// Zstd compression level (1-22)
+        #[arg(long, default_value_t = 3)]
+        zstd_level: i32,
+
+        /// Air-gap export target mode
+        #[arg(long, value_enum, default_value_t = CliExportMode::Unified)]
+        mode: CliExportMode,
+
+        /// Force re-resolving dependency manifests even if dmz.lock already exists
+        #[arg(long, default_value_t = false)]
+        refresh_lock: bool,
+    },
+
     /// Bundle store items and dmz.lock into a portable air-gap archive (.tar.zst)
     Export {
         /// Path to workspace root directory
@@ -210,9 +257,21 @@ enum AirgapCommands {
         #[arg(short, long, default_value = ".dmz/store")]
         store: PathBuf,
 
+        /// Target workspace directory for extracted project files
+        #[arg(short, long, default_value = "workspace")]
+        workspace: PathBuf,
+
         /// Skip closure hash verification (NOT recommended)
         #[arg(long, default_value_t = false)]
         skip_verify: bool,
+
+        /// Skip automatic offline dependency installation into workspace
+        #[arg(long, default_value_t = false)]
+        skip_install: bool,
+
+        /// Skip automatic ecosystem verification check
+        #[arg(long, default_value_t = false)]
+        skip_ecosystem_verify: bool,
     },
 }
 
@@ -255,6 +314,24 @@ fn main() {
                 Err(e) => {
                     error!("Dependency fetch failed: {}", e);
                     std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Install { workspace, lockfile, store } => {
+            info!("Starting DMZ offline installation at workspace {:?}", workspace);
+            let config = dmz_core::install::InstallConfig {
+                workspace_path: workspace,
+                lockfile_path: lockfile,
+                store_dir: store,
+            };
+            match dmz_core::install::InstallerEngine::install(&config) {
+                Ok(count) => {
+                    info!("Successfully installed {} packages offline", count);
+                }
+                Err(e) => {
+                    error!("Offline installation failed: {}", e);
+                    exit(1);
                 }
             }
         }
@@ -339,6 +416,89 @@ fn main() {
         }
 
         Commands::Airgap { action } => match action {
+            AirgapCommands::Bundle {
+                workspace,
+                lockfile,
+                store,
+                output,
+                zstd_level,
+                mode,
+                refresh_lock,
+            } => {
+                info!("Starting streamlined air-gap bundling for workspace {:?}", workspace);
+
+                let effective_lockfile = if lockfile == Path::new("dmz.lock") && workspace != Path::new(".") {
+                    workspace.join(&lockfile)
+                } else if !lockfile.exists() && workspace.join(&lockfile).exists() {
+                    workspace.join(&lockfile)
+                } else {
+                    lockfile
+                };
+
+                let effective_store = if store == Path::new(".dmz/store") && workspace != Path::new(".") && !store.exists() {
+                    workspace.join(&store)
+                } else {
+                    store
+                };
+
+                // 1. Resolve manifests if lockfile is missing or refresh_lock is requested
+                let should_resolve = refresh_lock || !effective_lockfile.exists();
+                if should_resolve {
+                    info!("Resolving workspace dependency manifests at {:?}", workspace);
+                    match ResolverEngine::resolve_workspace(&workspace) {
+                        Ok(resolved_lockfile) => {
+                            if let Err(e) = resolved_lockfile.save(&effective_lockfile) {
+                                error!("Failed to write lockfile {:?}: {}", effective_lockfile, e);
+                                exit(1);
+                            }
+                            info!("Successfully generated closure lock at {:?}", effective_lockfile);
+                        }
+                        Err(e) => {
+                            error!("Dependency resolution failed: {}", e);
+                            exit(1);
+                        }
+                    }
+                } else {
+                    info!("Reusing existing closure lockfile at {:?}", effective_lockfile);
+                }
+
+                // 2. Fetch dependencies into store cache
+                info!("Fetching and caching dependencies into store {:?}", effective_store);
+                match ResolverEngine::fetch_dependencies(&effective_lockfile, &effective_store) {
+                    Ok(count) => {
+                        info!("Successfully fetched and cached {} dependencies in {:?}", count, effective_store);
+                    }
+                    Err(e) => {
+                        error!("Dependency fetch failed: {}", e);
+                        exit(1);
+                    }
+                }
+
+                // 3. Export unified air-gap archive
+                let config = ExportConfig {
+                    workspace_path: workspace,
+                    lockfile_path: effective_lockfile,
+                    store_dir: effective_store,
+                    output_path: output,
+                    zstd_level,
+                    mode: mode.into(),
+                };
+
+                match AirGapExporter::export(&config) {
+                    Ok(manifest) => {
+                        info!(
+                            checksum = %manifest.archive_sha256,
+                            packages = manifest.package_count,
+                            "Air-gap bundle created successfully"
+                        );
+                    }
+                    Err(e) => {
+                        error!("Air-gap bundle export failed: {}", e);
+                        exit(1);
+                    }
+                }
+            }
+
             AirgapCommands::Export {
                 workspace,
                 lockfile,
@@ -374,13 +534,16 @@ fn main() {
             AirgapCommands::Import {
                 archive,
                 store,
+                workspace,
                 skip_verify,
+                skip_install,
+                skip_ecosystem_verify,
             } => {
                 let config = ImportConfig {
                     archive_path: archive,
-                    target_store_dir: store,
+                    target_store_dir: store.clone(),
+                    target_workspace_dir: workspace.clone(),
                     verify_closure_hash: !skip_verify,
-                    ..ImportConfig::default()
                 };
 
                 match AirGapImporter::import(&config) {
@@ -394,6 +557,56 @@ fn main() {
                     Err(e) => {
                         error!("Air-gap import failed: {}", e);
                         exit(1);
+                    }
+                }
+
+                // Automated offline installation into project layouts (unless --skip-install)
+                if !skip_install {
+                    let lockfile_path = workspace.join("dmz.lock");
+                    info!("Running automated offline dependency installation in workspace {:?}", workspace);
+                    let install_config = dmz_core::install::InstallConfig {
+                        workspace_path: workspace.clone(),
+                        lockfile_path,
+                        store_dir: store,
+                    };
+
+                    match dmz_core::install::InstallerEngine::install(&install_config) {
+                        Ok(count) => {
+                            info!("Successfully installed {} packages offline into project layouts", count);
+                        }
+                        Err(e) => {
+                            error!("Offline installation failed: {}", e);
+                            exit(1);
+                        }
+                    }
+
+                    // Automated ecosystem verification (unless --skip-ecosystem-verify)
+                    if !skip_ecosystem_verify {
+                        info!("Running automated ecosystem verification for workspace {:?}", workspace);
+                        let registry = EcosystemRegistry::new();
+                        let active = registry.discover_active(&workspace);
+                        for eco in active {
+                            if let Some(cmd) = eco.verification_command(&workspace) {
+                                info!("Running verification for '{}': {} {}", eco.name(), cmd.program, cmd.args.join(" "));
+                                match std::process::Command::new(&cmd.program)
+                                    .args(&cmd.args)
+                                    .current_dir(&workspace)
+                                    .status()
+                                {
+                                    Ok(status) => {
+                                        if !status.success() {
+                                            error!("Ecosystem verification failed for '{}'", eco.name());
+                                            exit(1);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to execute verification command for '{}': {}", eco.name(), e);
+                                        exit(1);
+                                    }
+                                }
+                            }
+                        }
+                        info!("All ecosystem verifications passed successfully!");
                     }
                 }
             }

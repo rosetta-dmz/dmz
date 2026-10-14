@@ -1,90 +1,86 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitStatus;
+use std::fmt;
+use std::error::Error;
+use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "windows")]
+mod windows;
+
+#[derive(Clone, Debug)]
 pub struct SandboxConfig {
-    /// Read/Write path for the active developer project repository
     pub workspace_path: PathBuf,
-    /// Read-Only path for the cryptographically locked dependency store
     pub closure_path: PathBuf,
-    /// Command/binary to execute inside the sandbox
     pub command: String,
-    /// Command-line arguments
     pub args: Vec<String>,
-    /// Environment variables for the isolated environment
-    pub envs: HashMap<String, String>,
-    /// Whether outbound network access is permitted (false by default for AI agents/builds)
+    pub envs: Vec<(String, String)>,
     pub allow_network: bool,
-}
-
-impl Default for SandboxConfig {
-    fn default() -> Self {
-        Self {
-            workspace_path: PathBuf::from("."),
-            closure_path: PathBuf::from("/nix/store"),
-            command: String::from("/bin/sh"),
-            args: Vec::new(),
-            envs: HashMap::new(),
-            allow_network: false,
-        }
-    }
 }
 
 #[derive(Debug)]
 pub enum PlatformError {
-    NamespaceError(String),
     SeatbeltError(String),
-    JobObjectError(String),
+    NamespaceError(String),
     WindowsError(String),
-    ExecutionFailed(std::io::Error),
+    PlatformFault(String),
+    UnsupportedPlatform(String),
 }
 
-impl std::fmt::Display for PlatformError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for PlatformError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NamespaceError(msg) => write!(f, "Linux Namespace Error: {}", msg),
-            Self::SeatbeltError(msg) => write!(f, "macOS Seatbelt Error: {}", msg),
-            Self::JobObjectError(msg) => write!(f, "Windows JobObject Error: {}", msg),
-            Self::WindowsError(msg) => write!(f, "Windows Error: {}", msg),
-            Self::ExecutionFailed(err) => write!(f, "Process Execution Failed: {}", err),
+            PlatformError::SeatbeltError(msg) => write!(f, "Seatbelt error: {}", msg),
+            PlatformError::NamespaceError(msg) => write!(f, "Namespace error: {}", msg),
+            PlatformError::WindowsError(msg) => write!(f, "Windows error: {}", msg),
+            PlatformError::PlatformFault(msg) => write!(f, "Platform fault: {}", msg),
+            PlatformError::UnsupportedPlatform(msg) => write!(f, "Unsupported platform: {}", msg),
         }
     }
 }
 
-impl std::error::Error for PlatformError {}
+impl Error for PlatformError {}
 
-#[cfg(target_os = "linux")]
-pub mod linux;
-
-#[cfg(target_os = "macos")]
-pub mod macos;
-
-#[cfg(target_os = "windows")]
-pub mod windows;
-
-/// Dispatch sandbox execution to the host OS native kernel isolation mechanism
 pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError> {
-    #[cfg(target_os = "linux")]
-    {
-        linux::run_sandboxed(config)
-    }
+    // Resolve relative commands (e.g. "cargo", "node", "python") to absolute paths
+    let absolute_command = if PathBuf::from(&config.command).is_absolute() {
+        config.command.clone()
+    } else {
+        which::which(&config.command)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| config.command.clone())
+    };
+
+    let mut resolved_config = config.clone();
+    resolved_config.command = absolute_command;
+
+    // Universal Ecosystem Cache Redirection:
+    // Force all build caches (Cargo, npm, pip, go, etc.) into an isolated scratch directory
+    // inside the workspace (.dmz/cache), which is automatically writable under workspace permissions.
+    let sandbox_cache_dir = resolved_config.workspace_path.join(".dmz").join("cache");
+    let _ = std::fs::create_dir_all(&sandbox_cache_dir);
+    let cache_str = sandbox_cache_dir.to_string_lossy();
+
+    let mut env_map: HashMap<String, String> = resolved_config.envs.into_iter().collect();
+    env_map.insert("CARGO_HOME".into(), format!("{}/cargo", cache_str));
+    env_map.insert("npm_config_cache".into(), format!("{}/npm", cache_str));
+    env_map.insert("PIP_CACHE_DIR".into(), format!("{}/pip", cache_str));
+    env_map.insert("GOCACHE".into(), format!("{}/go", cache_str));
+    env_map.insert("GOPATH".into(), format!("{}/gopath", cache_str));
+    resolved_config.envs = env_map.into_iter().collect();
 
     #[cfg(target_os = "macos")]
-    {
-        macos::run_sandboxed(config)
-    }
+    return macos::run_sandboxed(&resolved_config);
+
+    #[cfg(target_os = "linux")]
+    return linux::run_sandboxed(&resolved_config);
 
     #[cfg(target_os = "windows")]
-    {
-        windows::run_sandboxed(config)
-    }
+    return windows::run_sandboxed(&resolved_config);
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    {
-        Err(PlatformError::ExecutionFailed(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "Unsupported host platform for DMZ sandbox",
-        )))
-    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    Err(PlatformError::UnsupportedPlatform("Current operating system is not supported by DMZ sandbox".into()))
 }

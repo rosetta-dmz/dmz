@@ -1,0 +1,306 @@
+use crate::resolver::lockfile::LockedPackage;
+use std::path::Path;
+use std::fs;
+use std::io::Write;
+use flate2::read::GzDecoder;
+use tar::Archive;
+
+/// Standard npm and Yarn classic mapper (Flat/nested node_modules)
+pub struct NpmMapper;
+
+impl NpmMapper {
+    pub fn map_package(workspace_path: &Path, pkg: &LockedPackage, archive_path: &Path) -> Result<(), super::InstallError> {
+        let target_dir = workspace_path.join("node_modules").join(&pkg.name);
+        fs::create_dir_all(&target_dir)
+            .map_err(|e| super::InstallError::IoError(format!("Failed to create node_modules dir: {}", e)))?;
+
+        Self::unpack_archive(archive_path, &target_dir, &pkg.name)
+    }
+
+    fn unpack_archive(archive_path: &Path, target_dir: &Path, pkg_name: &str) -> Result<(), super::InstallError> {
+        let file = fs::File::open(archive_path)
+            .map_err(|e| super::InstallError::IoError(format!("Failed to open archive: {}", e)))?;
+
+        let decompressed = GzDecoder::new(file);
+        let mut archive = Archive::new(decompressed);
+
+        if archive.unpack(target_dir).is_err() {
+            let file_retry = fs::File::open(archive_path)
+                .map_err(|e| super::InstallError::IoError(format!("Failed to open archive retry: {}", e)))?;
+            let mut plain_archive = Archive::new(file_retry);
+            plain_archive.unpack(target_dir)
+                .map_err(|e| super::InstallError::MapperError(format!("Failed to unpack package {}: {}", pkg_name, e)))?;
+        }
+
+        // If unpacked archive contains a top-level "package" directory (standard npm tarball structure),
+        // flatten its contents into target_dir so that package.json is directly in target_dir.
+        let package_subdir = target_dir.join("package");
+        if package_subdir.is_dir() && !target_dir.join("package.json").exists() {
+            if let Ok(entries) = fs::read_dir(&package_subdir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if let Some(file_name) = path.file_name() {
+                        let dest_path = target_dir.join(file_name);
+                        let _ = fs::rename(&path, &dest_path);
+                    }
+                }
+            }
+            let _ = fs::remove_dir_all(&package_subdir);
+        }
+
+        Ok(())
+    }
+}
+
+/// pnpm Content-Addressable Virtual Store & Symlink Mapper
+pub struct PnpmMapper;
+
+impl PnpmMapper {
+    pub fn map_package(workspace_path: &Path, pkg: &LockedPackage, archive_path: &Path) -> Result<(), super::InstallError> {
+        let sanitized_name = pkg.name.replace('/', "+");
+        let virtual_store_dir = workspace_path
+            .join("node_modules")
+            .join(".pnpm")
+            .join(format!("{}@{}", sanitized_name, pkg.version))
+            .join("node_modules")
+            .join(&pkg.name);
+
+        fs::create_dir_all(&virtual_store_dir)
+            .map_err(|e| super::InstallError::IoError(format!("Failed to create pnpm virtual store dir: {}", e)))?;
+
+        NpmMapper::unpack_archive(archive_path, &virtual_store_dir, &pkg.name)?;
+
+        let root_link_dir = workspace_path.join("node_modules").join(&pkg.name);
+        if let Some(parent) = root_link_dir.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| super::InstallError::IoError(format!("Failed to create root node_modules dir: {}", e)))?;
+        }
+
+        if root_link_dir.exists() || root_link_dir.is_symlink() {
+            let _ = fs::remove_dir_all(&root_link_dir);
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink(&virtual_store_dir, &root_link_dir)
+                .map_err(|e| super::InstallError::MapperError(format!("Failed to create pnpm symlink for {}: {}", pkg.name, e)))?;
+        }
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::symlink_dir;
+            symlink_dir(&virtual_store_dir, &root_link_dir)
+                .map_err(|e| super::InstallError::MapperError(format!("Failed to create pnpm symlink for {}: {}", pkg.name, e)))?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Cargo / Rust source vendor mapper
+pub struct CargoMapper;
+
+impl CargoMapper {
+    pub fn map_package(workspace_path: &Path, pkg: &LockedPackage, archive_path: &Path) -> Result<(), super::InstallError> {
+        let cargo_dir = workspace_path.join(".cargo");
+        let vendor_dir = cargo_dir.join("vendor").join(format!("{}-{}", pkg.name, pkg.version));
+        
+        if vendor_dir.exists() {
+            let _ = fs::remove_dir_all(&vendor_dir);
+        }
+        fs::create_dir_all(&vendor_dir)
+            .map_err(|e| super::InstallError::IoError(format!("Failed to create cargo vendor dir: {}", e)))?;
+
+        let file = fs::File::open(archive_path)
+            .map_err(|e| super::InstallError::IoError(format!("Failed to open cargo archive: {}", e)))?;
+
+        let decompressed = GzDecoder::new(file);
+        let mut archive = Archive::new(decompressed);
+
+        // Unpack into a temporary staging directory to handle archive nesting
+        let temp_extract_dir = cargo_dir.join("vendor").join(format!("{}-{}-tmp", pkg.name, pkg.version));
+        if temp_extract_dir.exists() {
+            let _ = fs::remove_dir_all(&temp_extract_dir);
+        }
+        fs::create_dir_all(&temp_extract_dir)
+            .map_err(|e| super::InstallError::IoError(format!("Failed to create temp extract dir: {}", e)))?;
+
+        archive.unpack(&temp_extract_dir)
+            .map_err(|e| super::InstallError::MapperError(format!("Failed to unpack Cargo package {}: {}", pkg.name, e)))?;
+
+        // Locate Cargo.toml (either at root or inside top-level archive directory)
+        let source_dir = if temp_extract_dir.join("Cargo.toml").exists() {
+            temp_extract_dir.clone()
+        } else {
+            let entries = fs::read_dir(&temp_extract_dir)
+                .map_err(|e| super::InstallError::IoError(format!("Failed to read temp extract dir: {}", e)))?;
+            
+            let mut found = None;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() && path.join("Cargo.toml").exists() {
+                    found = Some(path);
+                    break;
+                }
+            }
+            found.unwrap_or(temp_extract_dir.clone())
+        };
+
+        // Flatten contents directly into vendor_dir
+        for entry in fs::read_dir(&source_dir)
+            .map_err(|e| super::InstallError::IoError(format!("Failed to read source dir: {}", e)))?.flatten() 
+        {
+            let path = entry.path();
+            let file_name = path.file_name().ok_or_else(|| super::InstallError::IoError("Invalid file name in archive".into()))?;
+            let dest_path = vendor_dir.join(file_name);
+            let _ = fs::rename(&path, &dest_path);
+        }
+
+        let _ = fs::remove_dir_all(&temp_extract_dir);
+
+        // Write the required .cargo-checksum.json file
+        let checksum_path = vendor_dir.join(".cargo-checksum.json");
+        let checksum_content = format!(
+            r#"{{"package": "{}", "files": {{}}}}"#,
+            pkg.sha256
+        );
+        fs::write(&checksum_path, checksum_content)
+            .map_err(|e| super::InstallError::IoError(format!("Failed to write .cargo-checksum.json: {}", e)))?;
+
+        // Ensure .cargo/config.toml points to the correct .cargo/vendor path
+        let config_path = cargo_dir.join("config.toml");
+        let config_content = r#"[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = ".cargo/vendor"
+"#;
+        fs::write(&config_path, config_content)
+            .map_err(|e| super::InstallError::IoError(format!("Failed to write .cargo/config.toml: {}", e)))?;
+
+        Ok(())
+    }
+}
+
+/// Python / PyPI site-packages mapper (Production-Grade)
+pub struct PyPiMapper;
+
+impl PyPiMapper {
+    pub fn map_package(workspace_path: &Path, pkg: &LockedPackage, archive_path: &Path) -> Result<(), super::InstallError> {
+        let venv_site_packages = workspace_path
+            .join(".dmz")
+            .join("venv")
+            .join("lib")
+            .join("python3.11")
+            .join("site-packages");
+        
+        fs::create_dir_all(&venv_site_packages)
+            .map_err(|e| super::InstallError::IoError(format!("Failed to create python site-packages dir: {}", e)))?;
+
+        let file = fs::File::open(archive_path)
+            .map_err(|e| super::InstallError::IoError(format!("Failed to open Python package archive: {}", e)))?;
+        
+        let decompressed = GzDecoder::new(file);
+        let mut archive = Archive::new(decompressed);
+        
+        // Unpacking fully preserves .dist-info and .egg-info metadata directories for importlib.metadata[cite: 3]
+        archive.unpack(&venv_site_packages)
+            .map_err(|e| super::InstallError::MapperError(format!("Failed to unpack Python package {}: {}", pkg.name, e)))?;
+
+        Ok(())
+    }
+}
+
+/// Go module vendor mapper (Production-Grade)
+pub struct GoMapper;
+
+impl GoMapper {
+    pub fn map_package(workspace_path: &Path, pkg: &LockedPackage, archive_path: &Path) -> Result<(), super::InstallError> {
+        let vendor_dir = workspace_path.join("vendor").join(&pkg.name);
+        fs::create_dir_all(&vendor_dir)
+            .map_err(|e| super::InstallError::IoError(format!("Failed to create go vendor dir: {}", e)))?;
+
+        let file = fs::File::open(archive_path)
+            .map_err(|e| super::InstallError::IoError(format!("Failed to open go package archive: {}", e)))?;
+
+        let decompressed = GzDecoder::new(file);
+        let mut archive = Archive::new(decompressed);
+        archive.unpack(&vendor_dir)
+            .map_err(|e| super::InstallError::MapperError(format!("Failed to unpack Go package {}: {}", pkg.name, e)))?;
+
+        // Automatically maintain vendor/modules.txt required by Go compiler for offline builds
+        let modules_txt_path = workspace_path.join("vendor").join("modules.txt");
+        let entry = format!("# {} {}\n$ explicit\n{}\n", pkg.name, pkg.version, pkg.name);
+        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(modules_txt_path) {
+            let _ = file.write_all(entry.as_bytes());
+        }
+
+        Ok(())
+    }
+}
+
+/// PHP Composer vendor mapper
+pub struct ComposerMapper;
+
+impl ComposerMapper {
+    pub fn map_package(workspace_path: &Path, pkg: &LockedPackage, archive_path: &Path) -> Result<(), super::InstallError> {
+        let vendor_dir = workspace_path.join("vendor").join(&pkg.name);
+        fs::create_dir_all(&vendor_dir)
+            .map_err(|e| super::InstallError::IoError(format!("Failed to create composer vendor dir: {}", e)))?;
+        
+        let file = fs::File::open(archive_path)
+            .map_err(|e| super::InstallError::IoError(format!("Failed to open composer archive: {}", e)))?;
+        let decompressed = GzDecoder::new(file);
+        let mut archive = Archive::new(decompressed);
+        archive.unpack(&vendor_dir)
+            .map_err(|e| super::InstallError::MapperError(format!("Failed to unpack Composer package {}: {}", pkg.name, e)))?;
+        Ok(())
+    }
+}
+
+/// Ruby Bundler vendor mapper (Production-Grade)
+pub struct BundlerMapper;
+
+impl BundlerMapper {
+    pub fn map_package(workspace_path: &Path, pkg: &LockedPackage, archive_path: &Path) -> Result<(), super::InstallError> {
+        let bundle_dir = workspace_path.join("vendor").join("bundle").join(&pkg.name);
+        fs::create_dir_all(&bundle_dir)
+            .map_err(|e| super::InstallError::IoError(format!("Failed to create bundle dir: {}", e)))?;
+
+        let file = fs::File::open(archive_path)
+            .map_err(|e| super::InstallError::IoError(format!("Failed to open gem archive: {}", e)))?;
+
+        let decompressed = GzDecoder::new(file);
+        let mut archive = Archive::new(decompressed);
+        archive.unpack(&bundle_dir)
+            .map_err(|e| super::InstallError::MapperError(format!("Failed to unpack Ruby gem {}: {}", pkg.name, e)))?;
+
+        // Automatically provision .bundle/config pointing Bundler to local vendor path
+        let bundle_config_dir = workspace_path.join(".bundle");
+        let _ = fs::create_dir_all(&bundle_config_dir);
+        let config_path = bundle_config_dir.join("config");
+        let config_content = r#"---
+BUNDLE_PATH: "vendor/bundle"
+BUNDLE_FROZEN: "true"
+BUNDLE_LOCAL: "true"
+"#;
+        let _ = fs::write(config_path, config_content);
+
+        Ok(())
+    }
+}
+
+/// Java Maven/Gradle local repository mapper
+pub struct MavenMapper;
+
+impl MavenMapper {
+    pub fn map_package(workspace_path: &Path, pkg: &LockedPackage, archive_path: &Path) -> Result<(), super::InstallError> {
+        let m2_dir = workspace_path.join(".m2").join("repository").join(&pkg.name);
+        fs::create_dir_all(&m2_dir)
+            .map_err(|e| super::InstallError::IoError(format!("Failed to create maven repo dir: {}", e)))?;
+        fs::copy(archive_path, m2_dir.join(format!("{}-{}.jar", pkg.name, pkg.version)))
+            .map_err(|e| super::InstallError::IoError(format!("Failed to copy jar: {}", e)))?;
+        Ok(())
+    }
+}

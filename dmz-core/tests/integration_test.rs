@@ -136,7 +136,7 @@ fn create_dummy_manifests(workspace: &PathBuf) {
     let cargo_toml = r#"
 [package]
 name = "e2e-test-app"
-version = "0.1.0"
+version = "1.0.8"
 edition = "2021"
 
 [dependencies]

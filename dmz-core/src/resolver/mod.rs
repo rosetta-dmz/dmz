@@ -79,7 +79,7 @@ impl ResolverEngine {
         let mut fetched_count = 0;
 
         let client = reqwest::blocking::Client::builder()
-            .user_agent("dmz-airgap-tool/0.1.0 (air-gap workspace manager)")
+            .user_agent("dmz-airgap-tool/1.0.8 (air-gap workspace manager)")
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
@@ -177,6 +177,41 @@ impl ResolverEngine {
                             } else {
                                 resolved_tarball
                             }
+                        }
+                        "pypi" | "python" => {
+                            let pypi_url = format!("https://pypi.org/pypi/{}/{}/json", pkg.name, concrete_version);
+                            let mut resolved_url = String::new();
+
+                            if let Ok(resp) = client.get(&pypi_url).send() {
+                                if resp.status().is_success() {
+                                    if let Ok(text) = resp.text() {
+                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                            if let Some(urls) = json.get("urls").and_then(|u| u.as_array()) {
+                                                for u in urls {
+                                                    if let Some(url_str) = u.get("url").and_then(|s| s.as_str()) {
+                                                        if url_str.ends_with(".whl") || url_str.ends_with(".tar.gz") {
+                                                            resolved_url = url_str.to_string();
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if resolved_url.is_empty() {
+                                format!(
+                                    "https://files.pythonhosted.org/packages/source/{}/{}/{}-{}.tar.gz",
+                                    &pkg.name[..1], pkg.name, pkg.name, concrete_version
+                                )
+                            } else {
+                                resolved_url
+                            }
+                        }
+                        "go" | "golang" => {
+                            format!("https://proxy.golang.org/{}/@v/{}.zip", pkg.name, concrete_version)
                         }
                         _ => {
                             info!(name = %pkg.name, ecosystem = %eco_str, "No source URL and unknown ecosystem, skipping download");

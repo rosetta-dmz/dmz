@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "closure_signature": "7da9ed6bef3a8c669c1ed975fbef03ee8077691017ff9d3ebd175c5f23767d30",
+  "packages": {
+    "lodash:4.17.21": {
+      "name": "lodash",
+      "version": "4.17.21",
+      "ecosystem": "Npm",
+      "sha256": "6eca97b867a3a5322504413b88721753aed6e6c7fff1c550ea22173ed8aa66f0",
+      "source_url": null,
+      "dependencies": []
+    }
+  }
+}

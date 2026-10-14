@@ -23,7 +23,7 @@ fn test_workspace_resolution_fail_fast_and_inheritance() {
     let member_cargo = r#"
         [package]
         name = "crate-a"
-        version = "0.1.0"
+        version = "1.0.8"
         edition = "2021"
 
         [dependencies]
@@ -117,7 +117,7 @@ fn test_mixed_cargo_workspace_and_paths() {
     let core_cargo = r#"
         [package]
         name = "dmz-core"
-        version = "0.1.0"
+        version = "1.0.8"
         edition = "2021"
 
         [dependencies]

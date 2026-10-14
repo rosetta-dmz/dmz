@@ -19,7 +19,7 @@ fn setup_mock_workspace() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     let manifest_content = r#"
         [package]
         name = "test-app"
-        version = "0.1.0"
+        version = "1.0.8"
         edition = "2021"
 
         [dependencies]
