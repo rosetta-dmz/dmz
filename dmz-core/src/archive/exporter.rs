@@ -121,7 +121,7 @@ impl AirGapExporter {
         // Append store items (if mode is Unified or DepsOnly)
         let mut packed_count = 0;
         if config.mode == ExportMode::Unified || config.mode == ExportMode::DepsOnly {
-            for (_pkg_key, pkg_info) in &lockfile.packages {
+            for pkg_info in lockfile.packages.values() {
                 // Skip local path dependencies/workspace members since they are in the workspace source[cite: 14]
                 if pkg_info.version.starts_with("path:") || pkg_info.version.contains("path") {
                     continue;

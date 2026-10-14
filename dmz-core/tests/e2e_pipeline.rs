@@ -11,7 +11,7 @@ fn setup_mock_workspace() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     let output_dir = tmp_dir.path().join("dist");
 
     fs::create_dir_all(&workspace_path).unwrap();
-    fs::create_dir_all(&workspace_path.join("src")).unwrap();
+    fs::create_dir_all(workspace_path.join("src")).unwrap();
     fs::create_dir_all(&store_path).unwrap();
     fs::create_dir_all(&output_dir).unwrap();
 

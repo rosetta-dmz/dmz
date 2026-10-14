@@ -358,7 +358,7 @@ impl ResolverEngine {
                                     {
                                         if let Some(tarball) = json
                                             .get("versions")
-                                            .and_then(|v| v.get(&clean_version))
+                                            .and_then(|v| v.get(clean_version))
                                             .and_then(|ver| ver.get("dist"))
                                             .and_then(|d| d.get("tarball"))
                                             .and_then(|t| t.as_str())

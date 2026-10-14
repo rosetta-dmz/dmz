@@ -106,8 +106,7 @@ directory = "vendor"
 
         if let Ok(status) = status {
             if !status.success() {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
+                return Err(io::Error::other(
                     "Failed to synchronize Cargo lockfile during vendor materialization",
                 ));
             }

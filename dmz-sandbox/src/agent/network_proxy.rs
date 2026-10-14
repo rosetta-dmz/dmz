@@ -19,8 +19,8 @@ impl DomainWhitelist {
             let trimmed = rule.trim().to_lowercase();
             if trimmed == "*" {
                 allow_all = true;
-            } else if trimmed.starts_with("*.") {
-                allowed_wildcards.push(trimmed[2..].to_string());
+            } else if let Some(wildcard) = trimmed.strip_prefix("*.") {
+                allowed_wildcards.push(wildcard.to_string());
             } else {
                 allowed_domains.insert(trimmed);
             }

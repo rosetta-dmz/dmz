@@ -34,6 +34,12 @@ pub struct EcosystemRegistry {
     handlers: Vec<Box<dyn EcosystemHandler>>,
 }
 
+impl Default for EcosystemRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EcosystemRegistry {
     pub fn new() -> Self {
         Self {

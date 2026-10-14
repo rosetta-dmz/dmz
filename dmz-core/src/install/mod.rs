@@ -90,7 +90,7 @@ impl InstallerEngine {
                 let mut matched_path = None;
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.extension().map_or(false, |ext| ext == "archive") {
+                    if path.extension().is_some_and(|ext| ext == "archive") {
                         if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
                             if fname.starts_with(&prefix) && fname.contains(&pkg.version) {
                                 matched_path = Some(path);

@@ -442,14 +442,14 @@ fn main() {
                         workspace
                     );
 
-                    let effective_lockfile =
-                        if lockfile == Path::new("dmz.lock") && workspace != Path::new(".") {
-                            workspace.join(&lockfile)
-                        } else if !lockfile.exists() && workspace.join(&lockfile).exists() {
-                            workspace.join(&lockfile)
-                        } else {
-                            lockfile
-                        };
+                    let effective_lockfile = if (lockfile == Path::new("dmz.lock")
+                        && workspace != Path::new("."))
+                        || (!lockfile.exists() && workspace.join(&lockfile).exists())
+                    {
+                        workspace.join(&lockfile)
+                    } else {
+                        lockfile
+                    };
 
                     let effective_store = if store == Path::new(".dmz/store")
                         && workspace != Path::new(".")

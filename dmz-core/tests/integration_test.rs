@@ -3,7 +3,7 @@ use dmz_core::resolver::lockfile::DmzLockfile;
 use dmz_core::resolver::ResolverEngine;
 use dmz_sandbox::platform::{run_sandboxed, SandboxConfig};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 #[test]
@@ -128,7 +128,7 @@ fn test_end_to_end_dmz_pipeline() {
 }
 
 /// Helper function to generate test manifests for Cargo, Npm, and PyPI
-fn create_dummy_manifests(workspace: &PathBuf) {
+fn create_dummy_manifests(workspace: &Path) {
     let cargo_toml = r#"
 [package]
 name = "e2e-test-app"
