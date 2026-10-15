@@ -6,8 +6,6 @@ Named after military terminology, DMZ is a fully open-source high-performance, s
 
 Of course, it's still recommended to use a daemon when necessary, however DMZ provides a lightweight solution to ensure interoperability and workspace/codebase reproducibility across Windows/Linux/MacOS regardless of connectivity, programming language, or dependencies used. DMZ focuses on eliminating the need to have a ridiculous amount of tools to manage the most important aspect of software development -- supply chain/SBOM visibility, management, and vulnerability analysis across your stack.
 
----
-
 ## Features
 
 - **Multi-Ecosystem Support:** Native discovery, dependency resolution, and sandbox verification for Rust (`Cargo.toml`), Node.js (`pnpm`, `yarn`, `npm`), Go (`go.mod`), and Python (`pyproject.toml`, `requirements.txt`).
@@ -15,7 +13,6 @@ Of course, it's still recommended to use a daemon when necessary, however DMZ pr
 - **Air-Gap Capable:** Pack, cryptographically verify, and extract complete `.tar.zst` dependency closures for completely offline environments.
 - **Engine-Driven Verification:** Programmatically validates imported workspaces using native ecosystem rules via `dmz ecosystem verify`.
 - **Supervisor & IPC Sockets:** Manages collateral stack services and exposes local API sockets for tool and IDE integrations.
-
 ---
 
 ## Installation & Quick Start
@@ -27,26 +24,24 @@ Of course, it's still recommended to use a daemon when necessary, however DMZ pr
    * **Windows:** `dmz-x86_64-pc-windows-msvc.exe`
 3. Make the binary executable (Linux/macOS):
 
-   ```
-   chmod +x dmz-*
-
-### MacOS GUI Quick Install Note:
-
-Apple designed modern macOS (from Catalina through Sequoia and beyond) to hard-block any application downloaded from the web unless it's notarized by Apple with a Developer ID. You can bypass using the quick install command here:
-
-```
-curl -sSL [https://raw.githubusercontent.com/rosetta-dmz/dmz/main/install-gui.sh](https://raw.githubusercontent.com/rosetta-dmz/dmz/main/install-gui.sh) | bash
+```bash
+chmod +x dmz-*  
 ```
 
-Inside install-gui.sh, the script downloads the tarball/zip, extracts it into /Applications, and automatically runs:
+---
 
-```
+### MacOS GUI Install Note:
+
+Apple designed modern macOS (from Catalina through Sequoia and beyond) to hard-block any application downloaded from the web unless it's notarized by Apple with a Developer ID. After placing the DMZ app in Applications, run the following command:
+
+```bash
 xattr -cr /Applications/DMZ.app
 ```
 
-DMZ's multi-ecosystem workflow automatically detects project ecosystems in your workspace root, handles offline resolution, and verifies builds securely via:
+## Multi-Ecosystem Workflow
+DMZ automatically detects project ecosystems in your workspace root, handles offline resolution, and verifies builds securely via:
 
-```
+```bash
 # Scan and discover active ecosystem stacks (Rust, Node, Go, Python, etc.)
 dmz ecosystem discover
 
@@ -64,16 +59,9 @@ dmz ecosystem verify
 
 To unpack and verify an isolated closure archive offline:
 
-```
+```bash
 dmz airgap import --archive dist/workspace_closure.tar.zst --store ./offline_store
 ```
-
-To run the complete end-to-end multi-ecosystem air-gap pipeline script:
-
-```
-./airgap_pipeline.sh
-```
-
 
 ## License
 
