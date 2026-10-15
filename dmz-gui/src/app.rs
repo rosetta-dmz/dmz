@@ -69,14 +69,7 @@ impl eframe::App for DmzGuiApp {
                     egui::Layout::left_to_right(egui::Align::Min),
                     |ui| {
                         let navigation_width = 220.0_f32.min(ui.available_width() * 0.35);
-                        navigation::show(
-                            ui,
-                            &mut self.active_tab,
-                            &self.status_message,
-                            self.pages.show_status_bar(),
-                            navigation_width,
-                            &visuals,
-                        );
+                        navigation::show(ui, &mut self.active_tab, navigation_width, &visuals);
 
                         let surface_size = egui::vec2(ui.available_width(), ui.available_height());
                         ui.allocate_ui_with_layout(
@@ -138,8 +131,16 @@ impl eframe::App for DmzGuiApp {
                                     ui.separator();
                                     ui.add_space(10.0);
 
+                                    let status_bar_height = if self.pages.show_status_bar() {
+                                        48.0
+                                    } else {
+                                        0.0
+                                    };
                                     egui::ScrollArea::vertical()
                                         .auto_shrink([false, false])
+                                        .max_height(
+                                            (ui.available_height() - status_bar_height).max(0.0),
+                                        )
                                         .show(ui, |ui| {
                                             self.pages.show_tab(
                                                 self.active_tab,
@@ -150,6 +151,9 @@ impl eframe::App for DmzGuiApp {
                                                 &mut self.status_message,
                                             );
                                         });
+                                    if self.pages.show_status_bar() {
+                                        components::status_bar(ui, &self.status_message);
+                                    }
                                 });
                             },
                         );

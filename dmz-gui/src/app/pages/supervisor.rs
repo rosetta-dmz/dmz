@@ -1,5 +1,7 @@
 use eframe::egui;
 
+use super::super::components;
+
 #[derive(Default)]
 pub(super) struct SupervisorState {
     active: bool,
@@ -8,74 +10,78 @@ pub(super) struct SupervisorState {
 }
 
 pub(super) fn show(state: &mut SupervisorState, ui: &mut egui::Ui, status_message: &mut String) {
-    ui.heading("Workspace Process Supervisor");
-    ui.label(
-        "Monitor localized IPC socket streams, background collateral services, and process trees.",
+    components::page_header(
+        ui,
+        "Supervisor IPC",
+        "Manage workspace services and inspect local process-supervisor status.",
     );
-    ui.add_space(10.0);
 
-    ui.horizontal(|ui| {
-        ui.label("Supervisor Lifecycle Status:");
-        if state.active {
-            ui.colored_label(egui::Color32::GREEN, "ACTIVE (Localized Thread Running)");
-            if ui.button("Stop Supervisor Session").clicked() {
-                state.active = false;
-                state.postgres_service = false;
-                state.redis_service = false;
-                *status_message =
-                    String::from("Workspace Supervisor terminated. Footprint: 0% CPU, 0 MB RAM.");
+    components::section(ui, |ui| {
+        components::section_header(ui, "Supervisor lifecycle");
+        ui.horizontal_wrapped(|ui| {
+            if state.active {
+                ui.colored_label(egui::Color32::GREEN, "Active · localized thread running");
+                if components::action_button(ui, "Stop session", false).clicked() {
+                    state.active = false;
+                    state.postgres_service = false;
+                    state.redis_service = false;
+                    *status_message = String::from(
+                        "Workspace Supervisor terminated. Footprint: 0% CPU, 0 MB RAM.",
+                    );
+                }
+            } else {
+                ui.colored_label(
+                    ui.visuals().widgets.noninteractive.fg_stroke.color,
+                    "Inactive · zero idle footprint",
+                );
+                if components::action_button(ui, "Start session", true).clicked() {
+                    state.active = true;
+                    *status_message = String::from("Workspace Supervisor spawned successfully.");
+                }
             }
-        } else {
-            ui.colored_label(
-                egui::Color32::GRAY,
-                "INACTIVE (Zero Idle Footprint: 0% CPU, 0 MB RAM)",
-            );
-            if ui.button("Start Supervisor Session").clicked() {
-                state.active = true;
-                *status_message = String::from("Workspace Supervisor spawned successfully.");
-            }
-        }
+        });
     });
 
-    ui.add_space(10.0);
-    ui.separator();
+    ui.add_space(16.0);
+    components::section(ui, |ui| {
+        components::section_header(ui, "Managed services");
+        ui.checkbox(&mut state.postgres_service, "Local Postgres service");
+        ui.checkbox(&mut state.redis_service, "Local Redis service");
+    });
 
-    ui.heading("Collateral Stack Services & IDE IPC Sockets");
-    ui.add_space(5.0);
+    ui.add_space(16.0);
+    components::section(ui, |ui| {
+        components::section_header(ui, "IPC and session details");
+        #[cfg(unix)]
+        ui.label("IPC socket · /tmp/dmz_supervisor.sock");
 
-    ui.checkbox(
-        &mut state.postgres_service,
-        "Local Postgres Service (Managed by Supervisor)",
-    );
-    ui.checkbox(
-        &mut state.redis_service,
-        "Local Redis Service (Managed by Supervisor)",
-    );
+        #[cfg(windows)]
+        ui.label(r"IPC pipe · \\.\pipe\dmz_supervisor");
 
-    ui.add_space(10.0);
+        ui.add_space(8.0);
+        egui::Grid::new("supervisor_summary")
+            .num_columns(2)
+            .spacing([16.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Supervisor");
+                ui.label(if state.active { "Running" } else { "Idle" });
+                ui.end_row();
 
-    #[cfg(unix)]
-    ui.label("IPC Socket Path: /tmp/dmz_supervisor.sock (VS Code / JetBrains Integration)");
+                ui.label("Postgres");
+                ui.label(if state.postgres_service {
+                    "Up"
+                } else {
+                    "Stopped"
+                });
+                ui.end_row();
 
-    #[cfg(windows)]
-    ui.label(r"IPC Pipe Path: \\.\pipe\dmz_supervisor (VS Code / JetBrains Integration)");
+                ui.label("Redis");
+                ui.label(if state.redis_service { "Up" } else { "Stopped" });
+                ui.end_row();
 
-    ui.add_space(15.0);
-
-    ui.group(|ui| {
-        ui.label(format!(
-            "Supervisor State: {}",
-            if state.active { "RUNNING" } else { "IDLE" }
-        ));
-        ui.label(format!(
-            "Active Stack Services: Postgres [{}], Redis [{}]",
-            if state.postgres_service {
-                "UP"
-            } else {
-                "STOPPED"
-            },
-            if state.redis_service { "UP" } else { "STOPPED" }
-        ));
-        ui.label("Connected IDE Clients: 1 (GUI Desktop)");
+                ui.label("Connected IDE clients");
+                ui.label("1 · GUI desktop");
+                ui.end_row();
+            });
     });
 }

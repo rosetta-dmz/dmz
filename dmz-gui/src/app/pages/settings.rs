@@ -171,12 +171,11 @@ impl AppearanceState {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.heading("Appearance");
-                ui.label(
-                    egui::RichText::new("Personalize the look and feel of your DMZ workspace.")
-                        .color(muted),
+                super::super::components::page_header(
+                    ui,
+                    "Appearance",
+                    "Personalize the look and feel of your DMZ workspace.",
                 );
-                ui.add_space(14.0);
 
                 super::super::components::section(ui, |ui| {
                     ui.heading("Theme");
@@ -184,7 +183,7 @@ impl AppearanceState {
                         egui::RichText::new("Choose a palette or import a theme file.")
                             .color(muted),
                     );
-                    ui.add_space(10.0);
+                    ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
                             ui.label(egui::RichText::new("Current theme").color(muted).size(12.0));
@@ -207,22 +206,13 @@ impl AppearanceState {
                     });
                 });
 
-                ui.add_space(12.0);
+                ui.add_space(16.0);
                 super::super::components::section(ui, |ui| {
                     ui.heading("Interface");
-                    ui.label(
-                        egui::RichText::new("Adjust the scale and persistent workspace details.")
-                            .color(muted),
-                    );
-                    ui.add_space(10.0);
+                    ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
                             ui.label("Widget size");
-                            ui.label(
-                                egui::RichText::new("Scale text and controls throughout the app.")
-                                    .color(muted)
-                                    .size(12.0),
-                            );
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             egui::ComboBox::from_id_salt("widget_size_combo")
@@ -253,7 +243,7 @@ impl AppearanceState {
                             ui.label("Show status bar");
                             ui.label(
                                 egui::RichText::new(
-                                    "Keep the workspace status at the bottom of the navigation.",
+                                    "Show the current workspace status in the main area.",
                                 )
                                 .color(muted)
                                 .size(12.0),
@@ -304,7 +294,7 @@ impl AppearanceState {
                     egui::RichText::new("Pick a palette for your DMZ workspace.")
                         .color(ui.visuals().widgets.noninteractive.fg_stroke.color),
                 );
-                ui.add_space(10.0);
+                ui.add_space(8.0);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
