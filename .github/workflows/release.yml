@@ -81,7 +81,7 @@ jobs:
         run: cargo build --release --package dmz-gui
 
       - name: Package macOS App Bundle
-        if: matrix.os == 'macos-latest'
+        if: contains(matrix.os, 'macos')
         run: |
           mkdir -p DMZ.app/Contents/MacOS DMZ.app/Contents/Resources
           cp target/release/dmz-gui DMZ.app/Contents/MacOS/dmz-gui

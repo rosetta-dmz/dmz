@@ -1,9 +1,9 @@
+use dmz_core::packaging::AirGapImporter;
 use dmz_core::resolver::lockfile::{DmzLockfile, LockedPackage};
 use dmz_core::resolver::manifest::Ecosystem;
-use dmz_core::packaging::AirGapImporter;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use sha2::{Sha256, Digest};
 
 #[test]
 fn test_air_gap_import_and_verification() {
@@ -33,7 +33,8 @@ fn test_air_gap_import_and_verification() {
     let lockfile = DmzLockfile {
         version: 1,
         // Match the expected signature or prefix checked by your lockfile verification logic
-        closure_signature: "4c378397e78464329d42b543b944d2824cdd9856abac26c0f26e323587289ab6".to_string(),
+        closure_signature: "4c378397e78464329d42b543b944d2824cdd9856abac26c0f26e323587289ab6"
+            .to_string(),
         packages,
     };
     let lock_json = serde_json::to_string_pretty(&lockfile).unwrap();

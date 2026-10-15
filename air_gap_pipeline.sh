@@ -4,7 +4,7 @@ set -euo pipefail
 echo "=================================================="
 echo "=== Cleaning previous build & test artifacts ==="
 echo "=================================================="
-rm -rf dist/ .dmz/ store/ dmz.lock airgap-test-env/
+rm -rf dist/ .dmz/ store/ dmz.lock airgap-test-env/ dmz-import/
 
 echo "=================================================="
 echo "=== Resolving workspace dependencies ==="
@@ -37,8 +37,9 @@ dmz airgap export \
 echo "=================================================="
 echo "=== Simulating isolated air-gap import ==="
 echo "=================================================="
-mkdir -p airgap-test-env
-cd airgap-test-env
+rm -rf dmz-import
+mkdir -p dmz-import
+cd dmz-import
 
 # Import the archive (unpacks store, places source code into 'workspace/')
 dmz airgap import \
@@ -46,10 +47,17 @@ dmz airgap import \
     --store ./offline_store
 
 echo "=================================================="
-echo "=== Verifying offline workspace via DMZ engine ==="
+echo "=== Installing dependencies offline (DMZ Native) ==="
 echo "=================================================="
 cd workspace
+# Materialize cached store artifacts into project layouts (node_modules, vendor, etc.)
+dmz install \
+    --store ../offline_store \
+    --lockfile dmz.lock
 
+echo "=================================================="
+echo "=== Verifying offline workspace via DMZ engine ==="
+echo "=================================================="
 # Execute engine-driven ecosystem verification natively
 dmz ecosystem verify
 

@@ -1,7 +1,7 @@
 pub mod handlers;
 
-use std::path::{Path, PathBuf};
 use anyhow::Result;
+use std::path::{Path, PathBuf};
 
 /// Represents a standardized command configuration for delegated resolution and verification.
 #[derive(Debug, Clone)]
@@ -10,27 +10,34 @@ pub struct CommandSpec {
     pub args: Vec<String>,
 }
 
-/// The core trait defining a pluggable workspace ecosystem handler.
 pub trait EcosystemHandler: Send + Sync {
-    /// Unique identifier for the ecosystem (e.g., "rust", "pnpm", "yarn", "npm", "go", "python")
     fn name(&self) -> &str;
-
-    /// Automatically detects if this ecosystem is present in the workspace root.
     fn detect(&self, workspace_root: &Path) -> bool;
-
-    /// Returns well-known dependency cache or store paths relative to root.
     fn cache_paths(&self, workspace_root: &Path) -> Vec<PathBuf>;
-
-    /// Returns the optional default command to resolve/fetch dependencies offline.
     fn resolution_command(&self) -> Option<CommandSpec>;
-
-    /// Returns the native command spec to verify workspace integrity/offline build.
     fn verification_command(&self, workspace_root: &Path) -> Option<CommandSpec>;
+
+    /// Default implementation: returns Ok(()) so other ecosystems
+    /// don't require boilerplate materialization code unless overridden.
+    fn materialize(
+        &self,
+        _workspace_root: &Path,
+        _offline_store: &Path,
+        _lockfile_path: &Path,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Registry that aggregates and orchestrates all ecosystem handlers.
 pub struct EcosystemRegistry {
     handlers: Vec<Box<dyn EcosystemHandler>>,
+}
+
+impl Default for EcosystemRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EcosystemRegistry {
@@ -64,7 +71,12 @@ impl EcosystemRegistry {
         for eco in active {
             detected_names.push(eco.name().to_string());
             if let Some(cmd) = eco.resolution_command() {
-                println!("[dmz ecosystem] Detected '{}' stack. Resolution rule: {} {}", eco.name(), cmd.program, cmd.args.join(" "));
+                println!(
+                    "[dmz ecosystem] Detected '{}' stack. Resolution rule: {} {}",
+                    eco.name(),
+                    cmd.program,
+                    cmd.args.join(" ")
+                );
             }
         }
         Ok(detected_names)
@@ -82,5 +94,30 @@ impl EcosystemRegistry {
             }
         }
         all_paths
+    }
+
+    /// Iterates through all dynamically discovered active ecosystems and materializes them.
+    pub fn install_workspace(
+        &self,
+        workspace_root: &Path,
+        offline_store: &Path,
+        lockfile_path: &Path,
+    ) -> Result<()> {
+        let active_handlers = self.discover_active(workspace_root);
+
+        if active_handlers.is_empty() {
+            println!("[dmz install] No active ecosystem stacks detected.");
+            return Ok(());
+        }
+
+        for eco in active_handlers {
+            println!(
+                "[dmz install] Materializing ecosystem stack: '{}'",
+                eco.name()
+            );
+            eco.materialize(workspace_root, offline_store, lockfile_path)?;
+        }
+
+        Ok(())
     }
 }

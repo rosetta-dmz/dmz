@@ -1,8 +1,9 @@
-pub mod ecosystem;
 pub mod archive;
+pub mod diagnostics;
+pub mod ecosystem;
+pub mod install;
 pub mod packaging;
 pub mod resolver;
 pub mod vcs;
-pub mod diagnostics;
 
 pub use resolver::ResolverEngine;

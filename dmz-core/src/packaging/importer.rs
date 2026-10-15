@@ -1,13 +1,17 @@
 use crate::resolver::lockfile::DmzLockfile;
+use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use sha2::{Sha256, Digest};
 
 pub struct AirGapImporter;
 
 impl AirGapImporter {
     /// Imports and verifies a Target C .tar.zst closure archive offline
-    pub fn import_and_verify(archive_path: &Path, expected_sha256: &str, extract_to: &Path) -> Result<PathBuf, String> {
+    pub fn import_and_verify(
+        archive_path: &Path,
+        expected_sha256: &str,
+        extract_to: &Path,
+    ) -> Result<PathBuf, String> {
         // 1. Cryptographic SHA-256 verification
         let mut file = File::open(archive_path).map_err(|e| e.to_string())?;
         let mut hasher = Sha256::new();

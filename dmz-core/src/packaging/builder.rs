@@ -97,8 +97,9 @@ impl PackageBuilder {
         let output_file = File::create(&artifact_path)
             .map_err(|e| BuildError::IoError(format!("Failed to create output file: {}", e)))?;
 
-        let zstd_encoder = ZstdEncoder::new(output_file, config.zstd_level)
-            .map_err(|e| BuildError::ArchiveError(format!("Zstd encoder initialization failed: {}", e)))?;
+        let zstd_encoder = ZstdEncoder::new(output_file, config.zstd_level).map_err(|e| {
+            BuildError::ArchiveError(format!("Zstd encoder initialization failed: {}", e))
+        })?;
 
         let mut tar_builder = TarBuilder::new(zstd_encoder);
 
@@ -120,17 +121,19 @@ impl PackageBuilder {
         if config.lockfile_path.exists() {
             tar_builder
                 .append_path_with_name(&config.lockfile_path, "dmz.lock")
-                .map_err(|e| BuildError::ArchiveError(format!("Failed to embed lockfile: {}", e)))?;
+                .map_err(|e| {
+                    BuildError::ArchiveError(format!("Failed to embed lockfile: {}", e))
+                })?;
         }
 
         // 6. Finalize archive and flush zstd encoder
-        let zstd_encoder = tar_builder
-            .into_inner()
-            .map_err(|e| BuildError::ArchiveError(format!("Failed to finalize tar stream: {}", e)))?;
+        let zstd_encoder = tar_builder.into_inner().map_err(|e| {
+            BuildError::ArchiveError(format!("Failed to finalize tar stream: {}", e))
+        })?;
 
-        zstd_encoder
-            .finish()
-            .map_err(|e| BuildError::ArchiveError(format!("Zstd compression finish failed: {}", e)))?;
+        zstd_encoder.finish().map_err(|e| {
+            BuildError::ArchiveError(format!("Zstd compression finish failed: {}", e))
+        })?;
 
         // 7. Calculate SHA-256 integrity hash and byte size of final artifact
         let (sha256, size_bytes) = Self::calculate_checksum_and_size(&artifact_path)?;
@@ -170,7 +173,9 @@ impl PackageBuilder {
         header.set_cksum();
 
         tar.append_data(&mut header, ".dmz/closure.json", closure_json.as_bytes())
-            .map_err(|e| BuildError::ArchiveError(format!("Failed to write closure metadata: {}", e)))?;
+            .map_err(|e| {
+                BuildError::ArchiveError(format!("Failed to write closure metadata: {}", e))
+            })?;
 
         for (key, pkg) in &lockfile.packages {
             info!(package = %key, sha256 = %pkg.sha256, "Archiving locked package entry");
@@ -218,8 +223,9 @@ impl PackageBuilder {
             if path.is_dir() {
                 Self::append_dir_filtered(tar, &path, &rel_path)?;
             } else if path.is_file() {
-                tar.append_path_with_name(&path, &rel_path)
-                    .map_err(|e| BuildError::ArchiveError(format!("Failed to pack file {:?}: {}", path, e)))?;
+                tar.append_path_with_name(&path, &rel_path).map_err(|e| {
+                    BuildError::ArchiveError(format!("Failed to pack file {:?}: {}", path, e))
+                })?;
             }
         }
 
