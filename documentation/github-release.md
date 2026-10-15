@@ -24,4 +24,3 @@ git pull origin main
 
 # Tag and push the release version
 git tag -a v1.0.9 -m "DMZ v1.0.9: DMZ Platform Release"
-git push origin v1.0.9
