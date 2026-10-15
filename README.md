@@ -6,8 +6,6 @@ Named after military terminology, DMZ is a fully open-source high-performance, s
 
 Of course, it's still recommended to use a daemon when necessary, however DMZ provides a lightweight solution to ensure interoperability and workspace/codebase reproducibility across Windows/Linux/MacOS regardless of connectivity, programming language, or dependencies used. We focus on eliminating the need to have a ridiculous amount of tools to manage the most important aspect of software development -- supply chain/SBOM visibility, management, and vulnerability analysis, stack-wide.
 
-Yes, there's a desktop client and CLI because the dev community deserves better AND the best of both worlds.
-
 ---
 
 ## Features
