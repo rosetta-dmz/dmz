@@ -68,6 +68,12 @@ impl RustVendorMaterializer {
                 ));
             }
 
+            let checksum_content = format!(r#"{{"package": "{}", "files": {{}}}}"#, c.checksum);
+            fs::write(
+                target_crate_dir.join(".cargo-checksum.json"),
+                checksum_content,
+            )?;
+
             vendor_config_sources.insert(
                 crate_folder_name,
                 serde_json::json!({
@@ -93,7 +99,7 @@ impl RustVendorMaterializer {
 replace-with = "vendored-sources"
 
 [source.vendored-sources]
-directory = "vendor"
+directory = ".cargo/vendor"
 "#;
         fs::write(cargo_dir.join("config.toml"), config_toml_content.trim())?;
 

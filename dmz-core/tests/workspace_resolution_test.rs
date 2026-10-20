@@ -19,7 +19,7 @@ fn test_workspace_resolution_fail_fast_and_inheritance() {
     fs::write(root.join("Cargo.toml"), root_cargo).unwrap();
 
     // 2. Create workspace member crate-a using workspace inheritance
-    fs::create_dir_all(root.join("crate-a")).unwrap();
+    fs::create_dir_all(root.join("crate-a/src")).unwrap();
     let member_cargo = r#"
         [package]
         name = "crate-a"
@@ -30,6 +30,7 @@ fn test_workspace_resolution_fail_fast_and_inheritance() {
         serde = { workspace = true }
     "#;
     fs::write(root.join("crate-a/Cargo.toml"), member_cargo).unwrap();
+    fs::write(root.join("crate-a/src/lib.rs"), "").unwrap();
 
     // 3. Run resolver engine and verify packages are correctly populated
     let lockfile_result = ResolverEngine::resolve_workspace(root);
@@ -119,7 +120,7 @@ fn test_mixed_cargo_workspace_and_paths() {
     "#;
     fs::write(root.join("Cargo.toml"), root_cargo).unwrap();
 
-    fs::create_dir_all(root.join("dmz-core")).unwrap();
+    fs::create_dir_all(root.join("dmz-core/src")).unwrap();
     let core_cargo = r#"
         [package]
         name = "dmz-core"
@@ -131,6 +132,7 @@ fn test_mixed_cargo_workspace_and_paths() {
         serde = "1.0"
     "#;
     fs::write(root.join("dmz-core/Cargo.toml"), core_cargo).unwrap();
+    fs::write(root.join("dmz-core/src/lib.rs"), "").unwrap();
 
     let lockfile_result = ResolverEngine::resolve_workspace(root);
     assert!(lockfile_result.is_ok());

@@ -8,13 +8,16 @@ DMZ provides a robust, self-contained CLI for orchestrating zero-dependency sand
 
 | Command | Purpose |
 | :--- | :--- |
+| [`dmz init`](#workspace-initialization-dmz-init) | Initializes project workspace for DMZ capture and generates `dmz.lock` |
+| [`dmz bundle`](#air-gap-bundling-dmz-bundle) | One-shot resolution, dependency fetching, and export into an air-gap bundle (`.tar.zst`) |
+| [`dmz import`](#importing--verifying-an-air-gap-bundle-dmz-airgap-import) | Cryptographically verifies and unpacks an air-gap archive into target workspace & store |
+| [`dmz shell`](#sandboxed-shell-dmz-shell) | Opens an interactive terminal inside a daemonless sandbox in the workspace |
 | [`dmz resolve`](#resolving-dependencies-dmz-resolve) | Scans workspace manifests and generates a deterministic `dmz.lock` closure |
 | [`dmz fetch`](#fetching-dependencies-dmz-fetch) | Downloads and caches locked package artifacts into the local secure store |
 | [`dmz install`](#installing-dependencies-offline-dmz-install) | Materializes cached store artifacts into project layouts (node_modules, .cargo/vendor, etc.) offline |
 | [`dmz ecosystem`](#ecosystem-management-dmz-ecosystem) | Discovers active language stacks and runs native offline engine verifications |
 | [`dmz build`](#deterministic-packaging-dmz-build) | Builds deterministic package artifacts (`Target A: Deps`, `Target B: App`, `Target C: Unified`) |
 | [`dmz airgap export`](#exporting-an-air-gap-bundle-dmz-airgap-export) | Bundles workspace source, lockfiles, and store items into a `.tar.zst` air-gap archive |
-| [`dmz airgap import`](#importing--verifying-an-air-gap-bundle-dmz-airgap-import) | Cryptographically verifies and unpacks an air-gap archive into a target store and workspace |
 | [`dmz sandbox`](#sandbox-execution-commands-dmz-sandbox) | Executes commands inside a native, daemonless OS isolation sandbox |
 | [`dmz proxy`](#network-proxy-management-dmz-proxy) | Manages outbound network proxy auditing and domain whitelist enforcement |
 
@@ -234,6 +237,40 @@ dmz sandbox -w ./my-app --diagnose /bin/sh -c "cargo check --offline"
 
 # Run tests with network disabled
 dmz sandbox -w ./my-app /bin/sh -c "npm test"
+```
+
+---
+
+### Sandboxed Shell (`dmz shell`)
+
+Opens an interactive terminal session inside the daemonless sandbox in the workspace. By default, process isolation and air-gap network blocking are enabled out-of-the-box, with DMZ environment variables (`DMZ_WORKSPACE`, `DMZ_STORE`, `CARGO_HOME`, `NODE_PATH`) automatically exported and visual prompt indicators set (`(dmz-sandbox)` or `(dmz-host)`).
+
+```bash
+dmz shell [OPTIONS] [ARGS...]
+```
+
+#### **Options**
+* `-w, --workspace <PATH>` — Workspace directory context mounted R/W. *(Default: `.`)*
+* `--closure <PATH>` — Dependency closure store mounted R/O. *(Default: `/nix/store`)*
+* `-s, --shell <BINARY>` — Shell binary or command to execute. *(Default: Auto-detected `$SHELL` or `/bin/sh`)*
+* `-c, --command <CMD>` — Execute a command string in the shell and exit.
+* `--allow-network` — Permits outbound network connections inside the sandbox *(Default: `false` for complete air-gap isolation)*.
+* `--no-sandbox` — Disables sandbox process isolation and executes directly on the host with DMZ environment variables exported.
+
+#### **Examples**
+
+```bash
+# Open an interactive shell inside the air-gapped sandbox
+dmz shell
+
+# Execute a one-off command inside the sandbox
+dmz shell -c "cargo test --offline"
+
+# Open an interactive shell with network enabled
+dmz shell --allow-network
+
+# Open unsandboxed shell on the host with DMZ environment variables loaded
+dmz shell --no-sandbox
 ```
 
 ---

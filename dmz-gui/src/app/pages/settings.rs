@@ -128,6 +128,9 @@ impl AppearanceState {
         for font in style.text_styles.values_mut() {
             font.size *= scale;
         }
+        style.visuals.widgets.hovered.expansion = 0.0;
+        style.visuals.widgets.active.expansion = 0.0;
+        style.visuals.widgets.open.expansion = 0.0;
 
         if self.preferences.theme_name == "System" {
             ctx.set_theme(egui::ThemePreference::System);

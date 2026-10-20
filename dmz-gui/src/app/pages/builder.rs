@@ -80,20 +80,24 @@ pub(super) fn show(
             .spacing([16.0, 8.0])
             .min_col_width(100.0)
             .show(ui, |ui| {
-                ui.label("Artifact name");
+                ui.label("Artifact Name");
                 ui.add_sized(
                     egui::vec2(ui.available_width(), 32.0),
-                    egui::TextEdit::singleline(&mut state.artifact_name),
+                    egui::TextEdit::singleline(&mut state.artifact_name)
+                        .vertical_align(egui::Align::Center)
+                        .margin(egui::Margin::symmetric(8, 0)),
                 );
                 ui.end_row();
 
-                ui.label("Output directory");
+                ui.label("Output Directory");
                 ui.horizontal(|ui| {
-                    let browse_width = 86.0;
+                    let browse_width = 88.0;
                     let field_width = (ui.available_width() - browse_width - 8.0).max(80.0);
                     ui.add_sized(
                         egui::vec2(field_width, 32.0),
-                        egui::TextEdit::singleline(&mut state.output_dir),
+                        egui::TextEdit::singleline(&mut state.output_dir)
+                            .vertical_align(egui::Align::Center)
+                            .margin(egui::Margin::symmetric(8, 0)),
                     );
                     if ui.button("Browse...").clicked() {
                         if let Some(path) = rfd::FileDialog::new().pick_folder() {

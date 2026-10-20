@@ -9,6 +9,7 @@ use eframe::egui;
 enum Tab {
     Resolver,
     Builder,
+    WorkspaceSandbox,
     AgentSandbox,
     AirGap,
     Supervisor,
@@ -51,7 +52,11 @@ impl eframe::App for DmzGuiApp {
             Ok(visuals) => visuals,
             Err(error) => {
                 self.status_message = format!("Could not apply appearance settings: {error}");
-                let visuals = egui::Visuals::dark();
+                let mut visuals = egui::Visuals::dark();
+                visuals.widgets.hovered.expansion = 0.0;
+                visuals.widgets.active.expansion = 0.0;
+                visuals.widgets.open.expansion = 0.0;
+                visuals.widgets.inactive.bg_stroke.width = visuals.widgets.hovered.bg_stroke.width;
                 ctx.set_visuals(visuals.clone());
                 visuals
             }
