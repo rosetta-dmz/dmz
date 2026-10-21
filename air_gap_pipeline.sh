@@ -29,10 +29,7 @@ dmz build --target unified --output dist --name workspace_closure
 echo "=================================================="
 echo "=== Exporting the air-gap bundle (Unified) ==="
 echo "=================================================="
-dmz airgap export \
-    --output dist/workspace_closure.tar.zst \
-    --store .dmz/store \
-    --mode unified
+dmz airgap export --output dist/workspace_closure.tar.zst --store .dmz/store --mode unified
 
 echo "=================================================="
 echo "=== Simulating isolated air-gap import ==="
@@ -42,18 +39,14 @@ mkdir -p dmz-import
 cd dmz-import
 
 # Import the archive (unpacks store, places source code into 'workspace/')
-dmz airgap import \
-    --archive ../dist/workspace_closure.tar.zst \
-    --store ./offline_store
+dmz airgap import --archive ../dist/workspace_closure.tar.zst --store ./offline_store
 
 echo "=================================================="
 echo "=== Installing dependencies offline (DMZ Native) ==="
 echo "=================================================="
 cd workspace
 # Materialize cached store artifacts into project layouts (node_modules, vendor, etc.)
-dmz install \
-    --store ../offline_store \
-    --lockfile dmz.lock
+dmz install --store ../offline_store --lockfile dmz.lock
 
 echo "=================================================="
 echo "=== Verifying offline workspace via DMZ engine ==="

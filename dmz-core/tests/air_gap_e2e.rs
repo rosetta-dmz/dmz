@@ -84,3 +84,44 @@ fn test_multiecosystem_airgap_roundtrip() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_relative_paths_anchor_to_selected_workspace() -> anyhow::Result<()> {
+    let src_dir = tempdir()?;
+    let workspace_path = src_dir.path().join("external_project");
+    fs::create_dir_all(&workspace_path)?;
+
+    fs::write(
+        workspace_path.join("Cargo.toml"),
+        "[package]\nname = \"external-app\"\nversion = \"0.1.0\"",
+    )?;
+
+    let mock_lockfile_json = r#"{
+        "version": 1,
+        "closure_signature": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "packages": {}
+    }"#;
+    fs::write(workspace_path.join("dmz.lock"), mock_lockfile_json)?;
+
+    // Configure export with relative paths as the GUI/CLI default provides
+    let export_config = ExportConfig {
+        workspace_path: workspace_path.clone(),
+        lockfile_path: std::path::PathBuf::from("dmz.lock"),
+        store_dir: std::path::PathBuf::from(".dmz/store"),
+        output_path: std::path::PathBuf::from("dist/workspace_closure.tar.zst"),
+        zstd_level: 3,
+        ..Default::default()
+    };
+
+    let manifest = AirGapExporter::export(&export_config)?;
+    assert!(!manifest.archive_sha256.is_empty());
+
+    // Verify it exported into the selected workspace
+    let expected_archive = workspace_path.join("dist/workspace_closure.tar.zst");
+    assert!(
+        expected_archive.exists(),
+        "Export archive must be created inside the selected workspace"
+    );
+
+    Ok(())
+}

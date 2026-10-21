@@ -1,5 +1,5 @@
 use eframe::egui;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::super::components;
 use dmz_core::ecosystem::EcosystemRegistry;
@@ -80,7 +80,12 @@ pub(super) fn show(
                             .margin(egui::Margin::symmetric(8, 0)),
                     );
                     if ui.button("Browse...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        let mut dialog = rfd::FileDialog::new();
+                        let ws_path = PathBuf::from(&*workspace_path);
+                        if ws_path.exists() {
+                            dialog = dialog.set_directory(&ws_path);
+                        }
+                        if let Some(path) = dialog.pick_folder() {
                             state.store_dir = path.display().to_string();
                         }
                     }
@@ -104,16 +109,22 @@ pub(super) fn show(
         components::section_header(ui, "Dependency Lifecycle Actions");
         ui.horizontal_wrapped(|ui| {
             if components::action_button(ui, "Scan & resolve dmz.lock", true).clicked() {
-                let path = PathBuf::from(&*workspace_path);
+                let workspace = PathBuf::from(&*workspace_path);
+                let ws_canon =
+                    std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
                 let target_opt = if state.target_platform.trim().is_empty() {
                     None
                 } else {
                     Some(state.target_platform.trim().to_string())
                 };
 
-                match ResolverEngine::resolve_workspace_with_target(&path, target_opt) {
+                match ResolverEngine::resolve_workspace_with_target(&ws_canon, target_opt) {
                     Ok(lockfile) => {
-                        let out = PathBuf::from(&*lockfile_path);
+                        let out = if Path::new(&*lockfile_path).is_relative() {
+                            ws_canon.join(&*lockfile_path)
+                        } else {
+                            PathBuf::from(&*lockfile_path)
+                        };
                         if let Err(error) = lockfile.save(&out) {
                             *status_message = format!("Error saving lockfile: {error}");
                         } else {
@@ -132,8 +143,19 @@ pub(super) fn show(
             }
 
             if components::action_button(ui, "Fetch into store (dmz fetch)", false).clicked() {
-                let lock_path = PathBuf::from(&*lockfile_path);
-                let store = PathBuf::from(&state.store_dir);
+                let workspace = PathBuf::from(&*workspace_path);
+                let ws_canon =
+                    std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
+                let lock_path = if Path::new(&*lockfile_path).is_relative() {
+                    ws_canon.join(&*lockfile_path)
+                } else {
+                    PathBuf::from(&*lockfile_path)
+                };
+                let store = if Path::new(&state.store_dir).is_relative() {
+                    ws_canon.join(&state.store_dir)
+                } else {
+                    PathBuf::from(&state.store_dir)
+                };
                 match ResolverEngine::fetch_dependencies(&lock_path, &store) {
                     Ok(count) => {
                         *status_message = format!(
@@ -149,11 +171,21 @@ pub(super) fn show(
 
             if components::action_button(ui, "Install offline (dmz install)", false).clicked() {
                 let workspace = PathBuf::from(&*workspace_path);
-                let lock_path = PathBuf::from(&*lockfile_path);
-                let store = PathBuf::from(&state.store_dir);
+                let ws_canon =
+                    std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
+                let lock_path = if Path::new(&*lockfile_path).is_relative() {
+                    ws_canon.join(&*lockfile_path)
+                } else {
+                    PathBuf::from(&*lockfile_path)
+                };
+                let store = if Path::new(&state.store_dir).is_relative() {
+                    ws_canon.join(&state.store_dir)
+                } else {
+                    PathBuf::from(&state.store_dir)
+                };
 
                 let config = InstallConfig {
-                    workspace_path: workspace,
+                    workspace_path: ws_canon,
                     lockfile_path: lock_path,
                     store_dir: store,
                 };

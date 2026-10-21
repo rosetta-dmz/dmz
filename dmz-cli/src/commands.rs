@@ -186,13 +186,21 @@ pub fn dispatch(command: Commands) {
 
 pub fn run_resolve(workspace: PathBuf, output: PathBuf, target: Option<String>) {
     info!("Resolving workspace dependencies at {:?}", workspace);
+    let effective_output = if output.is_relative() && workspace != Path::new(".") {
+        workspace.join(&output)
+    } else {
+        output
+    };
     match ResolverEngine::resolve_workspace_with_target(&workspace, target) {
         Ok(lockfile) => {
-            if let Err(e) = lockfile.save(&output) {
+            if let Err(e) = lockfile.save(&effective_output) {
                 error!("Failed to save lockfile: {}", e);
                 exit(1);
             }
-            info!("Successfully written closure lock to {:?}", output);
+            info!(
+                "Successfully written closure lock to {:?}",
+                effective_output
+            );
         }
         Err(e) => {
             error!("Dependency resolution failed: {}", e);
@@ -246,10 +254,21 @@ pub fn run_build(
     name: String,
     zstd_level: i32,
 ) {
+    let effective_lockfile = if lockfile.is_relative() && workspace != Path::new(".") {
+        workspace.join(&lockfile)
+    } else {
+        lockfile
+    };
+    let effective_output = if output.is_relative() && workspace != Path::new(".") {
+        workspace.join(&output)
+    } else {
+        output
+    };
+
     let config = BuildConfig {
         workspace_dir: workspace,
-        lockfile_path: lockfile,
-        output_dir: output,
+        lockfile_path: effective_lockfile,
+        output_dir: effective_output,
         target: target.into(),
         archive_name: name,
         zstd_level,
@@ -402,11 +421,17 @@ pub fn run_bundle(args: BundleArgs) {
     }
 
     // 3. Export unified air-gap archive
+    let effective_output = if args.output.is_relative() && args.workspace != Path::new(".") {
+        args.workspace.join(&args.output)
+    } else {
+        args.output
+    };
+
     let config = ExportConfig {
         workspace_path: args.workspace,
         lockfile_path: effective_lockfile,
         store_dir: effective_store,
-        output_path: args.output,
+        output_path: effective_output,
         zstd_level: args.zstd_level,
         mode: args.mode.into(),
         target_platform: args.target,
@@ -437,11 +462,27 @@ pub fn run_export(
     zstd_level: i32,
     mode: CliExportMode,
 ) {
+    let effective_lockfile = if lockfile.is_relative() && workspace != Path::new(".") {
+        workspace.join(&lockfile)
+    } else {
+        lockfile
+    };
+    let effective_store = if store.is_relative() && workspace != Path::new(".") {
+        workspace.join(&store)
+    } else {
+        store
+    };
+    let effective_output = if output.is_relative() && workspace != Path::new(".") {
+        workspace.join(&output)
+    } else {
+        output
+    };
+
     let config = ExportConfig {
         workspace_path: workspace,
-        lockfile_path: lockfile,
-        store_dir: store,
-        output_path: output,
+        lockfile_path: effective_lockfile,
+        store_dir: effective_store,
+        output_path: effective_output,
         zstd_level,
         mode: mode.into(),
         target_platform: target,

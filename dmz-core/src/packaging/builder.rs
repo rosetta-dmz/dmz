@@ -74,25 +74,46 @@ pub struct PackageBuilder;
 impl PackageBuilder {
     /// Builds and exports target artifact closures (Target A, B, or C) as compressed .tar.zst packages
     pub fn build(config: &BuildConfig) -> Result<BuildResult, BuildError> {
+        let workspace_root = if config.workspace_dir.is_relative() {
+            std::fs::canonicalize(&config.workspace_dir)
+                .unwrap_or_else(|_| config.workspace_dir.clone())
+        } else {
+            config.workspace_dir.clone()
+        };
+
+        let effective_output_dir = if config.output_dir.is_relative() {
+            workspace_root.join(&config.output_dir)
+        } else {
+            config.output_dir.clone()
+        };
+
+        let effective_lockfile = if config.lockfile_path.is_relative() {
+            workspace_root.join(&config.lockfile_path)
+        } else {
+            config.lockfile_path.clone()
+        };
+
         info!(
             target = ?config.target,
-            workspace = ?config.workspace_dir,
+            workspace = ?workspace_root,
+            lockfile = ?effective_lockfile,
+            output_dir = ?effective_output_dir,
             "Starting DMZ package build pipeline"
         );
 
         // 1. Ensure destination directory exists
-        if !config.output_dir.exists() {
-            fs::create_dir_all(&config.output_dir)
+        if !effective_output_dir.exists() {
+            fs::create_dir_all(&effective_output_dir)
                 .map_err(|e| BuildError::IoError(format!("Failed to create output dir: {}", e)))?;
         }
 
         // 2. Load and cryptographically verify dmz.lock
-        let lockfile = DmzLockfile::load_and_verify(&config.lockfile_path)
+        let lockfile = DmzLockfile::load_and_verify(&effective_lockfile)
             .map_err(|e| BuildError::LockfileError(e.to_string()))?;
 
         // 3. Prepare target output file stream (.tar.zst)
         let artifact_filename = format!("{}.tar.zst", config.archive_name);
-        let artifact_path = config.output_dir.join(&artifact_filename);
+        let artifact_path = effective_output_dir.join(&artifact_filename);
 
         let output_file = File::create(&artifact_path)
             .map_err(|e| BuildError::IoError(format!("Failed to create output file: {}", e)))?;
@@ -109,18 +130,18 @@ impl PackageBuilder {
                 Self::bundle_dependencies(&mut tar_builder, &lockfile)?;
             }
             BuildTarget::AppOnly => {
-                Self::bundle_app_code(&mut tar_builder, &config.workspace_dir)?;
+                Self::bundle_app_code(&mut tar_builder, &workspace_root)?;
             }
             BuildTarget::Unified => {
                 Self::bundle_dependencies(&mut tar_builder, &lockfile)?;
-                Self::bundle_app_code(&mut tar_builder, &config.workspace_dir)?;
+                Self::bundle_app_code(&mut tar_builder, &workspace_root)?;
             }
         }
 
         // 5. Embed root dmz.lock directly inside the archive header for air-gap verification
-        if config.lockfile_path.exists() {
+        if effective_lockfile.exists() {
             tar_builder
-                .append_path_with_name(&config.lockfile_path, "dmz.lock")
+                .append_path_with_name(&effective_lockfile, "dmz.lock")
                 .map_err(|e| {
                     BuildError::ArchiveError(format!("Failed to embed lockfile: {}", e))
                 })?;
