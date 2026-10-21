@@ -84,19 +84,38 @@ impl AirGapExporter {
         };
 
         let effective_lockfile = if config.lockfile_path.is_relative() {
-            workspace_root.join(&config.lockfile_path)
+            if workspace_root.join(&config.lockfile_path).exists() {
+                workspace_root.join(&config.lockfile_path)
+            } else if config.lockfile_path.exists() {
+                std::fs::canonicalize(&config.lockfile_path)
+                    .unwrap_or_else(|_| config.lockfile_path.clone())
+            } else {
+                workspace_root.join(&config.lockfile_path)
+            }
         } else {
             config.lockfile_path.clone()
         };
 
         let effective_store = if config.store_dir.is_relative() {
-            workspace_root.join(&config.store_dir)
+            if workspace_root.join(&config.store_dir).exists() {
+                workspace_root.join(&config.store_dir)
+            } else if config.store_dir.exists() {
+                std::fs::canonicalize(&config.store_dir)
+                    .unwrap_or_else(|_| config.store_dir.clone())
+            } else {
+                workspace_root.join(&config.store_dir)
+            }
         } else {
             config.store_dir.clone()
         };
 
         let effective_output = if config.output_path.is_relative() {
-            workspace_root.join(&config.output_path)
+            if config.output_path.exists() {
+                std::fs::canonicalize(&config.output_path)
+                    .unwrap_or_else(|_| workspace_root.join(&config.output_path))
+            } else {
+                workspace_root.join(&config.output_path)
+            }
         } else {
             config.output_path.clone()
         };

@@ -354,20 +354,33 @@ pub fn run_bundle(args: BundleArgs) {
         args.workspace
     );
 
-    let effective_lockfile = if (args.lockfile == Path::new("dmz.lock")
-        && args.workspace != Path::new("."))
-        || (!args.lockfile.exists() && args.workspace.join(&args.lockfile).exists())
-    {
-        args.workspace.join(&args.lockfile)
+    let ws_canon = std::fs::canonicalize(&args.workspace)
+        .unwrap_or_else(|_| args.workspace.clone());
+
+    let effective_lockfile = if args.lockfile == Path::new("dmz.lock") {
+        ws_canon.join("dmz.lock")
+    } else if args.lockfile.is_relative() {
+        if ws_canon.join(&args.lockfile).exists() {
+            ws_canon.join(&args.lockfile)
+        } else if args.lockfile.exists() {
+            std::fs::canonicalize(&args.lockfile).unwrap_or(args.lockfile)
+        } else {
+            ws_canon.join(&args.lockfile)
+        }
     } else {
         args.lockfile
     };
 
-    let effective_store = if args.store == Path::new(".dmz/store")
-        && args.workspace != Path::new(".")
-        && !args.store.exists()
-    {
-        args.workspace.join(&args.store)
+    let effective_store = if args.store == Path::new(".dmz/store") {
+        ws_canon.join(".dmz/store")
+    } else if args.store.is_relative() {
+        if ws_canon.join(&args.store).exists() {
+            ws_canon.join(&args.store)
+        } else if args.store.exists() {
+            std::fs::canonicalize(&args.store).unwrap_or(args.store)
+        } else {
+            ws_canon.join(&args.store)
+        }
     } else {
         args.store
     };
@@ -377,9 +390,9 @@ pub fn run_bundle(args: BundleArgs) {
     if should_resolve {
         info!(
             "Resolving workspace dependency manifests at {:?}",
-            args.workspace
+            ws_canon
         );
-        match ResolverEngine::resolve_workspace_with_target(&args.workspace, args.target.clone()) {
+        match ResolverEngine::resolve_workspace_with_target(&ws_canon, args.target.clone()) {
             Ok(resolved_lockfile) => {
                 if let Err(e) = resolved_lockfile.save(&effective_lockfile) {
                     error!("Failed to write lockfile {:?}: {}", effective_lockfile, e);
@@ -421,14 +434,18 @@ pub fn run_bundle(args: BundleArgs) {
     }
 
     // 3. Export unified air-gap archive
-    let effective_output = if args.output.is_relative() && args.workspace != Path::new(".") {
-        args.workspace.join(&args.output)
+    let effective_output = if args.output == Path::new("dist/workspace_closure.tar.zst") {
+        ws_canon.join("dist/workspace_closure.tar.zst")
+    } else if args.output.is_relative() {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(&args.output)
     } else {
         args.output
     };
 
     let config = ExportConfig {
-        workspace_path: args.workspace,
+        workspace_path: ws_canon,
         lockfile_path: effective_lockfile,
         store_dir: effective_store,
         output_path: effective_output,
@@ -462,24 +479,50 @@ pub fn run_export(
     zstd_level: i32,
     mode: CliExportMode,
 ) {
-    let effective_lockfile = if lockfile.is_relative() && workspace != Path::new(".") {
-        workspace.join(&lockfile)
+    let ws_canon = std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
+
+    let effective_lockfile = if lockfile == Path::new("dmz.lock") {
+        ws_canon.join("dmz.lock")
+    } else if lockfile.is_relative() {
+        if ws_canon.join(&lockfile).exists() {
+            ws_canon.join(&lockfile)
+        } else if lockfile.exists() {
+            std::fs::canonicalize(&lockfile).unwrap_or(lockfile)
+        } else {
+            ws_canon.join(&lockfile)
+        }
     } else {
         lockfile
     };
-    let effective_store = if store.is_relative() && workspace != Path::new(".") {
-        workspace.join(&store)
+
+    let effective_store = if store == Path::new(".dmz/store") {
+        ws_canon.join(".dmz/store")
+    } else if store.is_relative() {
+        if ws_canon.join(&store).exists() {
+            ws_canon.join(&store)
+        } else if store.exists() {
+            std::fs::canonicalize(&store).unwrap_or(store)
+        } else {
+            ws_canon.join(&store)
+        }
     } else {
         store
     };
-    let effective_output = if output.is_relative() && workspace != Path::new(".") {
-        workspace.join(&output)
+
+    let effective_output = if output == Path::new("dist/airgap_bundle.tar.zst")
+        || output == Path::new("dist/workspace_closure.tar.zst")
+    {
+        ws_canon.join("dist/workspace_closure.tar.zst")
+    } else if output.is_relative() {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(&output)
     } else {
         output
     };
 
     let config = ExportConfig {
-        workspace_path: workspace,
+        workspace_path: ws_canon,
         lockfile_path: effective_lockfile,
         store_dir: effective_store,
         output_path: effective_output,
@@ -512,10 +555,38 @@ pub fn run_import(
     skip_install: bool,
     skip_ecosystem_verify: bool,
 ) {
+    let _ = std::fs::create_dir_all(&workspace);
+    let ws_canon = std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
+    let effective_archive = if archive.is_relative() {
+        if archive.exists() {
+            std::fs::canonicalize(&archive).unwrap_or(archive)
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(&archive)
+        }
+    } else {
+        archive
+    };
+
+    let effective_store = if store == Path::new(".dmz/store") {
+        ws_canon.join(".dmz/store")
+    } else if store.is_relative() {
+        if ws_canon.join(&store).exists() {
+            ws_canon.join(&store)
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(&store)
+        }
+    } else {
+        store
+    };
+
     let config = ImportConfig {
-        archive_path: archive,
-        target_store_dir: store.clone(),
-        target_workspace_dir: workspace.clone(),
+        archive_path: effective_archive,
+        target_store_dir: effective_store.clone(),
+        target_workspace_dir: ws_canon.clone(),
         verify_closure_hash: !skip_verify,
     };
 
@@ -535,15 +606,15 @@ pub fn run_import(
 
     // Automated offline installation into project layouts (unless --skip-install)
     if !skip_install {
-        let lockfile_path = workspace.join("dmz.lock");
+        let lockfile_path = ws_canon.join("dmz.lock");
         info!(
             "Running automated offline dependency installation in workspace {:?}",
-            workspace
+            ws_canon
         );
         let install_config = dmz_core::install::InstallConfig {
-            workspace_path: workspace.clone(),
+            workspace_path: ws_canon.clone(),
             lockfile_path,
-            store_dir: store,
+            store_dir: effective_store,
         };
 
         match dmz_core::install::InstallerEngine::install(&install_config) {
@@ -563,12 +634,12 @@ pub fn run_import(
         if !skip_ecosystem_verify {
             info!(
                 "Running automated ecosystem verification for workspace {:?}",
-                workspace
+                ws_canon
             );
             let registry = EcosystemRegistry::new();
-            let active = registry.discover_active(&workspace);
+            let active = registry.discover_active(&ws_canon);
             for eco in active {
-                if let Some(cmd) = eco.verification_command(&workspace) {
+                if let Some(cmd) = eco.verification_command(&ws_canon) {
                     info!(
                         "Running verification for '{}': {} {}",
                         eco.name(),
@@ -577,7 +648,7 @@ pub fn run_import(
                     );
                     match std::process::Command::new(&cmd.program)
                         .args(&cmd.args)
-                        .current_dir(&workspace)
+                        .current_dir(&ws_canon)
                         .status()
                     {
                         Ok(status) => {

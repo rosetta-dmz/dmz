@@ -61,6 +61,9 @@ pub struct AirGapImporter;
 impl AirGapImporter {
     /// Verifies and unpacks an air-gap bundle into the target store and workspace directory
     pub fn import(config: &ImportConfig) -> Result<ImportResult, ImportError> {
+        if !config.target_workspace_dir.exists() {
+            let _ = fs::create_dir_all(&config.target_workspace_dir);
+        }
         let effective_workspace = if config.target_workspace_dir.is_relative() {
             std::fs::canonicalize(&config.target_workspace_dir)
                 .unwrap_or_else(|_| config.target_workspace_dir.clone())
@@ -69,7 +72,14 @@ impl AirGapImporter {
         };
 
         let effective_store = if config.target_store_dir.is_relative() {
-            effective_workspace.join(&config.target_store_dir)
+            if effective_workspace.join(&config.target_store_dir).exists() {
+                effective_workspace.join(&config.target_store_dir)
+            } else if config.target_store_dir.exists() {
+                std::fs::canonicalize(&config.target_store_dir)
+                    .unwrap_or_else(|_| config.target_store_dir.clone())
+            } else {
+                effective_workspace.join(&config.target_store_dir)
+            }
         } else {
             config.target_store_dir.clone()
         };
@@ -77,6 +87,9 @@ impl AirGapImporter {
         let effective_archive = if config.archive_path.is_relative() {
             if effective_workspace.join(&config.archive_path).exists() {
                 effective_workspace.join(&config.archive_path)
+            } else if config.archive_path.exists() {
+                std::fs::canonicalize(&config.archive_path)
+                    .unwrap_or_else(|_| config.archive_path.clone())
             } else {
                 config.archive_path.clone()
             }
