@@ -17,7 +17,6 @@ sha2 = "0.10"
 toml = "0.8"
 libc.workspace = true
 windows-sys.workspace = true
-nix.workspace = true
 tempfile = { workspace = true }
 
 [dev-dependencies]

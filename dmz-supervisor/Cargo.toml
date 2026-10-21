@@ -13,4 +13,4 @@ tracing.workspace = true
 interprocess = "2.0" # Cross-platform Unix domain sockets & Windows Named Pipes
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc.workspace = true

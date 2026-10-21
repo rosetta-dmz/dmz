@@ -10,10 +10,9 @@ tokio.workspace = true
 which = "6.0"
 libc.workspace = true
 windows-sys.workspace = true
-nix.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.28", features = ["user", "sched", "mount", "process"] }
+nix.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.52", features = ["Win32_System_JobObjects", "Win32_Security"] }
