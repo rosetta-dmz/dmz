@@ -32,6 +32,7 @@ pub(super) fn show(ui: &mut egui::Ui, active_tab: &mut Tab, width: f32, visuals:
             for (tab, label) in [
                 (Tab::Resolver, "Resolver"),
                 (Tab::Builder, "Package Builder"),
+                (Tab::WorkspaceSandbox, "Workspace Sandbox"),
                 (Tab::AgentSandbox, "Agent Sandbox"),
                 (Tab::AirGap, "Air-Gap Manager"),
                 (Tab::Supervisor, "Supervisor IPC"),

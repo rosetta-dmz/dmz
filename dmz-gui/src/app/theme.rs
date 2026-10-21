@@ -202,12 +202,18 @@ impl ThemeFile {
         visuals.widgets.active.bg_fill = accent;
         visuals.widgets.active.fg_stroke.color = text;
         visuals.widgets.active.bg_stroke.color = accent;
+        visuals.widgets.active.expansion = 0.0;
         visuals.widgets.hovered.bg_fill = parse_color(&self.palette.panel_alt)?;
         visuals.widgets.hovered.fg_stroke.color = text;
         visuals.widgets.hovered.bg_stroke.color = accent.gamma_multiply(0.55);
+        visuals.widgets.hovered.expansion = 0.0;
+        visuals.widgets.open.expansion = 0.0;
         visuals.widgets.inactive.bg_fill = parse_color(&self.palette.panel)?;
         visuals.widgets.inactive.fg_stroke.color = text;
         visuals.widgets.inactive.bg_stroke.color = border;
+        // egui sizes button padding as `button_padding - bg_stroke.width`, so every
+        // interactive state must share the same stroke width or buttons resize on hover/press.
+        visuals.widgets.inactive.bg_stroke.width = visuals.widgets.hovered.bg_stroke.width;
         visuals.widgets.noninteractive.bg_fill = parse_color(&self.palette.panel)?;
         visuals.widgets.noninteractive.fg_stroke.color = muted;
         visuals.widgets.noninteractive.bg_stroke.color = border;
@@ -269,6 +275,16 @@ mod tests {
         assert_eq!(
             visuals.widgets.active.bg_fill,
             parse_color("#007aff").unwrap()
+        );
+        assert_eq!(visuals.widgets.hovered.expansion, 0.0);
+        assert_eq!(visuals.widgets.active.expansion, 0.0);
+        assert_eq!(
+            visuals.widgets.inactive.bg_stroke.width,
+            visuals.widgets.hovered.bg_stroke.width
+        );
+        assert_eq!(
+            visuals.widgets.inactive.bg_stroke.width,
+            visuals.widgets.active.bg_stroke.width
         );
     }
 

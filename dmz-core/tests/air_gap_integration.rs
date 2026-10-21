@@ -32,6 +32,7 @@ fn test_air_gap_import_and_verification() {
 
     let lockfile = DmzLockfile {
         version: 1,
+        target_platform: None,
         // Match the expected signature or prefix checked by your lockfile verification logic
         closure_signature: "4c378397e78464329d42b543b944d2824cdd9856abac26c0f26e323587289ab6"
             .to_string(),

@@ -2,126 +2,25 @@ pub mod lockfile;
 pub mod manifest;
 
 use crate::resolver::manifest::Ecosystem;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
-use std::fs;
 use std::path::Path;
 use tracing::info;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LockedPackage {
-    pub name: String,
-    pub version: String,
-    pub ecosystem: Ecosystem,
-    pub sha256: String,
-    pub source_url: Option<String>,
-    pub dependencies: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DmzLockfile {
-    pub version: u32,
-    pub closure_signature: String,
-    pub packages: BTreeMap<String, LockedPackage>,
-}
-
-#[derive(Debug)]
-pub enum LockError {
-    IoError(String),
-    SerializationError(String),
-    IntegrityMismatch { expected: String, actual: String },
-}
-
-impl std::fmt::Display for LockError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::IoError(msg) => write!(f, "Lockfile IO Error: {}", msg),
-            Self::SerializationError(msg) => write!(f, "Lockfile Serialization Error: {}", msg),
-            Self::IntegrityMismatch { expected, actual } => write!(
-                f,
-                "Cryptographic Lock Mismatch! Expected sha256:{}, computed sha256:{}",
-                expected, actual
-            ),
-        }
-    }
-}
-
-impl std::error::Error for LockError {}
-
-impl DmzLockfile {
-    pub fn new(packages: Vec<LockedPackage>) -> Self {
-        let mut package_map = BTreeMap::new();
-        for pkg in packages {
-            let key = format!("{}:{}", pkg.name, pkg.version);
-            package_map.insert(key, pkg);
-        }
-
-        let closure_signature = Self::compute_closure_hash(&package_map);
-
-        Self {
-            version: 1,
-            closure_signature,
-            packages: package_map,
-        }
-    }
-
-    /// Computes a deterministic SHA-256 signature across the entire ordered package map
-    pub fn compute_closure_hash(packages: &BTreeMap<String, LockedPackage>) -> String {
-        let mut hasher = Sha256::new();
-
-        for (key, pkg) in packages {
-            hasher.update(key.as_bytes());
-            hasher.update(pkg.name.as_bytes());
-            hasher.update(pkg.version.as_bytes());
-            hasher.update(pkg.sha256.as_bytes());
-        }
-
-        format!("{:x}", hasher.finalize())
-    }
-
-    /// Saves the lockfile to `dmz.lock`
-    pub fn save(&self, path: &Path) -> Result<(), LockError> {
-        let json_data = serde_json::to_string_pretty(self)
-            .map_err(|e| LockError::SerializationError(e.to_string()))?;
-
-        fs::write(path, json_data)
-            .map_err(|e| LockError::IoError(format!("Failed to write lockfile: {}", e)))
-    }
-
-    /// Loads and verifies cryptographic integrity of `dmz.lock`
-    pub fn load_and_verify(path: &Path) -> Result<Self, LockError> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| LockError::IoError(format!("Failed to read lockfile: {}", e)))?;
-
-        let lockfile: Self = serde_json::from_str(&content)
-            .map_err(|e| LockError::SerializationError(e.to_string()))?;
-
-        let computed_signature = Self::compute_closure_hash(&lockfile.packages);
-
-        if computed_signature != lockfile.closure_signature {
-            return Err(LockError::IntegrityMismatch {
-                expected: lockfile.closure_signature,
-                actual: computed_signature,
-            });
-        }
-
-        Ok(lockfile)
-    }
-
-    /// Helper to compute SHA-256 digest of raw binary closure files
-    pub fn hash_bytes(data: &[u8]) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(data);
-        format!("{:x}", hasher.finalize())
-    }
-}
+pub use lockfile::{DmzLockfile, LockError, LockedPackage};
 
 pub struct ResolverEngine;
 
 impl ResolverEngine {
     /// Scans project workspace, auto-resolves dependencies across ecosystems, and produces a cryptographic lockfile
     pub fn resolve_workspace(workspace_dir: &Path) -> Result<DmzLockfile, String> {
+        Self::resolve_workspace_with_target(workspace_dir, None)
+    }
+
+    /// Scans project workspace, auto-resolves dependencies, and tags the target platform
+    pub fn resolve_workspace_with_target(
+        workspace_dir: &Path,
+        target_platform: Option<String>,
+    ) -> Result<DmzLockfile, String> {
         info!(path = ?workspace_dir, "Scanning workspace and auto-resolving dependencies across ecosystems...");
 
         let mut locked_packages = Vec::new();
@@ -212,11 +111,7 @@ impl ResolverEngine {
             .map_err(|e| format!("Manifest Scan Error: {}", e))?;
 
         for manifest in manifests {
-            if matches!(manifest.ecosystem, Ecosystem::Cargo) {
-                continue; // Already handled by Cargo metadata resolver above
-            }
-
-            info!(ecosystem = ?manifest.ecosystem, path = ?manifest.path, "Processing non-Cargo manifest");
+            info!(ecosystem = ?manifest.ecosystem, path = ?manifest.path, "Processing manifest");
 
             for dep in manifest.dependencies {
                 let dummy_hash = DmzLockfile::hash_bytes(
@@ -247,7 +142,7 @@ impl ResolverEngine {
             );
         }
 
-        let lockfile = DmzLockfile::new(locked_packages);
+        let lockfile = DmzLockfile::with_platform(locked_packages, target_platform);
         info!(closure_sig = %lockfile.closure_signature, count = lockfile.packages.len(), "Generated deterministic agnostic DMZ closure signature");
 
         Ok(lockfile)
@@ -267,7 +162,7 @@ impl ResolverEngine {
         let lockfile_content = std::fs::read_to_string(lockfile_path)
             .map_err(|e| format!("Failed to read lockfile: {}", e))?;
 
-        let lockfile: DmzLockfile = serde_json::from_str(&lockfile_content)
+        let mut lockfile: DmzLockfile = serde_json::from_str(&lockfile_content)
             .or_else(|_| toml::from_str(&lockfile_content))
             .map_err(|e| format!("Failed to parse lockfile format: {}", e))?;
 
@@ -285,7 +180,7 @@ impl ResolverEngine {
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-        for (_map_key, pkg) in lockfile.packages {
+        for (map_key, pkg) in lockfile.packages.clone() {
             // --- SKIP LOCAL PATH DEPENDENCIES & WORKSPACE MEMBERS ---
             if pkg.version.starts_with("path:") || pkg.version.contains("path") {
                 info!(name = %pkg.name, version = %pkg.version, "Skipping remote download for local path dependency/workspace member");
@@ -487,7 +382,21 @@ impl ResolverEngine {
                 .map_err(|e| format!("Failed to write package metadata: {}", e))?;
 
             fetched_count += 1;
+            lockfile.packages.insert(map_key, updated_pkg);
             info!(name = %pkg.name, version = %clean_version, "Successfully downloaded, verified, and cached artifact");
+        }
+
+        if fetched_count > 0 {
+            lockfile.closure_signature = DmzLockfile::compute_closure_hash(&lockfile.packages);
+            if let Err(e) = lockfile.save(lockfile_path) {
+                tracing::warn!("Failed to update lockfile with authentic hashes: {}", e);
+            } else {
+                info!(
+                    path = ?lockfile_path,
+                    closure_sig = %lockfile.closure_signature,
+                    "Saved authentic package hashes and recomputed closure signature to lockfile"
+                );
+            }
         }
 
         info!(

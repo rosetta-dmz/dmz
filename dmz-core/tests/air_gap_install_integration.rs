@@ -64,6 +64,7 @@ fn test_airgap_offline_install_workflow() -> Result<(), Box<dyn std::error::Erro
     let closure_sig = DmzLockfile::compute_closure_hash(&packages);
     let lockfile = DmzLockfile {
         version: 1,
+        target_platform: None,
         closure_signature: closure_sig,
         packages,
     };
@@ -113,7 +114,7 @@ fn test_airgap_offline_install_cargo_workflow() -> Result<(), Box<dyn std::error
     let pkg_store_dir = store_path.join(&safe_name);
     fs::create_dir_all(&pkg_store_dir)?;
 
-    // 1. Construct a valid minimal gzipped tar archive (.crate) with Cargo.toml inside
+    // 1. Construct a valid minimal gzipped tar archive (.crate) with Cargo.toml and src/lib.rs inside
     let mut tar_builder = tar::Builder::new(Vec::new());
     let cargo_toml_content =
         b"[package]\nname = \"serde\"\nversion = \"1.0.104\"\nedition = \"2021\"\n";
@@ -122,6 +123,14 @@ fn test_airgap_offline_install_cargo_workflow() -> Result<(), Box<dyn std::error
     header.set_mode(0o644);
     header.set_cksum();
     tar_builder.append_data(&mut header, "Cargo.toml", &cargo_toml_content[..])?;
+
+    let lib_rs_content = b"pub fn dummy() {}\n";
+    let mut lib_header = tar::Header::new_gnu();
+    lib_header.set_size(lib_rs_content.len() as u64);
+    lib_header.set_mode(0o644);
+    lib_header.set_cksum();
+    tar_builder.append_data(&mut lib_header, "src/lib.rs", &lib_rs_content[..])?;
+
     let tar_bytes = tar_builder.into_inner()?;
 
     let mut gz_encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -150,10 +159,12 @@ store_path = "{}/{}"
     let lockfile_path = workspace_path.join("dmz.lock");
     fs::write(&lockfile_path, lockfile_content)?;
 
-    // Create Cargo.toml in the workspace to trigger the Rust ecosystem handler detection
+    // Create Cargo.toml and src/main.rs in the workspace to trigger the Rust ecosystem handler detection
+    fs::create_dir_all(workspace_path.join("src"))?;
+    fs::write(workspace_path.join("src/main.rs"), "fn main() {}")?;
     fs::write(
         workspace_path.join("Cargo.toml"),
-        "[package]\nname = \"test-app\"\nversion = \"1.0.0\"",
+        "[package]\nname = \"test-app\"\nversion = \"1.0.0\"\nedition = \"2021\"\n\n[dependencies]\nserde = \"1.0.104\"\n",
     )?;
 
     // 3. Execute DMZ multi-ecosystem workspace installation via the registry trait engine
@@ -242,6 +253,7 @@ fn test_airgap_offline_install_nested_npm_package_flattening(
     let closure_sig = DmzLockfile::compute_closure_hash(&packages);
     let lockfile = DmzLockfile {
         version: 1,
+        target_platform: None,
         closure_signature: closure_sig,
         packages,
     };
@@ -320,6 +332,7 @@ fn test_airgap_offline_install_python_workflow() -> Result<(), Box<dyn std::erro
     let closure_sig = DmzLockfile::compute_closure_hash(&packages);
     let lockfile = DmzLockfile {
         version: 1,
+        target_platform: None,
         closure_signature: closure_sig,
         packages,
     };

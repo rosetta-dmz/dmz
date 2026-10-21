@@ -8,27 +8,80 @@ pub(super) fn nav_item(
     muted: egui::Color32,
     text: egui::Color32,
 ) -> egui::Response {
-    let fill = if selected {
-        accent.gamma_multiply(0.16)
+    let hover = ui.visuals().widgets.hovered;
+    let (idle, hovered) = if selected {
+        let stroke = accent.gamma_multiply(0.65);
+        (
+            ButtonLook::new(accent.gamma_multiply(0.16), stroke, text),
+            ButtonLook::new(accent.gamma_multiply(0.24), stroke, text),
+        )
     } else {
-        egui::Color32::TRANSPARENT
+        (
+            ButtonLook::new(
+                egui::Color32::TRANSPARENT,
+                egui::Color32::TRANSPARENT,
+                muted,
+            ),
+            ButtonLook::new(hover.bg_fill, hover.bg_stroke.color, text),
+        )
     };
-    let stroke = if selected {
-        egui::Stroke::new(1.0, accent.gamma_multiply(0.65))
-    } else {
-        egui::Stroke::new(1.0, egui::Color32::TRANSPARENT)
-    };
-    let text_color = if selected { text } else { muted };
 
-    ui.add_sized(
-        egui::vec2(ui.available_width(), 40.0),
-        egui::Button::new(egui::RichText::new(label).color(text_color))
-            .fill(fill)
-            .stroke(stroke)
-            .corner_radius(10.0)
-            .min_size(egui::vec2(0.0, 40.0)),
-    )
+    with_button_looks(ui, idle, hovered, |ui| {
+        ui.add_sized(
+            egui::vec2(ui.available_width(), 40.0),
+            egui::Button::new(label)
+                .corner_radius(12.0) // Updated from 10.0 to match cards/sections (12 pt grid token)
+                .min_size(egui::vec2(0.0, 40.0)),
+        )
+    })
     .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Colors for one interaction state of a button.
+#[derive(Clone, Copy)]
+struct ButtonLook {
+    fill: egui::Color32,
+    stroke: egui::Color32,
+    text: egui::Color32,
+}
+
+impl ButtonLook {
+    fn new(fill: egui::Color32, stroke: egui::Color32, text: egui::Color32) -> Self {
+        Self { fill, stroke, text }
+    }
+}
+
+/// Runs `add_contents` in a scope whose widget `Visuals` use `idle` for the inactive
+/// state and `hovered` for the hovered/active states. This lets plain `egui::Button`s
+/// handle hover themselves (calling `Button::fill`/`stroke` would override hover effects).
+///
+/// Stroke width is kept at 1.0 in every state because egui derives button padding from
+/// it; differing widths would make buttons grow/shrink on hover.
+fn with_button_looks<R>(
+    ui: &mut egui::Ui,
+    idle: ButtonLook,
+    hovered: ButtonLook,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.scope(|ui| {
+        let visuals = ui.visuals_mut();
+        // The theme sets a global text color, which would otherwise win over `fg_stroke`.
+        visuals.override_text_color = None;
+        let widgets = &mut visuals.widgets;
+        for (state, look) in [
+            (&mut widgets.inactive, idle),
+            (&mut widgets.hovered, hovered),
+            (&mut widgets.active, hovered),
+        ] {
+            state.weak_bg_fill = look.fill;
+            state.bg_fill = look.fill;
+            state.bg_stroke = egui::Stroke::new(1.0, look.stroke);
+            state.fg_stroke.color = look.text;
+            state.expansion = 0.0;
+        }
+        add_contents(ui)
+    })
+    .inner
 }
 
 pub(super) fn section(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
@@ -43,7 +96,7 @@ pub(super) fn section(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
         .corner_radius(egui::CornerRadius::same(12))
         .inner_margin(egui::Margin::same(16))
         .show(ui, |ui| {
-            ui.set_min_width((card_width - 34.0).max(0.0));
+            ui.set_min_width((card_width - 32.0).max(0.0));
             ui.set_min_height(96.0);
             contents(ui);
         });
@@ -88,7 +141,7 @@ pub(super) fn card(
         .corner_radius(egui::CornerRadius::same(12))
         .inner_margin(egui::Margin::same(16))
         .show(ui, |ui| {
-            ui.set_min_width((card_width - 34.0).max(0.0));
+            ui.set_min_width((card_width - 32.0).max(0.0));
             ui.set_min_height(64.0);
             contents(ui);
         })
@@ -97,29 +150,42 @@ pub(super) fn card(
 pub(super) fn action_button(ui: &mut egui::Ui, label: &str, primary: bool) -> egui::Response {
     let visuals = ui.visuals();
     let accent = visuals.selection.stroke.color;
-    let button = egui::Button::new(if primary {
-        egui::RichText::new(label).color(accent)
+    let (idle, hovered) = if primary {
+        (
+            ButtonLook::new(
+                visuals.selection.bg_fill,
+                accent.gamma_multiply(0.45),
+                accent,
+            ),
+            ButtonLook::new(
+                accent.gamma_multiply(0.26),
+                accent.gamma_multiply(0.75),
+                accent,
+            ),
+        )
     } else {
-        egui::RichText::new(label).color(visuals.widgets.inactive.fg_stroke.color)
+        let text = visuals.widgets.inactive.fg_stroke.color;
+        (
+            ButtonLook::new(
+                visuals.extreme_bg_color,
+                visuals.widgets.noninteractive.bg_stroke.color,
+                text,
+            ),
+            ButtonLook::new(
+                visuals.widgets.hovered.bg_fill,
+                visuals.widgets.hovered.bg_stroke.color,
+                text,
+            ),
+        )
+    };
+
+    with_button_looks(ui, idle, hovered, |ui| {
+        ui.add(
+            egui::Button::new(label)
+                .min_size(egui::vec2(0.0, 32.0))
+                .corner_radius(egui::CornerRadius::same(8)),
+        )
     })
-    .min_size(egui::vec2(0.0, 32.0))
-    .corner_radius(egui::CornerRadius::same(8));
-    if primary {
-        ui.add(
-            button
-                .fill(visuals.selection.bg_fill)
-                .stroke(egui::Stroke::new(1.0, accent.gamma_multiply(0.45))),
-        )
-    } else {
-        ui.add(
-            button
-                .fill(visuals.extreme_bg_color)
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    visuals.widgets.noninteractive.bg_stroke.color,
-                )),
-        )
-    }
 }
 
 pub(super) fn toggle(ui: &mut egui::Ui, value: &mut bool) -> egui::Response {

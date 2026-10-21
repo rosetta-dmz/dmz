@@ -129,8 +129,23 @@ impl AirGapImporter {
                 info!(
                     closure = %closure_signature,
                     version = %manifest.dmz_version,
+                    target_platform = ?manifest.target_platform,
                     "Air-gap manifest verified"
                 );
+
+                if let Some(target) = &manifest.target_platform {
+                    let host_platform =
+                        format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+                    if target != &host_platform {
+                        tracing::warn!(
+                            bundle_target = %target,
+                            host_platform = %host_platform,
+                            "Bundle target platform does not match current host platform!"
+                        );
+                    } else {
+                        info!(platform = %host_platform, "Bundle target platform matches host platform");
+                    }
+                }
 
                 let dest = config.target_workspace_dir.join(&path);
                 if let Some(parent) = dest.parent() {

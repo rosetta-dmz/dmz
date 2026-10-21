@@ -1,6 +1,7 @@
 use eframe::egui;
 
 use super::super::components;
+use dmz_supervisor::IpcServerConfig;
 
 #[derive(Default)]
 pub(super) struct SupervisorState {
@@ -10,60 +11,61 @@ pub(super) struct SupervisorState {
 }
 
 pub(super) fn show(state: &mut SupervisorState, ui: &mut egui::Ui, status_message: &mut String) {
+    let ipc_config = IpcServerConfig::default();
+    let socket_str = ipc_config.socket_path.display().to_string();
+
     components::page_header(
         ui,
         "Supervisor IPC",
-        "Manage workspace services and inspect local process-supervisor status.",
+        "Manage workspace background services, daemonless IPC sockets, and process supervisor status.",
     );
 
     components::section(ui, |ui| {
-        components::section_header(ui, "Supervisor lifecycle");
-        ui.horizontal_wrapped(|ui| {
-            if state.active {
-                ui.colored_label(egui::Color32::GREEN, "Active · localized thread running");
-                if components::action_button(ui, "Stop session", false).clicked() {
-                    state.active = false;
-                    state.postgres_service = false;
-                    state.redis_service = false;
-                    *status_message = String::from(
-                        "Workspace Supervisor terminated. Footprint: 0% CPU, 0 MB RAM.",
-                    );
+        components::section_header(ui, "Supervisor Lifecycle");
+        if state.active {
+            ui.colored_label(egui::Color32::GREEN, "Active · localized session running");
+            ui.add_space(16.0);
+            if components::action_button(ui, "Stop session", false).clicked() {
+                state.active = false;
+                state.postgres_service = false;
+                state.redis_service = false;
+                if ipc_config.socket_path.exists() {
+                    let _ = std::fs::remove_file(&ipc_config.socket_path);
                 }
-            } else {
-                ui.colored_label(
-                    ui.visuals().widgets.noninteractive.fg_stroke.color,
-                    "Inactive · zero idle footprint",
-                );
-                if components::action_button(ui, "Start session", true).clicked() {
-                    state.active = true;
-                    *status_message = String::from("Workspace Supervisor spawned successfully.");
-                }
+                *status_message =
+                    String::from("Workspace Supervisor terminated. Footprint: 0% CPU, 0 MB RAM.");
             }
-        });
+        } else {
+            ui.colored_label(
+                ui.visuals().widgets.noninteractive.fg_stroke.color,
+                "Inactive · zero idle footprint",
+            );
+            ui.add_space(16.0);
+            if components::action_button(ui, "Start session", true).clicked() {
+                state.active = true;
+                *status_message = format!("Workspace Supervisor spawned at {socket_str}");
+            }
+        }
     });
 
     ui.add_space(16.0);
     components::section(ui, |ui| {
-        components::section_header(ui, "Managed services");
+        components::section_header(ui, "Managed Workspace Services");
         ui.checkbox(&mut state.postgres_service, "Local Postgres service");
         ui.checkbox(&mut state.redis_service, "Local Redis service");
     });
 
     ui.add_space(16.0);
     components::section(ui, |ui| {
-        components::section_header(ui, "IPC and session details");
-        #[cfg(unix)]
-        ui.label("IPC socket · /tmp/dmz_supervisor.sock");
-
-        #[cfg(windows)]
-        ui.label(r"IPC pipe · \\.\pipe\dmz_supervisor");
+        components::section_header(ui, "IPC and Session Details");
+        ui.label(format!("IPC channel: {}", socket_str));
 
         ui.add_space(8.0);
         egui::Grid::new("supervisor_summary")
             .num_columns(2)
             .spacing([16.0, 8.0])
             .show(ui, |ui| {
-                ui.label("Supervisor");
+                ui.label("Supervisor status");
                 ui.label(if state.active { "Running" } else { "Idle" });
                 ui.end_row();
 

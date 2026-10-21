@@ -19,6 +19,8 @@ pub enum ExportMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AirGapManifest {
     pub dmz_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_platform: Option<String>,
     pub closure_signature: String,
     pub package_count: usize,
     pub created_at_utc: u64,
@@ -33,6 +35,7 @@ pub struct ExportConfig {
     pub output_path: PathBuf,
     pub zstd_level: i32,
     pub mode: ExportMode,
+    pub target_platform: Option<String>,
 }
 
 impl Default for ExportConfig {
@@ -44,6 +47,7 @@ impl Default for ExportConfig {
             output_path: PathBuf::from("dist/airgap_bundle.tar.zst"),
             zstd_level: 3,
             mode: ExportMode::Unified,
+            target_platform: None,
         }
     }
 }
@@ -161,9 +165,15 @@ impl AirGapExporter {
             }
         }
 
+        let target_platform = config
+            .target_platform
+            .clone()
+            .or_else(|| lockfile.target_platform.clone());
+
         // Write air-gap manifest header
         let manifest = AirGapManifest {
             dmz_version: env!("CARGO_PKG_VERSION").to_string(),
+            target_platform,
             closure_signature: lockfile.closure_signature.clone(),
             package_count: packed_count,
             created_at_utc: std::time::SystemTime::now()

@@ -2,20 +2,23 @@ mod agent;
 mod airgap;
 mod builder;
 mod resolver;
+mod sandbox;
 mod settings;
 mod supervisor;
 
 use eframe::egui;
 
 use self::{
-    agent::AgentState, airgap::AirGapState, builder::BuilderState, settings::AppearanceState,
-    supervisor::SupervisorState,
+    agent::AgentState, airgap::AirGapState, builder::BuilderState, resolver::ResolverState,
+    sandbox::SandboxState, settings::AppearanceState, supervisor::SupervisorState,
 };
 use crate::app::Tab;
 
 #[derive(Default)]
 pub(super) struct Pages {
+    resolver: ResolverState,
     builder: BuilderState,
+    sandbox: SandboxState,
     agent: AgentState,
     airgap: AirGapState,
     supervisor: SupervisorState,
@@ -53,7 +56,13 @@ impl Pages {
         status_message: &mut String,
     ) {
         match tab {
-            Tab::Resolver => resolver::show(ui, workspace_path, lockfile_path, status_message),
+            Tab::Resolver => resolver::show(
+                &mut self.resolver,
+                ui,
+                workspace_path,
+                lockfile_path,
+                status_message,
+            ),
             Tab::Builder => builder::show(
                 &mut self.builder,
                 ui,
@@ -61,6 +70,9 @@ impl Pages {
                 lockfile_path,
                 status_message,
             ),
+            Tab::WorkspaceSandbox => {
+                sandbox::show(&mut self.sandbox, ui, workspace_path, status_message);
+            }
             Tab::AgentSandbox => agent::show(&mut self.agent, ui, status_message),
             Tab::AirGap => airgap::show(
                 &mut self.airgap,

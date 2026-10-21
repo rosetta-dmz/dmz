@@ -18,6 +18,8 @@ pub struct LockedPackage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DmzLockfile {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_platform: Option<String>,
     pub closure_signature: String,
     pub packages: BTreeMap<String, LockedPackage>,
 }
@@ -47,6 +49,10 @@ impl std::error::Error for LockError {}
 
 impl DmzLockfile {
     pub fn new(packages: Vec<LockedPackage>) -> Self {
+        Self::with_platform(packages, None)
+    }
+
+    pub fn with_platform(packages: Vec<LockedPackage>, target_platform: Option<String>) -> Self {
         let mut package_map = BTreeMap::new();
         for pkg in packages {
             let key = format!("{}:{}", pkg.name, pkg.version);
@@ -57,6 +63,7 @@ impl DmzLockfile {
 
         Self {
             version: 1,
+            target_platform,
             closure_signature,
             packages: package_map,
         }

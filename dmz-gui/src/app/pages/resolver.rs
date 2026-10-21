@@ -2,9 +2,28 @@ use eframe::egui;
 use std::path::PathBuf;
 
 use super::super::components;
+use dmz_core::ecosystem::EcosystemRegistry;
+use dmz_core::install::{InstallConfig, InstallerEngine};
 use dmz_core::resolver::ResolverEngine;
 
+pub(super) struct ResolverState {
+    pub(super) target_platform: String,
+    pub(super) store_dir: String,
+    pub(super) discovered_stacks: Vec<String>,
+}
+
+impl Default for ResolverState {
+    fn default() -> Self {
+        Self {
+            target_platform: String::new(),
+            store_dir: String::from(".dmz/store"),
+            discovered_stacks: Vec::new(),
+        }
+    }
+}
+
 pub(super) fn show(
+    state: &mut ResolverState,
     ui: &mut egui::Ui,
     workspace_path: &mut String,
     lockfile_path: &mut String,
@@ -13,15 +32,15 @@ pub(super) fn show(
     components::page_header(
         ui,
         "Dependency Resolver",
-        "Scan manifests and generate a deterministic lockfile with a cryptographic closure signature.",
+        "Scan manifests, compute closure lockfiles, fetch offline stores, and manage multi-ecosystem stacks.",
     );
 
     components::section(ui, |ui| {
-        components::section_header(ui, "Workspace");
+        components::section_header(ui, "Workspace & Targets");
         egui::Grid::new("resolver_grid")
             .num_columns(2)
             .spacing([16.0, 8.0])
-            .min_col_width(100.0)
+            .min_col_width(120.0)
             .show(ui, |ui| {
                 ui.label("Workspace directory");
                 ui.horizontal(|ui| {
@@ -29,7 +48,9 @@ pub(super) fn show(
                     let field_width = (ui.available_width() - browse_width - 8.0).max(80.0);
                     ui.add_sized(
                         egui::vec2(field_width, 32.0),
-                        egui::TextEdit::singleline(workspace_path),
+                        egui::TextEdit::singleline(workspace_path)
+                            .vertical_align(egui::Align::Center)
+                            .margin(egui::Margin::symmetric(8, 0)),
                     );
                     if ui.button("Browse...").clicked() {
                         if let Some(path) = rfd::FileDialog::new().pick_folder() {
@@ -39,10 +60,40 @@ pub(super) fn show(
                 });
                 ui.end_row();
 
-                ui.label("Lockfile output");
+                ui.label("Lockfile path");
                 ui.add_sized(
                     egui::vec2(ui.available_width(), 32.0),
-                    egui::TextEdit::singleline(lockfile_path),
+                    egui::TextEdit::singleline(lockfile_path)
+                        .vertical_align(egui::Align::Center)
+                        .margin(egui::Margin::symmetric(8, 0)),
+                );
+                ui.end_row();
+
+                ui.label("Store cache directory");
+                ui.horizontal(|ui| {
+                    let browse_width = 86.0;
+                    let field_width = (ui.available_width() - browse_width - 8.0).max(80.0);
+                    ui.add_sized(
+                        egui::vec2(field_width, 32.0),
+                        egui::TextEdit::singleline(&mut state.store_dir)
+                            .vertical_align(egui::Align::Center)
+                            .margin(egui::Margin::symmetric(8, 0)),
+                    );
+                    if ui.button("Browse...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            state.store_dir = path.display().to_string();
+                        }
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Target Platform");
+                ui.add_sized(
+                    egui::vec2(ui.available_width(), 32.0),
+                    egui::TextEdit::singleline(&mut state.target_platform)
+                        .vertical_align(egui::Align::Center)
+                        .margin(egui::Margin::symmetric(8, 0))
+                        .hint_text("Optional (e.g. macos-arm64, linux-x86_64, host default)"),
                 );
                 ui.end_row();
             });
@@ -50,26 +101,132 @@ pub(super) fn show(
 
     ui.add_space(16.0);
     components::section(ui, |ui| {
-        components::section_header(ui, "Resolve dependencies");
-        if components::action_button(ui, "Scan manifests & resolve closure", true).clicked() {
-            let path = PathBuf::from(&*workspace_path);
-            match ResolverEngine::resolve_workspace(&path) {
-                Ok(lockfile) => {
-                    let out = PathBuf::from(&*lockfile_path);
-                    if let Err(error) = lockfile.save(&out) {
-                        *status_message = format!("Error saving lockfile: {error}");
-                    } else {
-                        *status_message = format!(
-                            "Resolved {} packages. Closure Sig: {}",
-                            lockfile.packages.len(),
-                            &lockfile.closure_signature[..12]
-                        );
+        components::section_header(ui, "Dependency Lifecycle Actions");
+        ui.horizontal_wrapped(|ui| {
+            if components::action_button(ui, "Scan & resolve dmz.lock", true).clicked() {
+                let path = PathBuf::from(&*workspace_path);
+                let target_opt = if state.target_platform.trim().is_empty() {
+                    None
+                } else {
+                    Some(state.target_platform.trim().to_string())
+                };
+
+                match ResolverEngine::resolve_workspace_with_target(&path, target_opt) {
+                    Ok(lockfile) => {
+                        let out = PathBuf::from(&*lockfile_path);
+                        if let Err(error) = lockfile.save(&out) {
+                            *status_message = format!("Error saving lockfile: {error}");
+                        } else {
+                            *status_message = format!(
+                                "Resolved {} packages. Closure Sig: {}",
+                                lockfile.packages.len(),
+                                &lockfile.closure_signature
+                                    [..12.min(lockfile.closure_signature.len())]
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        *status_message = format!("Resolution Failed: {error}");
                     }
                 }
-                Err(error) => {
-                    *status_message = format!("Resolution Failed: {error}");
+            }
+
+            if components::action_button(ui, "Fetch into store (dmz fetch)", false).clicked() {
+                let lock_path = PathBuf::from(&*lockfile_path);
+                let store = PathBuf::from(&state.store_dir);
+                match ResolverEngine::fetch_dependencies(&lock_path, &store) {
+                    Ok(count) => {
+                        *status_message = format!(
+                            "Fetched and authenticated {} packages into store {:?}",
+                            count, store
+                        );
+                    }
+                    Err(e) => {
+                        *status_message = format!("Fetch failed: {}", e);
+                    }
                 }
             }
+
+            if components::action_button(ui, "Install offline (dmz install)", false).clicked() {
+                let workspace = PathBuf::from(&*workspace_path);
+                let lock_path = PathBuf::from(&*lockfile_path);
+                let store = PathBuf::from(&state.store_dir);
+
+                let config = InstallConfig {
+                    workspace_path: workspace,
+                    lockfile_path: lock_path,
+                    store_dir: store,
+                };
+                match InstallerEngine::install(&config) {
+                    Ok(count) => {
+                        *status_message = format!(
+                            "Successfully installed {} packages offline into project layouts",
+                            count
+                        );
+                    }
+                    Err(e) => {
+                        *status_message = format!("Offline installation failed: {}", e);
+                    }
+                }
+            }
+        });
+    });
+
+    ui.add_space(16.0);
+    components::section(ui, |ui| {
+        components::section_header(ui, "Ecosystem Discovery & Verification");
+        ui.horizontal_wrapped(|ui| {
+            if components::action_button(ui, "Discover active stacks", false).clicked() {
+                let workspace = PathBuf::from(&*workspace_path);
+                let registry = EcosystemRegistry::new();
+                match registry.process_workspace(&workspace) {
+                    Ok(stacks) => {
+                        state.discovered_stacks = stacks.clone();
+                        *status_message = format!("Discovered active ecosystems: {:?}", stacks);
+                    }
+                    Err(e) => {
+                        *status_message = format!("Ecosystem discovery failed: {}", e);
+                    }
+                }
+            }
+
+            if components::action_button(ui, "Verify active toolchains", false).clicked() {
+                let workspace = PathBuf::from(&*workspace_path);
+                let registry = EcosystemRegistry::new();
+                let active = registry.discover_active(&workspace);
+                let mut passed = 0;
+                let mut failed = 0;
+                for eco in active {
+                    if let Some(cmd) = eco.verification_command(&workspace) {
+                        match std::process::Command::new(&cmd.program)
+                            .args(&cmd.args)
+                            .current_dir(&workspace)
+                            .status()
+                        {
+                            Ok(status) if status.success() => {
+                                passed += 1;
+                            }
+                            _ => {
+                                failed += 1;
+                            }
+                        }
+                    }
+                }
+                *status_message = format!(
+                    "Ecosystem toolchain verification: {} passed, {} failed",
+                    passed, failed
+                );
+            }
+        });
+
+        if !state.discovered_stacks.is_empty() {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Detected:").strong());
+                for stack in &state.discovered_stacks {
+                    ui.label(egui::RichText::new(stack).color(ui.visuals().selection.stroke.color));
+                }
+            });
         }
     });
 }
