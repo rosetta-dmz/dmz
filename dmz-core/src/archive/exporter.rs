@@ -76,31 +76,57 @@ pub struct AirGapExporter;
 impl AirGapExporter {
     /// Bundles store packages, dmz.lock, and discovered ecosystem caches into a cryptographically verifiable air-gap archive
     pub fn export(config: &ExportConfig) -> Result<AirGapManifest, ExportError> {
+        let workspace_root = if config.workspace_path.is_relative() {
+            std::fs::canonicalize(&config.workspace_path)
+                .unwrap_or_else(|_| config.workspace_path.clone())
+        } else {
+            config.workspace_path.clone()
+        };
+
+        let effective_lockfile = if config.lockfile_path.is_relative() {
+            workspace_root.join(&config.lockfile_path)
+        } else {
+            config.lockfile_path.clone()
+        };
+
+        let effective_store = if config.store_dir.is_relative() {
+            workspace_root.join(&config.store_dir)
+        } else {
+            config.store_dir.clone()
+        };
+
+        let effective_output = if config.output_path.is_relative() {
+            workspace_root.join(&config.output_path)
+        } else {
+            config.output_path.clone()
+        };
+
         info!(
-            lockfile = ?config.lockfile_path,
-            output = ?config.output_path,
+            workspace = ?workspace_root,
+            lockfile = ?effective_lockfile,
+            store = ?effective_store,
+            output = ?effective_output,
             "Initiating air-gap package export"
         );
 
         // 1. Automatically discover active workspace ecosystems & gather generalized caches
-        let workspace_root = &config.workspace_path;
         let registry = EcosystemRegistry::new();
 
         let detected_stacks = registry
-            .process_workspace(workspace_root)
+            .process_workspace(&workspace_root)
             .map_err(|e| ExportError::ArchiveError(format!("Ecosystem discovery failed: {}", e)))?;
 
         info!(stacks = ?detected_stacks, "Discovered active workspace ecosystems");
 
-        let cache_paths = registry.gather_all_caches(workspace_root);
+        let cache_paths = registry.gather_all_caches(&workspace_root);
         info!(caches = ?cache_paths, "Gathered generalized ecosystem cache paths for archiving");
 
         // 2. Verify dmz.lock integrity before exporting
-        let lockfile = DmzLockfile::load_and_verify(&config.lockfile_path)
+        let lockfile = DmzLockfile::load_and_verify(&effective_lockfile)
             .map_err(|e| ExportError::LockfileError(e.to_string()))?;
 
         // 3. Ensure parent output directory exists
-        if let Some(parent) = config.output_path.parent() {
+        if let Some(parent) = effective_output.parent() {
             if !parent.exists() {
                 fs::create_dir_all(parent).map_err(|e| {
                     ExportError::IoError(format!("Failed to create parent dir: {}", e))
@@ -109,7 +135,7 @@ impl AirGapExporter {
         }
 
         // 4. Prepare archive output stream
-        let file = File::create(&config.output_path)
+        let file = File::create(&effective_output)
             .map_err(|e| ExportError::IoError(format!("Failed to create export archive: {}", e)))?;
 
         let zstd_encoder = ZstdEncoder::new(file, config.zstd_level)
@@ -119,7 +145,7 @@ impl AirGapExporter {
 
         // Append lockfile
         tar_builder
-            .append_path_with_name(&config.lockfile_path, "dmz.lock")
+            .append_path_with_name(&effective_lockfile, "dmz.lock")
             .map_err(|e| ExportError::ArchiveError(format!("Failed to pack dmz.lock: {}", e)))?;
 
         // Append store items (if mode is Unified or DepsOnly)
@@ -134,7 +160,7 @@ impl AirGapExporter {
                 // --- USE SAFE FLATTENED NAME FOR SCOPED PACKAGES ---
                 let safe_pkg_name = pkg_info.name.replace('/', "__");
 
-                let pkg_store_path = config.store_dir.join(&safe_pkg_name);
+                let pkg_store_path = effective_store.join(&safe_pkg_name);
                 if pkg_store_path.exists() {
                     let archive_dest = Path::new("store").join(&safe_pkg_name);
                     if pkg_store_path.is_dir() {
@@ -158,10 +184,10 @@ impl AirGapExporter {
 
         // Append workspace source code (if mode is Unified or CodeOnly)
         if config.mode == ExportMode::Unified || config.mode == ExportMode::CodeOnly {
-            info!(path = ?config.workspace_path, "Appending workspace source code to archive");
+            info!(path = ?workspace_root, "Appending workspace source code to archive");
             let workspace_dest = Path::new("");
-            if config.workspace_path.is_dir() {
-                Self::append_dir_all(&mut tar_builder, &config.workspace_path, workspace_dest)?;
+            if workspace_root.is_dir() {
+                Self::append_dir_all(&mut tar_builder, &workspace_root, workspace_dest)?;
             }
         }
 
@@ -221,7 +247,7 @@ impl AirGapExporter {
         }; // File handle drops/closes here, flushing bytes to disk safely
 
         // Compute final archive checksum
-        let archive_sha256 = Self::calculate_file_sha256(&config.output_path)?;
+        let archive_sha256 = Self::calculate_file_sha256(&effective_output)?;
         let mut final_manifest = manifest;
         final_manifest.archive_sha256 = archive_sha256;
 

@@ -37,7 +37,7 @@ The workspace is organized into five primary crates:
 
 ### Clone & Build
 ```bash
-git clone [https://github.com/your-username/dmz.git](https://github.com/your-username/dmz.git)
+git clone [https://github.com/rosetta-dmz/dmz.git](https://github.com/rosetta-dmz/dmz.git)
 cd dmz
 cargo build --workspace --release
 ```

@@ -61,35 +61,58 @@ pub struct AirGapImporter;
 impl AirGapImporter {
     /// Verifies and unpacks an air-gap bundle into the target store and workspace directory
     pub fn import(config: &ImportConfig) -> Result<ImportResult, ImportError> {
+        let effective_workspace = if config.target_workspace_dir.is_relative() {
+            std::fs::canonicalize(&config.target_workspace_dir)
+                .unwrap_or_else(|_| config.target_workspace_dir.clone())
+        } else {
+            config.target_workspace_dir.clone()
+        };
+
+        let effective_store = if config.target_store_dir.is_relative() {
+            effective_workspace.join(&config.target_store_dir)
+        } else {
+            config.target_store_dir.clone()
+        };
+
+        let effective_archive = if config.archive_path.is_relative() {
+            if effective_workspace.join(&config.archive_path).exists() {
+                effective_workspace.join(&config.archive_path)
+            } else {
+                config.archive_path.clone()
+            }
+        } else {
+            config.archive_path.clone()
+        };
+
         info!(
-            archive = ?config.archive_path,
-            store = ?config.target_store_dir,
-            workspace = ?config.target_workspace_dir,
+            archive = ?effective_archive,
+            store = ?effective_store,
+            workspace = ?effective_workspace,
             "Starting air-gap archive import"
         );
 
-        if !config.archive_path.exists() {
+        if !effective_archive.exists() {
             return Err(ImportError::IoError(format!(
                 "Archive file not found: {}",
-                config.archive_path.display()
+                effective_archive.display()
             )));
         }
 
         // 1. Prepare target directories
-        if !config.target_store_dir.exists() {
-            fs::create_dir_all(&config.target_store_dir).map_err(|e| {
+        if !effective_store.exists() {
+            fs::create_dir_all(&effective_store).map_err(|e| {
                 ImportError::IoError(format!("Failed to create target store: {}", e))
             })?;
         }
 
-        if !config.target_workspace_dir.exists() {
-            fs::create_dir_all(&config.target_workspace_dir).map_err(|e| {
+        if !effective_workspace.exists() {
+            fs::create_dir_all(&effective_workspace).map_err(|e| {
                 ImportError::IoError(format!("Failed to create target workspace: {}", e))
             })?;
         }
 
         // 2. Open archive and initialize zstd stream
-        let file = File::open(&config.archive_path)
+        let file = File::open(&effective_archive)
             .map_err(|e| ImportError::IoError(format!("Failed to open archive: {}", e)))?;
 
         let zstd_decoder = ZstdDecoder::new(file).map_err(|e| {
@@ -147,7 +170,7 @@ impl AirGapImporter {
                     }
                 }
 
-                let dest = config.target_workspace_dir.join(&path);
+                let dest = effective_workspace.join(&path);
                 if let Some(parent) = dest.parent() {
                     fs::create_dir_all(parent).map_err(|e| ImportError::IoError(e.to_string()))?;
                 }
@@ -172,7 +195,7 @@ impl AirGapImporter {
                     }
                 }
 
-                let dest = config.target_workspace_dir.join(&path);
+                let dest = effective_workspace.join(&path);
                 if let Some(parent) = dest.parent() {
                     fs::create_dir_all(parent).map_err(|e| ImportError::IoError(e.to_string()))?;
                 }
@@ -183,7 +206,7 @@ impl AirGapImporter {
                     continue;
                 }
 
-                let dest_path = config.target_store_dir.join(rel_path);
+                let dest_path = effective_store.join(rel_path);
 
                 if let Some(parent) = dest_path.parent() {
                     if !parent.exists() {
@@ -206,7 +229,7 @@ impl AirGapImporter {
                 imported_count += 1;
             } else {
                 // Workspace source files (Cargo.toml, src/, etc.)
-                entry.unpack_in(&config.target_workspace_dir).map_err(|e| {
+                entry.unpack_in(&effective_workspace).map_err(|e| {
                     ImportError::ExtractionError(format!("Failed to unpack workspace file: {}", e))
                 })?;
             }
@@ -214,7 +237,7 @@ impl AirGapImporter {
 
         // 4. Run post-import ecosystem validation using the registry
         let registry = EcosystemRegistry::new();
-        match registry.process_workspace(&config.target_workspace_dir) {
+        match registry.process_workspace(&effective_workspace) {
             Ok(stacks) => {
                 info!(active_stacks = ?stacks, "Post-import ecosystem discovery complete");
             }
@@ -232,7 +255,7 @@ impl AirGapImporter {
         Ok(ImportResult {
             imported_packages: imported_count,
             closure_signature,
-            store_path: config.target_store_dir.clone(),
+            store_path: effective_store,
         })
     }
 }

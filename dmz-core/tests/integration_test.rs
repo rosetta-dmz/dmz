@@ -158,3 +158,40 @@ serde = "1.0"
     )
     .expect("Failed to write main.rs");
 }
+
+#[test]
+fn test_package_builder_anchors_relative_paths() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
+    let workspace_path = temp_dir.path().join("builder_project");
+    fs::create_dir_all(&workspace_path).expect("Failed to create workspace");
+    create_dummy_manifests(&workspace_path);
+
+    let mock_lockfile = DmzLockfile {
+        version: 1,
+        closure_signature: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            .to_string(),
+        packages: std::collections::BTreeMap::new(),
+        target_platform: None,
+    };
+    mock_lockfile
+        .save(&workspace_path.join("dmz.lock"))
+        .expect("Failed to save lockfile");
+
+    // Relative output_dir and relative lockfile_path
+    let build_config = BuildConfig {
+        workspace_dir: workspace_path.clone(),
+        lockfile_path: std::path::PathBuf::from("dmz.lock"),
+        output_dir: std::path::PathBuf::from("dist"),
+        target: BuildTarget::AppOnly,
+        archive_name: "test_build_output".to_string(),
+        zstd_level: 3,
+    };
+
+    let result =
+        PackageBuilder::build(&build_config).expect("Packaging with relative paths should succeed");
+    assert!(result.artifact_path.exists());
+    assert_eq!(
+        result.artifact_path,
+        workspace_path.join("dist/test_build_output.tar.zst")
+    );
+}

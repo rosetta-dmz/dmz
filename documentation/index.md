@@ -6,13 +6,13 @@ Welcome to the official documentation hub for **DMZ** (Universal Daemonless Envi
 
 ## 1. Core Architecture & System Blueprints
 
-* **[Architectural Blueprint](architecture.md)** — Deep dive into the statically compiled core engine (targeting Linux musl, macOS, and Windows), native OS sandboxing primitives (Linux User Namespaces, macOS Seatbelt profiles, and Windows Job Objects), and the ephemeral AI Agent Workspace Supervisor.
+* **[Architectural Blueprint](Architectural Blueprint.md)** — Deep dive into the statically compiled core engine (targeting Linux musl, macOS, and Windows), native OS sandboxing primitives (Linux User Namespaces, macOS Seatbelt profiles, and Windows Job Objects), and the ephemeral AI Agent Workspace Supervisor.
 
 
-* **[Functional Requirements (FRD)](https://www.google.com/search?q=frd.md)** — Comprehensive coverage of zero-dependency bootstrapping, language-agnostic dependency management, cryptographic air-gap packaging targets (Targets A, B, and C), and real-time telemetry.
+* **[Functional Requirements (FRD)](Functional Requirements Document (FRD).md)** — Comprehensive coverage of zero-dependency bootstrapping, language-agnostic dependency management, cryptographic air-gap packaging targets (Targets A, B, and C), and real-time telemetry.
 
 
-* **[Non-Functional Requirements (NFRD)](https://www.google.com/search?q=nfrd.md)** — Performance criteria ensuring a zero idle footprint, native bare-metal speed, least-privilege security models, and complete air-gap offline compliance[cite: 3].
+* **[Non-Functional Requirements (NFRD)](Non-Functional Requirements Document (NFRD))** — Performance criteria ensuring a zero idle footprint, native bare-metal speed, least-privilege security models, and complete air-gap offline compliance[cite: 3].
 
 ---
 
@@ -28,17 +28,19 @@ The DMZ workspace is organized into **five primary crates**:
 
 ---
 
-## 3. Command-Line Interface (CLI) Guides
+## 3. User & Developer Guides
 
-* **[Air-Gap Packaging & Transfer Guide](https://www.google.com/search?q=cli-airgap.md)** — Complete instructions on bundling, cryptographically signing, and offline-importing `.tar.zst` closure archives with zero host dependencies[cite: 1, 2].
-* **[Sandbox Execution & Isolation Guide](https://www.google.com/search?q=cli-sandbox.md)** — Managing process isolation, resource timeouts, and network-stripped execution boundaries.
-* **[Network Proxy & Whitelist Guide](https://www.google.com/search?q=cli-proxy.md)** — Configuring outbound domain whitelists and reviewing proxy audit trails for AI agent workloads[cite: 1, 2].
+* **[GUI User Workflow Guide](gui-user-workflow.md)** — Step-by-step GUI workflow instructions for workspace selection (open/save locations), dependency resolution, air-gap bundle export/import, package building, and sandbox testing.
+* **[CLI User Workflow Guide](dev-user-workflow.md)** — Terminal-based resolution, air-gap bundling, and sandbox execution workflow.
+* **[Air-Gap Packaging & Transfer Guide]** — Complete instructions on bundling, cryptographically signing, and offline-importing `.tar.zst` closure archives with zero host dependencies.
+* **[Sandbox Execution & Isolation Guide]** — Managing process isolation, resource timeouts, and network-stripped execution boundaries.
+* **[Network Proxy & Whitelist Guide]** — Configuring outbound domain whitelists and reviewing proxy audit trails for AI agent workloads.
 
 ---
 
 ## 4. Developer Guidelines & Roadmap Status
 
-* **[Contributing Guide (`CONTRIBUTING.md`)](https://www.google.com/search?q=CONTRIBUTING.md)** — Developer workflows, local setup instructions, workspace test suites, and pull request standards.
+* **[Contributing Guide](`CONTRIBUTING.md`)** — Developer workflows, local setup instructions, workspace test suites, and pull request standards.
 
 ### Feature Implementation Status Matrix
 

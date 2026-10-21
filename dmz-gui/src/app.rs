@@ -119,15 +119,42 @@ impl eframe::App for DmzGuiApp {
                                             5.0,
                                             egui::Color32::from_rgb(92, 224, 160),
                                         );
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            egui::RichText::new("online")
+                                                .font(egui::FontId::proportional(12.0))
+                                                .color(egui::Color32::from_rgb(92, 224, 160)),
+                                        );
+
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
+                                                if ui.button("Browse...").clicked() {
+                                                    if let Some(path) =
+                                                        rfd::FileDialog::new().pick_folder()
+                                                    {
+                                                        self.workspace_path =
+                                                            path.display().to_string();
+                                                    }
+                                                }
+                                                let display_ws = if self.workspace_path.is_empty() {
+                                                    "."
+                                                } else {
+                                                    &self.workspace_path
+                                                };
                                                 ui.label(
-                                                    egui::RichText::new("online")
-                                                        .font(egui::FontId::proportional(12.0))
-                                                        .color(egui::Color32::from_rgb(
-                                                            92, 224, 160,
-                                                        )),
+                                                    egui::RichText::new(format!(
+                                                        "Workspace: {}",
+                                                        display_ws
+                                                    ))
+                                                    .font(egui::FontId::proportional(12.0))
+                                                    .color(
+                                                        visuals
+                                                            .widgets
+                                                            .noninteractive
+                                                            .fg_stroke
+                                                            .color,
+                                                    ),
                                                 );
                                             },
                                         );
