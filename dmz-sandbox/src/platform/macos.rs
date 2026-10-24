@@ -37,6 +37,21 @@ fn generate_seatbelt_profile(config: &SandboxConfig) -> String {
         "(deny network*)"
     };
 
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/Users".to_string());
+
+    let mut user_toolchain_rules = String::new();
+    let toolchain_dirs = [
+        ".cargo", ".rustup", ".local", ".nvm", ".pnpm", ".pyenv", ".asdf", ".fnm", ".volta", "go",
+        ".cache",
+    ];
+
+    for dir in toolchain_dirs {
+        let p = format!("{}/{}", home, dir);
+        if std::path::Path::new(&p).exists() {
+            user_toolchain_rules.push_str(&format!("    (subpath \"{}\")\n", p));
+        }
+    }
+
     format!(
         r#"
 (version 1)
@@ -61,7 +76,8 @@ fn generate_seatbelt_profile(config: &SandboxConfig) -> String {
     (subpath "/private/var/db/dyld")
     (subpath "/private/etc")
     (subpath "/private/tmp")
-    (subpath "/dev"))
+    (subpath "/dev")
+{})
 
 (allow file-write*
     (subpath "/dev/null")
@@ -72,6 +88,6 @@ fn generate_seatbelt_profile(config: &SandboxConfig) -> String {
 (allow file-read* file-write* (subpath "{}"))
 (allow file-read* (subpath "{}"))
 "#,
-        network_rule, workspace, closure
+        network_rule, user_toolchain_rules, workspace, closure
     )
 }

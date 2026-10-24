@@ -22,11 +22,7 @@ impl Default for AgentState {
 }
 
 pub(super) fn show(state: &mut AgentState, ui: &mut egui::Ui, status_message: &mut String) {
-    components::page_header(
-        ui,
-        "Agent Sandbox",
-        "Configure isolated scratch space and outbound domain rules for agents.",
-    );
+    components::page_header(ui, "Agent Sandbox");
 
     components::section(ui, |ui| {
         components::section_header(ui, "Sandbox Configuration");
@@ -60,7 +56,7 @@ pub(super) fn show(state: &mut AgentState, ui: &mut egui::Ui, status_message: &m
             });
         ui.add_space(16.0);
 
-        if components::action_button(ui, "Launch agent sandbox", true).clicked() {
+        if components::action_button(ui, "Launch Agent Sandbox", true).clicked() {
             let id = state.agent_id.trim();
             if id.is_empty() {
                 *status_message = String::from("Agent Identifier cannot be empty.");

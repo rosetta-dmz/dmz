@@ -33,6 +33,8 @@ pub struct ImportResult {
     pub imported_packages: usize,
     pub closure_signature: String,
     pub store_path: PathBuf,
+    #[serde(default)]
+    pub workspace_path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -269,6 +271,7 @@ impl AirGapImporter {
             imported_packages: imported_count,
             closure_signature,
             store_path: effective_store,
+            workspace_path: effective_workspace,
         })
     }
 }

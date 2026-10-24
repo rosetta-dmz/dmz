@@ -354,8 +354,8 @@ pub fn run_bundle(args: BundleArgs) {
         args.workspace
     );
 
-    let ws_canon = std::fs::canonicalize(&args.workspace)
-        .unwrap_or_else(|_| args.workspace.clone());
+    let ws_canon =
+        std::fs::canonicalize(&args.workspace).unwrap_or_else(|_| args.workspace.clone());
 
     let effective_lockfile = if args.lockfile == Path::new("dmz.lock") {
         ws_canon.join("dmz.lock")
@@ -388,10 +388,7 @@ pub fn run_bundle(args: BundleArgs) {
     // 1. Resolve manifests if lockfile is missing or refresh_lock is requested
     let should_resolve = args.refresh_lock || !effective_lockfile.exists();
     if should_resolve {
-        info!(
-            "Resolving workspace dependency manifests at {:?}",
-            ws_canon
-        );
+        info!("Resolving workspace dependency manifests at {:?}", ws_canon);
         match ResolverEngine::resolve_workspace_with_target(&ws_canon, args.target.clone()) {
             Ok(resolved_lockfile) => {
                 if let Err(e) = resolved_lockfile.save(&effective_lockfile) {

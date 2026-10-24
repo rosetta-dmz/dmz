@@ -14,4 +14,5 @@ tracing.workspace = true
 tracing-subscriber = "0.3"
 serde.workspace = true
 serde_json.workspace = true
+which = "6.0"
 image = { version = "0.25", default-features = false, features = ["png"] }

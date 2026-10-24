@@ -65,6 +65,67 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     let cache_str = sandbox_cache_dir.to_string_lossy();
 
     let mut env_map: HashMap<String, String> = resolved_config.envs.into_iter().collect();
+
+    // Augment PATH to ensure user toolchain binaries are discoverable in non-login environments
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut current_path = env_map.get("PATH").cloned().unwrap_or_else(|| {
+        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".to_string())
+    });
+
+    let toolchain_bins = [
+        format!("{}/.cargo/bin", home),
+        "/opt/homebrew/bin".to_string(),
+        "/usr/local/bin".to_string(),
+        format!("{}/.local/bin", home),
+        format!("{}/go/bin", home),
+        format!("{}/.pnpm", home),
+        format!("{}/.local/share/pnpm", home),
+    ];
+    for bin in &toolchain_bins {
+        if PathBuf::from(bin).exists() && !current_path.contains(bin) {
+            current_path = format!("{}:{}", bin, current_path);
+        }
+    }
+
+    // Workspace node_modules/.bin in PATH if it exists
+    let node_bin = resolved_config
+        .workspace_path
+        .join("node_modules")
+        .join(".bin");
+    if node_bin.exists() {
+        current_path = format!("{}:{}", node_bin.display(), current_path);
+    }
+    env_map.insert("PATH".into(), current_path);
+
+    // Set NODE_PATH
+    let node_modules = resolved_config.workspace_path.join("node_modules");
+    if node_modules.exists() {
+        env_map.insert(
+            "NODE_PATH".into(),
+            node_modules.to_string_lossy().to_string(),
+        );
+    }
+
+    // Set PYTHONPATH and VIRTUAL_ENV if python environments exist
+    let venv = resolved_config.workspace_path.join(".venv");
+    let dmz_venv = resolved_config.workspace_path.join(".dmz").join("venv");
+    if venv.exists() {
+        env_map.insert("VIRTUAL_ENV".into(), venv.to_string_lossy().to_string());
+    } else if dmz_venv.exists() {
+        env_map.insert("VIRTUAL_ENV".into(), dmz_venv.to_string_lossy().to_string());
+    }
+
+    let dmz_site_packages = dmz_venv
+        .join("lib")
+        .join("python3.11")
+        .join("site-packages");
+    if dmz_site_packages.exists() {
+        env_map.insert(
+            "PYTHONPATH".into(),
+            dmz_site_packages.to_string_lossy().to_string(),
+        );
+    }
+
     env_map.insert("CARGO_HOME".into(), format!("{}/cargo", cache_str));
     env_map.insert("npm_config_cache".into(), format!("{}/npm", cache_str));
     env_map.insert("PIP_CACHE_DIR".into(), format!("{}/pip", cache_str));

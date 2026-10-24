@@ -1,5 +1,5 @@
 use eframe::egui;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::super::components;
 use dmz_core::diagnostics::DiagnosticError;
@@ -35,11 +35,7 @@ pub(super) fn show(
     workspace_path: &mut String,
     status_message: &mut String,
 ) {
-    components::page_header(
-        ui,
-        "Workspace Sandbox",
-        "Execute build, test, and shell commands in a daemonless process sandbox with zero host leakage.",
-    );
+    components::page_header(ui, "Workspace Sandbox");
 
     components::section(ui, |ui| {
         components::section_header(ui, "Sandbox Environment");
@@ -48,40 +44,20 @@ pub(super) fn show(
             .spacing([16.0, 8.0])
             .min_col_width(120.0)
             .show(ui, |ui| {
-                ui.label("Workspace directory");
-                ui.horizontal(|ui| {
-                    let browse_width = 86.0;
-                    let field_width = (ui.available_width() - browse_width - 8.0).max(80.0);
-                    ui.add_sized(
-                        egui::vec2(field_width, 32.0),
-                        egui::TextEdit::singleline(workspace_path)
-                            .vertical_align(egui::Align::Center)
-                            .margin(egui::Margin::symmetric(8, 0)),
-                    );
-                    if ui.button("Browse...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                            *workspace_path = path.display().to_string();
-                        }
+                ui.label("Workspace Directory");
+                if components::path_browse_row(ui, workspace_path, None) {
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        *workspace_path = path.display().to_string();
                     }
-                });
+                }
                 ui.end_row();
 
-                ui.label("Closure store directory");
-                ui.horizontal(|ui| {
-                    let browse_width = 86.0;
-                    let field_width = (ui.available_width() - browse_width - 8.0).max(80.0);
-                    ui.add_sized(
-                        egui::vec2(field_width, 32.0),
-                        egui::TextEdit::singleline(&mut state.closure_path)
-                            .vertical_align(egui::Align::Center)
-                            .margin(egui::Margin::symmetric(8, 0)),
-                    );
-                    if ui.button("Browse...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                            state.closure_path = path.display().to_string();
-                        }
+                ui.label("Closure Store Directory");
+                if components::path_browse_row(ui, &mut state.closure_path, None) {
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        state.closure_path = path.display().to_string();
                     }
-                });
+                }
                 ui.end_row();
             });
 
@@ -144,7 +120,7 @@ pub(super) fn show(
             .spacing([16.0, 8.0])
             .min_col_width(120.0)
             .show(ui, |ui| {
-                ui.label("Command to execute");
+                ui.label("Command to Execute");
                 ui.add_sized(
                     egui::vec2(ui.available_width(), 32.0),
                     egui::TextEdit::singleline(&mut state.command)
@@ -157,7 +133,7 @@ pub(super) fn show(
 
         ui.add_space(16.0);
         ui.horizontal_wrapped(|ui| {
-            if components::action_button(ui, "Execute command in sandbox", true).clicked() {
+            if components::action_button(ui, "Execute Command in Sandbox", true).clicked() {
                 let workspace = PathBuf::from(&*workspace_path);
                 let abs_workspace =
                     std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
@@ -271,13 +247,13 @@ pub(super) fn show(
                 }
             }
 
-            if components::action_button(ui, "Launch interactive shell", false).clicked() {
+            if components::action_button(ui, "Launch Interactive Shell", false).clicked() {
                 launch_external_terminal(workspace_path, state.sandboxed, state.allow_network);
                 *status_message =
                     String::from("Launched interactive terminal shell session for workspace.");
             }
 
-            if components::action_button(ui, "Clear console", false).clicked() {
+            if components::action_button(ui, "Clear Console", false).clicked() {
                 state.console_output.clear();
             }
         });
@@ -314,6 +290,44 @@ fn chrono_timestamp() -> String {
     format!("{:02}:{:02}:{:02}", hours, mins, s)
 }
 
+fn resolve_dmz_cli_cmd(abs_workspace: &Path, extra_flags: &str) -> String {
+    let current_exe = std::env::current_exe().ok();
+    let adjacent_dmz = current_exe
+        .as_ref()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("dmz"));
+
+    let flags_str = if extra_flags.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", extra_flags)
+    };
+
+    if let Some(bin) = adjacent_dmz.filter(|p| p.exists()) {
+        format!(
+            "cd '{}' && '{}' shell{}",
+            abs_workspace.display(),
+            bin.display(),
+            flags_str
+        )
+    } else if let Ok(path) = which::which("dmz") {
+        format!(
+            "cd '{}' && '{}' shell{}",
+            abs_workspace.display(),
+            path.display(),
+            flags_str
+        )
+    } else if which::which("cargo").is_ok() && std::path::Path::new("Cargo.toml").exists() {
+        format!(
+            "cd '{}' && cargo run -p dmz-cli -- shell{}",
+            abs_workspace.display(),
+            flags_str
+        )
+    } else {
+        format!("cd '{}' && exec $SHELL", abs_workspace.display())
+    }
+}
+
 fn launch_external_terminal(workspace_path: &str, sandboxed: bool, allow_network: bool) {
     let abs_workspace =
         std::fs::canonicalize(workspace_path).unwrap_or_else(|_| PathBuf::from(workspace_path));
@@ -327,11 +341,7 @@ fn launch_external_terminal(workspace_path: &str, sandboxed: bool, allow_network
         } else {
             ""
         };
-        let shell_cmd = format!(
-            "cd '{}' && cargo run -p dmz-cli -- shell {}",
-            abs_workspace.display(),
-            extra_flags
-        );
+        let shell_cmd = resolve_dmz_cli_cmd(&abs_workspace, extra_flags);
         let _ = std::process::Command::new("osascript")
             .arg("-e")
             .arg(format!(
@@ -350,24 +360,26 @@ fn launch_external_terminal(workspace_path: &str, sandboxed: bool, allow_network
         } else {
             ""
         };
+        let shell_cmd = resolve_dmz_cli_cmd(&abs_workspace, extra_flags);
         let _ = std::process::Command::new("x-terminal-emulator")
             .arg("-e")
-            .arg(format!(
-                "cargo run -p dmz-cli -- shell -w '{}' {}",
-                abs_workspace.display(),
-                extra_flags
-            ))
+            .arg(&shell_cmd)
             .spawn();
     }
 
     #[cfg(target_os = "windows")]
     {
+        let extra_flags = if !sandboxed {
+            "--no-sandbox"
+        } else if allow_network {
+            "--allow-network"
+        } else {
+            ""
+        };
+        let shell_cmd = resolve_dmz_cli_cmd(&abs_workspace, extra_flags);
         let _ = std::process::Command::new("cmd.exe")
             .arg("/C")
-            .arg(format!(
-                "start cmd /K cargo run -p dmz-cli -- shell -w \"{}\"",
-                abs_workspace.display()
-            ))
+            .arg(format!("start cmd /K \"{}\"", shell_cmd))
             .spawn();
     }
 }

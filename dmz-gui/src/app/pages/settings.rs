@@ -174,28 +174,19 @@ impl AppearanceState {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                super::super::components::page_header(
-                    ui,
-                    "Appearance",
-                    "Personalize the look and feel of your DMZ workspace.",
-                );
+                super::super::components::page_header(ui, "Appearance");
 
                 super::super::components::section(ui, |ui| {
-                    ui.heading("Theme");
-                    ui.label(
-                        egui::RichText::new("Choose a palette or import a theme file.")
-                            .color(muted),
-                    );
-                    ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
-                            ui.label(egui::RichText::new("Current theme").color(muted).size(12.0));
+                            ui.heading("Current Theme");
                             ui.label(
-                                egui::RichText::new(self.preferences.theme_name.as_str()).strong(),
+                                egui::RichText::new(self.preferences.theme_name.as_str())
+                                    .color(muted),
                             );
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if super::super::components::action_button(ui, "Browse themes", true)
+                            if super::super::components::action_button(ui, "Browse Themes", true)
                                 .clicked()
                             {
                                 self.gallery_open = true;
@@ -211,54 +202,50 @@ impl AppearanceState {
 
                 ui.add_space(16.0);
                 super::super::components::section(ui, |ui| {
-                    ui.heading("Interface");
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label("Widget size");
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            egui::ComboBox::from_id_salt("widget_size_combo")
-                                .selected_text(self.preferences.widget_size.label())
-                                .width(140.0)
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut self.preferences.widget_size,
-                                        WidgetSize::Small,
-                                        "Small",
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.preferences.widget_size,
-                                        WidgetSize::Medium,
-                                        "Medium",
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.preferences.widget_size,
-                                        WidgetSize::Large,
-                                        "Large",
-                                    );
-                                });
-                        });
-                    });
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label("Show status bar");
-                            ui.label(
-                                egui::RichText::new(
-                                    "Show the current workspace status in the main area.",
-                                )
-                                .color(muted)
-                                .size(12.0),
-                            );
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            super::super::components::toggle(
-                                ui,
-                                &mut self.preferences.show_status_bar,
-                            );
-                        });
-                    });
+                    super::super::components::section_header(ui, "Interface");
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), 32.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.label("Widget Size");
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                egui::ComboBox::from_id_salt("widget_size_combo")
+                                    .selected_text(self.preferences.widget_size.label())
+                                    .width(140.0)
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut self.preferences.widget_size,
+                                            WidgetSize::Small,
+                                            "Small",
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.preferences.widget_size,
+                                            WidgetSize::Medium,
+                                            "Medium",
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.preferences.widget_size,
+                                            WidgetSize::Large,
+                                            "Large",
+                                        );
+                                    });
+                            });
+                        },
+                    );
+                    ui.add_space(12.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), 32.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.label("Show Status Bar");
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                super::super::components::toggle(
+                                    ui,
+                                    &mut self.preferences.show_status_bar,
+                                );
+                            });
+                        },
+                    );
                 });
             });
 

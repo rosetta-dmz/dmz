@@ -97,20 +97,16 @@ pub(super) fn section(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
         .inner_margin(egui::Margin::same(16))
         .show(ui, |ui| {
             ui.set_min_width((card_width - 32.0).max(0.0));
-            ui.set_min_height(96.0);
             contents(ui);
         });
 }
 
-pub(super) fn page_header(ui: &mut egui::Ui, title: &str, subtitle: &str) {
-    let muted = ui.visuals().widgets.noninteractive.fg_stroke.color;
+pub(super) fn page_header(ui: &mut egui::Ui, title: &str) {
     ui.label(
         egui::RichText::new(title)
             .font(egui::FontId::proportional(22.0))
             .strong(),
     );
-    ui.add_space(8.0);
-    ui.label(egui::RichText::new(subtitle).color(muted).size(13.0));
     ui.add_space(16.0);
 }
 
@@ -180,12 +176,69 @@ pub(super) fn action_button(ui: &mut egui::Ui, label: &str, primary: bool) -> eg
     };
 
     with_button_looks(ui, idle, hovered, |ui| {
+        ui.spacing_mut().button_padding += BUTTON_PADDING_EXTRA;
         ui.add(
             egui::Button::new(label)
                 .min_size(egui::vec2(0.0, 32.0))
                 .corner_radius(egui::CornerRadius::same(8)),
         )
     })
+}
+
+/// Extra internal room for button text (2.0px).
+pub(super) const BUTTON_PADDING_EXTRA: egui::Vec2 = egui::vec2(8.0, 8.0);
+
+/// Standard height for single-line input field buttons (32.0px).
+pub(super) const FIELD_BUTTON_HEIGHT: f32 = 32.0;
+
+/// Standard width for browse buttons (88.0px).
+pub(super) const BROWSE_BUTTON_WIDTH: f32 = 88.0;
+
+/// Standard button used adjacent to text fields (e.g. "Browse...", "Open...", "Save As...").
+pub(super) fn field_button(ui: &mut egui::Ui, label: &str, width: Option<f32>) -> egui::Response {
+    let btn_width = width.unwrap_or(BROWSE_BUTTON_WIDTH);
+    ui.scope(|ui| {
+        ui.spacing_mut().button_padding += BUTTON_PADDING_EXTRA;
+        ui.add_sized(
+            egui::vec2(btn_width, FIELD_BUTTON_HEIGHT),
+            egui::Button::new(label),
+        )
+    })
+    .inner
+}
+
+/// Standard "Browse..." button with uniform 88.0x32.0 dimensions.
+pub(super) fn browse_button(ui: &mut egui::Ui) -> egui::Response {
+    field_button(ui, "Browse...", Some(BROWSE_BUTTON_WIDTH))
+}
+
+/// Pairs a single-line TextEdit with an aligned trailing button (like "Browse...").
+/// Automatically computes field width so the button is flush with the container right edge.
+/// Uses an exact 32.0px horizontal layout matching FIELD_BUTTON_HEIGHT to prevent vertical shift.
+/// Returns true if the trailing button was clicked.
+pub(super) fn path_browse_row(
+    ui: &mut egui::Ui,
+    path_val: &mut String,
+    button_label: Option<&str>,
+) -> bool {
+    let btn_label = button_label.unwrap_or("Browse...");
+    let btn_width = BROWSE_BUTTON_WIDTH;
+    let spacing = ui.spacing().item_spacing.x;
+    let field_width = (ui.available_width() - btn_width - spacing).max(80.0);
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), FIELD_BUTTON_HEIGHT),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.add_sized(
+                egui::vec2(field_width, FIELD_BUTTON_HEIGHT),
+                egui::TextEdit::singleline(path_val)
+                    .vertical_align(egui::Align::Center)
+                    .margin(egui::Margin::symmetric(8, 0)),
+            );
+            field_button(ui, btn_label, Some(btn_width)).clicked()
+        },
+    )
+    .inner
 }
 
 pub(super) fn toggle(ui: &mut egui::Ui, value: &mut bool) -> egui::Response {
@@ -210,6 +263,63 @@ pub(super) fn toggle(ui: &mut egui::Ui, value: &mut bool) -> egui::Response {
         egui::Color32::WHITE,
     );
     response
+}
+
+/// Renders a closeable info toast / callout banner.
+/// Returns true if the close button was clicked.
+pub(super) fn dismissable_toast(ui: &mut egui::Ui, text: &str, open: &mut bool) -> bool {
+    if !*open {
+        return false;
+    }
+    let visuals = ui.visuals();
+    let accent = visuals.selection.stroke.color;
+    let text_color = visuals.widgets.noninteractive.fg_stroke.color;
+    let card_width = ui.available_width();
+    let mut closed = false;
+
+    egui::Frame::new()
+        .fill(visuals.faint_bg_color)
+        .stroke(egui::Stroke::new(
+            1.0,
+            visuals.widgets.noninteractive.bg_stroke.color,
+        ))
+        .corner_radius(egui::CornerRadius::same(12))
+        .inner_margin(egui::Margin::symmetric(16, 12))
+        .show(ui, |ui| {
+            ui.set_min_width((card_width - 32.0).max(0.0));
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("ℹ").color(accent).size(15.0).strong());
+                ui.add_space(6.0);
+                let close_button_width = 24.0;
+                let text_width = (ui.available_width() - close_button_width - 12.0).max(80.0);
+                ui.add_sized(
+                    egui::vec2(text_width, 0.0),
+                    egui::Label::new(
+                        egui::RichText::new(text)
+                            .color(text_color)
+                            .size(12.0),
+                    )
+                    .wrap(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let close_btn = egui::Button::new(
+                        egui::RichText::new("✕").size(12.0).color(text_color),
+                    )
+                    .frame(false)
+                    .min_size(egui::vec2(20.0, 20.0));
+                    if ui
+                        .add(close_btn)
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        *open = false;
+                        closed = true;
+                    }
+                });
+            });
+        });
+
+    closed
 }
 
 pub(super) fn status_bar(ui: &mut egui::Ui, status_message: &str) {

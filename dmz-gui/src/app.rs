@@ -8,7 +8,6 @@ use eframe::egui;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Resolver,
-    Builder,
     WorkspaceSandbox,
     AgentSandbox,
     AirGap,
@@ -129,7 +128,7 @@ impl eframe::App for DmzGuiApp {
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
-                                                if ui.button("Browse...").clicked() {
+                                                if components::browse_button(ui).clicked() {
                                                     if let Some(path) =
                                                         rfd::FileDialog::new().pick_folder()
                                                     {

@@ -29,11 +29,7 @@ pub(super) fn show(
     lockfile_path: &mut String,
     status_message: &mut String,
 ) {
-    components::page_header(
-        ui,
-        "Dependency Resolver",
-        "Scan manifests, compute closure lockfiles, fetch offline stores, and manage multi-ecosystem stacks.",
-    );
+    components::page_header(ui, "Dependency Resolver");
 
     components::section(ui, |ui| {
         components::section_header(ui, "Workspace & Targets");
@@ -42,25 +38,15 @@ pub(super) fn show(
             .spacing([16.0, 8.0])
             .min_col_width(120.0)
             .show(ui, |ui| {
-                ui.label("Workspace directory");
-                ui.horizontal(|ui| {
-                    let browse_width = 86.0;
-                    let field_width = (ui.available_width() - browse_width - 8.0).max(80.0);
-                    ui.add_sized(
-                        egui::vec2(field_width, 32.0),
-                        egui::TextEdit::singleline(workspace_path)
-                            .vertical_align(egui::Align::Center)
-                            .margin(egui::Margin::symmetric(8, 0)),
-                    );
-                    if ui.button("Browse...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                            *workspace_path = path.display().to_string();
-                        }
+                ui.label("Workspace Directory");
+                if components::path_browse_row(ui, workspace_path, None) {
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        *workspace_path = path.display().to_string();
                     }
-                });
+                }
                 ui.end_row();
 
-                ui.label("Lockfile path");
+                ui.label("Lockfile Path");
                 ui.add_sized(
                     egui::vec2(ui.available_width(), 32.0),
                     egui::TextEdit::singleline(lockfile_path)
@@ -69,27 +55,17 @@ pub(super) fn show(
                 );
                 ui.end_row();
 
-                ui.label("Store cache directory");
-                ui.horizontal(|ui| {
-                    let browse_width = 86.0;
-                    let field_width = (ui.available_width() - browse_width - 8.0).max(80.0);
-                    ui.add_sized(
-                        egui::vec2(field_width, 32.0),
-                        egui::TextEdit::singleline(&mut state.store_dir)
-                            .vertical_align(egui::Align::Center)
-                            .margin(egui::Margin::symmetric(8, 0)),
-                    );
-                    if ui.button("Browse...").clicked() {
-                        let mut dialog = rfd::FileDialog::new();
-                        let ws_path = PathBuf::from(&*workspace_path);
-                        if ws_path.exists() {
-                            dialog = dialog.set_directory(&ws_path);
-                        }
-                        if let Some(path) = dialog.pick_folder() {
-                            state.store_dir = path.display().to_string();
-                        }
+                ui.label("Store Cache Directory");
+                if components::path_browse_row(ui, &mut state.store_dir, None) {
+                    let mut dialog = rfd::FileDialog::new();
+                    let ws_path = PathBuf::from(&*workspace_path);
+                    if ws_path.exists() {
+                        dialog = dialog.set_directory(&ws_path);
                     }
-                });
+                    if let Some(path) = dialog.pick_folder() {
+                        state.store_dir = path.display().to_string();
+                    }
+                }
                 ui.end_row();
 
                 ui.label("Target Platform");
@@ -108,7 +84,7 @@ pub(super) fn show(
     components::section(ui, |ui| {
         components::section_header(ui, "Dependency Lifecycle Actions");
         ui.horizontal_wrapped(|ui| {
-            if components::action_button(ui, "Scan & resolve dmz.lock", true).clicked() {
+            if components::action_button(ui, "Scan & Resolve", true).clicked() {
                 let workspace = PathBuf::from(&*workspace_path);
                 let ws_canon =
                     std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
@@ -142,7 +118,7 @@ pub(super) fn show(
                 }
             }
 
-            if components::action_button(ui, "Fetch into store (dmz fetch)", false).clicked() {
+            if components::action_button(ui, "Fetch into Store", false).clicked() {
                 let workspace = PathBuf::from(&*workspace_path);
                 let ws_canon =
                     std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
@@ -169,7 +145,7 @@ pub(super) fn show(
                 }
             }
 
-            if components::action_button(ui, "Install offline (dmz install)", false).clicked() {
+            if components::action_button(ui, "Install Offline", false).clicked() {
                 let workspace = PathBuf::from(&*workspace_path);
                 let ws_canon =
                     std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
@@ -208,7 +184,7 @@ pub(super) fn show(
     components::section(ui, |ui| {
         components::section_header(ui, "Ecosystem Discovery & Verification");
         ui.horizontal_wrapped(|ui| {
-            if components::action_button(ui, "Discover active stacks", false).clicked() {
+            if components::action_button(ui, "Discover Active Stacks", false).clicked() {
                 let workspace = PathBuf::from(&*workspace_path);
                 let registry = EcosystemRegistry::new();
                 match registry.process_workspace(&workspace) {
@@ -222,7 +198,7 @@ pub(super) fn show(
                 }
             }
 
-            if components::action_button(ui, "Verify active toolchains", false).clicked() {
+            if components::action_button(ui, "Verify Active Toolchains", false).clicked() {
                 let workspace = PathBuf::from(&*workspace_path);
                 let registry = EcosystemRegistry::new();
                 let active = registry.discover_active(&workspace);
