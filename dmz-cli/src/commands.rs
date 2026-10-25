@@ -71,6 +71,7 @@ pub fn dispatch(command: Commands) {
             refresh_lock,
             with_git_history,
             since,
+            with_toolchain,
         } => {
             run_bundle(BundleArgs {
                 target,
@@ -83,6 +84,7 @@ pub fn dispatch(command: Commands) {
                 refresh_lock,
                 with_git_history,
                 since,
+                with_toolchain,
             });
         }
 
@@ -140,6 +142,7 @@ pub fn dispatch(command: Commands) {
                 refresh_lock,
                 with_git_history,
                 since,
+                with_toolchain,
             } => {
                 run_bundle(BundleArgs {
                     target,
@@ -152,6 +155,7 @@ pub fn dispatch(command: Commands) {
                     refresh_lock,
                     with_git_history,
                     since,
+                    with_toolchain,
                 });
             }
 
@@ -165,6 +169,7 @@ pub fn dispatch(command: Commands) {
                 mode,
                 with_git_history,
                 since,
+                with_toolchain,
             } => {
                 run_export(ExportArgs {
                     target,
@@ -176,6 +181,7 @@ pub fn dispatch(command: Commands) {
                     mode,
                     with_git_history,
                     since,
+                    with_toolchain,
                 });
             }
 
@@ -368,6 +374,7 @@ pub struct BundleArgs {
     pub refresh_lock: bool,
     pub with_git_history: bool,
     pub since: Option<String>,
+    pub with_toolchain: bool,
 }
 
 pub fn run_bundle(args: BundleArgs) {
@@ -473,6 +480,7 @@ pub fn run_bundle(args: BundleArgs) {
         target_platform: args.target,
         with_git_history: args.with_git_history,
         since: args.since,
+        with_toolchain: args.with_toolchain,
     };
 
     match AirGapExporter::export(&config) {
@@ -501,6 +509,7 @@ pub struct ExportArgs {
     pub mode: CliExportMode,
     pub with_git_history: bool,
     pub since: Option<String>,
+    pub with_toolchain: bool,
 }
 
 pub fn run_export(args: ExportArgs) {
@@ -557,6 +566,7 @@ pub fn run_export(args: ExportArgs) {
         target_platform: args.target,
         with_git_history: args.with_git_history,
         since: args.since,
+        with_toolchain: args.with_toolchain,
     };
 
     match AirGapExporter::export(&config) {
@@ -677,11 +687,20 @@ pub fn run_import(
                         cmd.program,
                         cmd.args.join(" ")
                     );
-                    match std::process::Command::new(&cmd.program)
-                        .args(&cmd.args)
-                        .current_dir(&ws_canon)
-                        .status()
-                    {
+                    let mut proc_cmd = std::process::Command::new(&cmd.program);
+                    proc_cmd.args(&cmd.args).current_dir(&ws_canon);
+
+                    // Inject bundled toolchain paths if available
+                    let mut toolchain_envs = std::collections::HashMap::new();
+                    dmz_core::toolchain::ToolchainPackager::inject_toolchain_paths(
+                        &ws_canon,
+                        &mut toolchain_envs,
+                    );
+                    for (k, v) in toolchain_envs {
+                        proc_cmd.env(k, v);
+                    }
+
+                    match proc_cmd.status() {
                         Ok(status) => {
                             if !status.success() {
                                 error!("Ecosystem verification failed for '{}'", eco.name());
@@ -761,6 +780,9 @@ pub fn run_shell(
         "NODE_PATH".to_string(),
         abs_workspace.join("node_modules").display().to_string(),
     );
+
+    // Inject bundled toolchain paths and environment configurations
+    dmz_core::toolchain::ToolchainPackager::inject_toolchain_paths(&abs_workspace, &mut envs);
 
     let is_sandbox = !no_sandbox;
     envs.insert(

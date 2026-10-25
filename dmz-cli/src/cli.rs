@@ -161,6 +161,10 @@ pub enum Commands {
         /// Baseline commit, ref, or previous manifest/bundle for incremental delta export
         #[arg(long)]
         since: Option<String>,
+
+        /// Package active compiler toolchains (cargo, rustc, node, go, python, php, ruby) into bundle
+        #[arg(long, default_value_t = false)]
+        with_toolchain: bool,
     },
 
     /// Unpack, verify, and restore an air-gap bundle into local store
@@ -344,6 +348,10 @@ pub enum AirgapCommands {
         /// Baseline commit, ref, or previous manifest/bundle for incremental delta export
         #[arg(long)]
         since: Option<String>,
+
+        /// Package active compiler toolchains (cargo, rustc, node, go, python, php, ruby) into bundle
+        #[arg(long, default_value_t = false)]
+        with_toolchain: bool,
     },
 
     /// Bundle store items and dmz.lock into a portable air-gap archive (.tar.zst)
@@ -383,6 +391,10 @@ pub enum AirgapCommands {
         /// Baseline commit, ref, or previous manifest/bundle for incremental delta export
         #[arg(long)]
         since: Option<String>,
+
+        /// Package active compiler toolchains (cargo, rustc, node, go, python, php, ruby) into bundle
+        #[arg(long, default_value_t = false)]
+        with_toolchain: bool,
     },
 
     /// Unpack and cryptographically verify an air-gap bundle into local store
