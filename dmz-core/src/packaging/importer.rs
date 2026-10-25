@@ -12,7 +12,7 @@ impl AirGapImporter {
         expected_sha256: &str,
         extract_to: &Path,
     ) -> Result<PathBuf, String> {
-        // 1. Cryptographic SHA-256 verification
+        // Cryptographic SHA-256 verification
         let mut file = File::open(archive_path).map_err(|e| e.to_string())?;
         let mut hasher = Sha256::new();
         std::io::copy(&mut file, &mut hasher).map_err(|e| e.to_string())?;
@@ -25,14 +25,14 @@ impl AirGapImporter {
             ));
         }
 
-        // 2. Decompress and unpack .tar.zst archive offline
+        // Decompress and unpack .tar.zst archive offline
         fs::create_dir_all(extract_to).map_err(|e| e.to_string())?;
         let tar_file = File::open(archive_path).map_err(|e| e.to_string())?;
         let decoder = zstd::stream::Decoder::new(tar_file).map_err(|e| e.to_string())?;
         let mut archive = tar::Archive::new(decoder);
         archive.unpack(extract_to).map_err(|e| e.to_string())?;
 
-        // 3. Verify dmz.lock inside unpacked closure
+        // Verify dmz.lock inside unpacked closure
         let lockfile_path = extract_to.join("dmz.lock");
         if lockfile_path.exists() {
             DmzLockfile::load_and_verify(&lockfile_path).map_err(|e| e.to_string())?;

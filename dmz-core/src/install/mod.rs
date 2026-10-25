@@ -56,7 +56,7 @@ impl InstallerEngine {
     pub fn install(config: &InstallConfig) -> Result<usize, InstallError> {
         info!(lockfile = ?config.lockfile_path, store = ?config.store_dir, "Starting DMZ native offline installation");
 
-        // Load and cryptographically verify lockfile integrity[cite: 3]
+        // Load and cryptographically verify lockfile integrity
         let lockfile = DmzLockfile::load_and_verify(&config.lockfile_path)
             .map_err(|e| InstallError::LockfileError(e.to_string()))?;
 

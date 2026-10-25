@@ -202,7 +202,7 @@ pub(super) fn show(
                     Some(state.target_platform.trim().to_string())
                 };
 
-                // 1. Resolve manifests if lockfile missing
+                // Resolve manifests if lockfile missing
                 if !lockfile.exists() {
                     match ResolverEngine::resolve_workspace_with_target(
                         &ws_canon,
@@ -218,13 +218,13 @@ pub(super) fn show(
                     }
                 }
 
-                // 2. Fetch dependencies
+                // Fetch dependencies
                 if let Err(e) = ResolverEngine::fetch_dependencies(&lockfile, &store) {
                     *status_message = format!("Bundle failed during dependency fetch: {e}");
                     return;
                 }
 
-                // 3. Export
+                // Export
                 let config = ExportConfig {
                     workspace_path: ws_canon,
                     lockfile_path: lockfile,

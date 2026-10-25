@@ -12,7 +12,7 @@ pub struct AgentSandbox {
 }
 
 impl AgentSandbox {
-    /// Instantiate a complete AI agent sub-sandbox with volatile storage and network guardrails
+    /// Instantiate AI agent sub-sandbox with volatile storage and network guardrails
     pub fn new(
         agent_id: impl Into<String>,
         scratchpad_size_bytes: usize,

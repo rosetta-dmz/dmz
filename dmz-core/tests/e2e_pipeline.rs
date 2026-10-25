@@ -62,7 +62,7 @@ fn test_e2e_unified_airgap_export_and_import() {
     let (_tmp_dir, workspace_path, store_path, output_dir) = setup_mock_workspace();
     let lockfile_path = workspace_path.join("dmz.lock");
 
-    // Step 1: Test Unified Air-Gap Export (Code + Store)
+    // Test Unified Air-Gap Export (Code + Store)
     let bundle_path = output_dir.join("unified_bundle.tar.zst");
     let export_config = ExportConfig {
         workspace_path: workspace_path.clone(),
@@ -81,7 +81,7 @@ fn test_e2e_unified_airgap_export_and_import() {
     assert_eq!(manifest.package_count, 1);
     assert!(!manifest.archive_sha256.is_empty());
 
-    // Step 2: Test Air-Gap Import on a fresh target store
+    // Test Air-Gap Import on a fresh target store
     let target_store = _tmp_dir.path().join("target_store");
     let import_config = ImportConfig {
         archive_path: bundle_path,

@@ -33,7 +33,7 @@ impl AgentRunner {
         }
     }
 
-    /// Spawn a new AI agent wrapped in an isolated dmz-sandbox environment
+    /// Spawn new AI agent wrapped in an isolated dmz-sandbox environment
     pub async fn spawn_agent(&self, config: AgentConfig) -> Result<(), String> {
         let agent_id = config.agent_id.clone();
 
@@ -46,7 +46,7 @@ impl AgentRunner {
 
         info!(agent = %agent_id, domains = ?config.allowed_domains, "Initializing AI agent sandbox");
 
-        // 1. Create native AgentSandbox (allocates EphemeralFs + DomainWhitelist proxy)
+        // Create native AgentSandbox (allocates EphemeralFs + DomainWhitelist proxy)
         let sandbox = AgentSandbox::new(
             &agent_id,
             config.scratchpad_bytes,
@@ -56,7 +56,7 @@ impl AgentRunner {
 
         let scratchpad_dir = sandbox.scratchpad_path().to_path_buf();
 
-        // 2. Prepare command and inject sandbox environment variables
+        // Prepare command and inject sandbox environment variables
         let mut cmd = Command::new(&config.binary_or_script);
         cmd.args(&config.args)
             .envs(&config.envs)
@@ -81,7 +81,7 @@ impl AgentRunner {
             agents.insert(agent_id.clone(), active_agent);
         }
 
-        // 3. Spawn asynchronous background watcher to monitor exit status and trigger cleanup
+        // Spawn asynchronous background watcher to monitor exit status and trigger cleanup
         let agents_ref = self.active_agents.clone();
         let agent_id_clone = agent_id.clone();
 

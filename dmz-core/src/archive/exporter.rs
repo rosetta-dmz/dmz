@@ -152,13 +152,13 @@ impl AirGapExporter {
             "Initiating air-gap package export"
         );
 
-        // 1. Detect VCS Provenance
+        // Detect VCS Provenance
         let vcs_provenance = GitProvider::get_provenance(&workspace_root).ok().flatten();
         if let Some(ref prov) = vcs_provenance {
             info!(commit = %prov.commit, branch = ?prov.branch, dirty = prov.dirty, "Detected workspace VCS provenance");
         }
 
-        // 2. Parse Delta Baseline if `--since` was requested
+        // Parse Delta Baseline if `--since` was requested
         let mut delta_base = None;
         let mut changed_files_filter: Option<HashSet<PathBuf>> = None;
 
@@ -224,7 +224,7 @@ impl AirGapExporter {
             }
         }
 
-        // 3. Automatically discover active workspace ecosystems & gather generalized caches
+        // Automatically discover active workspace ecosystems & gather generalized caches
         let registry = EcosystemRegistry::new();
 
         let detected_stacks = registry
@@ -236,7 +236,7 @@ impl AirGapExporter {
         let cache_paths = registry.gather_all_caches(&workspace_root);
         info!(caches = ?cache_paths, "Gathered generalized ecosystem cache paths for archiving");
 
-        // 4. Verify dmz.lock integrity before exporting
+        // Verify dmz.lock integrity before exporting
         let mut lockfile = DmzLockfile::load_and_verify(&effective_lockfile)
             .map_err(|e| ExportError::LockfileError(e.to_string()))?;
 
@@ -246,7 +246,7 @@ impl AirGapExporter {
             let _ = lockfile.save(&effective_lockfile);
         }
 
-        // 5. Ensure parent output directory exists
+        // Ensure parent output directory exists
         if let Some(parent) = effective_output.parent() {
             if !parent.exists() {
                 fs::create_dir_all(parent).map_err(|e| {
@@ -255,7 +255,7 @@ impl AirGapExporter {
             }
         }
 
-        // 6. Prepare archive output stream
+        // Prepare archive output stream
         let file = File::create(&effective_output)
             .map_err(|e| ExportError::IoError(format!("Failed to create export archive: {}", e)))?;
 
@@ -269,7 +269,7 @@ impl AirGapExporter {
             .append_path_with_name(&effective_lockfile, "dmz.lock")
             .map_err(|e| ExportError::ArchiveError(format!("Failed to pack dmz.lock: {}", e)))?;
 
-        // 7. Append store items (if mode is Unified or DepsOnly)
+        // Append store items (if mode is Unified or DepsOnly)
         let mut packed_count = 0;
         if config.mode == ExportMode::Unified || config.mode == ExportMode::DepsOnly {
             for pkg_info in lockfile.packages.values() {
@@ -302,7 +302,7 @@ impl AirGapExporter {
             }
         }
 
-        // 8. Append workspace source code (if mode is Unified or CodeOnly)
+        // Append workspace source code (if mode is Unified or CodeOnly)
         if config.mode == ExportMode::Unified || config.mode == ExportMode::CodeOnly {
             info!(path = ?workspace_root, "Appending workspace source code to archive");
             if workspace_root.is_dir() {
@@ -318,7 +318,7 @@ impl AirGapExporter {
             }
         }
 
-        // 9. Append Git Bundle if requested (`--with-git-history`)
+        // Append Git Bundle if requested (`--with-git-history`)
         let mut has_git_history = false;
         if config.with_git_history {
             let temp_dir = tempfile::tempdir().map_err(|e| ExportError::IoError(e.to_string()))?;
@@ -355,7 +355,7 @@ impl AirGapExporter {
             .clone()
             .or_else(|| lockfile.target_platform.clone());
 
-        // 10. Write air-gap manifest header
+        // Write air-gap manifest header
         let manifest = AirGapManifest {
             dmz_version: env!("CARGO_PKG_VERSION").to_string(),
             target_platform,

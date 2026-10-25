@@ -30,14 +30,14 @@ pub(super) fn nav_item(
         ui.add_sized(
             egui::vec2(ui.available_width(), 40.0),
             egui::Button::new(label)
-                .corner_radius(12.0) // Updated from 10.0 to match cards/sections (12 pt grid token)
+                .corner_radius(12.0)
                 .min_size(egui::vec2(0.0, 40.0)),
         )
     })
     .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Colors for one interaction state of a button.
+/// Colors for one interaction state of a button
 #[derive(Clone, Copy)]
 struct ButtonLook {
     fill: egui::Color32,
@@ -51,12 +51,6 @@ impl ButtonLook {
     }
 }
 
-/// Runs `add_contents` in a scope whose widget `Visuals` use `idle` for the inactive
-/// state and `hovered` for the hovered/active states. This lets plain `egui::Button`s
-/// handle hover themselves (calling `Button::fill`/`stroke` would override hover effects).
-///
-/// Stroke width is kept at 1.0 in every state because egui derives button padding from
-/// it; differing widths would make buttons grow/shrink on hover.
 fn with_button_looks<R>(
     ui: &mut egui::Ui,
     idle: ButtonLook,
@@ -65,7 +59,6 @@ fn with_button_looks<R>(
 ) -> R {
     ui.scope(|ui| {
         let visuals = ui.visuals_mut();
-        // The theme sets a global text color, which would otherwise win over `fg_stroke`.
         visuals.override_text_color = None;
         let widgets = &mut visuals.widgets;
         for (state, look) in [
@@ -84,8 +77,6 @@ fn with_button_looks<R>(
     .inner
 }
 
-/// Horizontal clearance margin (2.0px) preventing frame borders from touching the viewport
-/// clip boundary while maintaining equal visual clearance with the left margin.
 pub(super) const CARD_RIGHT_CLEARANCE: f32 = 2.0;
 
 pub(super) fn section(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
@@ -193,16 +184,12 @@ pub(super) fn action_button(ui: &mut egui::Ui, label: &str, primary: bool) -> eg
     })
 }
 
-/// Extra internal room for button text (2.0px).
 pub(super) const BUTTON_PADDING_EXTRA: egui::Vec2 = egui::vec2(8.0, 8.0);
 
-/// Standard height for single-line input field buttons (32.0px).
 pub(super) const FIELD_BUTTON_HEIGHT: f32 = 32.0;
 
-/// Standard width for browse buttons (88.0px).
 pub(super) const BROWSE_BUTTON_WIDTH: f32 = 88.0;
 
-/// Standard button used adjacent to text fields (e.g. "Browse...", "Open...", "Save As...").
 pub(super) fn field_button(ui: &mut egui::Ui, label: &str, width: Option<f32>) -> egui::Response {
     let btn_width = width.unwrap_or(BROWSE_BUTTON_WIDTH);
     ui.scope(|ui| {
@@ -215,15 +202,10 @@ pub(super) fn field_button(ui: &mut egui::Ui, label: &str, width: Option<f32>) -
     .inner
 }
 
-/// Standard "Browse..." button with uniform 88.0x32.0 dimensions.
 pub(super) fn browse_button(ui: &mut egui::Ui) -> egui::Response {
     field_button(ui, "Browse...", Some(BROWSE_BUTTON_WIDTH))
 }
 
-/// Pairs a single-line TextEdit with an aligned trailing button (like "Browse...").
-/// Automatically computes field width so the button is flush with the container right edge.
-/// Uses an exact 32.0px horizontal layout matching FIELD_BUTTON_HEIGHT to prevent vertical shift.
-/// Returns true if the trailing button was clicked.
 pub(super) fn path_browse_row(
     ui: &mut egui::Ui,
     path_val: &mut String,
@@ -273,8 +255,6 @@ pub(super) fn toggle(ui: &mut egui::Ui, value: &mut bool) -> egui::Response {
     response
 }
 
-/// Renders a closeable info toast / callout banner.
-/// Returns true if the close button was clicked.
 pub(super) fn dismissable_toast(ui: &mut egui::Ui, text: &str, open: &mut bool) -> bool {
     if !*open {
         return false;
@@ -315,7 +295,7 @@ pub(super) fn dismissable_toast(ui: &mut egui::Ui, text: &str, open: &mut bool) 
                 ui.allocate_exact_size(egui::vec2(inner_width, row_height), egui::Sense::hover());
             let center_y = row_rect.center().y;
 
-            // 1. Vector info badge (vertically centered with text message)
+            // Vector info badge (vertically centered with text message)
             let icon_center = egui::pos2(row_rect.left() + icon_size / 2.0, center_y);
             ui.painter()
                 .circle_filled(icon_center, 9.0, accent.gamma_multiply(0.2));
@@ -331,14 +311,12 @@ pub(super) fn dismissable_toast(ui: &mut egui::Ui, text: &str, open: &mut bool) 
                 egui::Stroke::new(1.5, accent),
             );
 
-            // 2. Wrapped text galley (vertically centered)
             let text_pos = egui::pos2(
                 row_rect.left() + icon_size + gap,
                 center_y - text_size.y / 2.0,
             );
             ui.painter().galley(text_pos, galley, text_color);
 
-            // 3. Vector close button (vertically centered with text message)
             let close_rect = egui::Rect::from_center_size(
                 egui::pos2(row_rect.right() - close_size / 2.0, center_y),
                 egui::vec2(close_size, close_size),

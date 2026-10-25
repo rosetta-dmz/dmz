@@ -33,7 +33,7 @@ impl DomainWhitelist {
         }
     }
 
-    /// Evaluates if an outbound host connection is permitted for the AI agent
+    /// Evaluates whether an outbound host connection is permitted for the AI agent
     pub fn is_allowed(&self, host: &str) -> bool {
         if self.allow_all {
             return true;
@@ -41,12 +41,12 @@ impl DomainWhitelist {
 
         let clean_host = host.split(':').next().unwrap_or(host).trim().to_lowercase();
 
-        // 1. Direct exact match (e.g. "api.openai.com")
+        // Direct exact match (e.g. "api.openai.com")
         if self.allowed_domains.contains(&clean_host) {
             return true;
         }
 
-        // 2. Wildcard suffix match (e.g. "*.github.com" matches "raw.github.com")
+        // Wildcard suffix match (e.g. "*.github.com" matches "raw.github.com")
         for wildcard in &self.allowed_wildcards {
             if clean_host.ends_with(wildcard) && clean_host.len() > wildcard.len() {
                 let prefix_len = clean_host.len() - wildcard.len();

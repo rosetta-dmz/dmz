@@ -25,7 +25,7 @@ impl ResolverEngine {
 
         let mut locked_packages = Vec::new();
 
-        // 1. Native Cargo Auto-Resolution
+        // Native Cargo Auto-Resolution
         let cargo_toml_path = workspace_dir.join("Cargo.toml");
         if cargo_toml_path.exists() {
             info!(
@@ -106,7 +106,7 @@ impl ResolverEngine {
             }
         }
 
-        // 2. Scan remaining non-Cargo ecosystems using the standard ManifestScanner[cite: 3]
+        // Scan remaining non-Cargo ecosystems using the standard ManifestScanner
         let manifests = crate::resolver::manifest::ManifestScanner::scan_dir(workspace_dir)
             .map_err(|e| format!("Manifest Scan Error: {}", e))?;
 

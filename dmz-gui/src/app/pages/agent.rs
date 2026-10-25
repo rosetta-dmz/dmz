@@ -166,7 +166,7 @@ mod tests {
         state.active_agents.push(sandbox);
         assert_eq!(state.active_agents.len(), 1);
 
-        // Stop the agent: remove from active_agents and drop
+        // Stop agent (remove from active_agents and drop)
         let stopped = state.active_agents.remove(0);
         assert_eq!(stopped.id, agent_id);
         drop(stopped);

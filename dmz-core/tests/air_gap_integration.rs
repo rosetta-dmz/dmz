@@ -15,7 +15,7 @@ fn test_air_gap_import_and_verification() {
     fs::create_dir_all(&workspace_path).unwrap();
     fs::create_dir_all(&export_path).unwrap();
 
-    // 1. Create a mock dmz.lock file with the matching signature expected by load_and_verify
+    // Create mock dmz.lock file with the matching signature expected by load_and_verify
     let lockfile_path = workspace_path.join("dmz.lock");
     let mut packages = BTreeMap::new();
     packages.insert(
@@ -42,7 +42,7 @@ fn test_air_gap_import_and_verification() {
     let lock_json = serde_json::to_string_pretty(&lockfile).unwrap();
     fs::write(&lockfile_path, lock_json).unwrap();
 
-    // 2. Pack workspace into a tar.zst archive
+    // Pack workspace into a tar.zst archive
     let archive_path = export_path.join("closure.tar.zst");
     let tar_file = File::create(&archive_path).unwrap();
     let mut encoder = zstd::stream::Encoder::new(tar_file, 3).unwrap();
@@ -53,16 +53,16 @@ fn test_air_gap_import_and_verification() {
     }
     encoder.finish().unwrap();
 
-    // 3. Compute expected SHA-256 hash of the archive
+    // Compute expected SHA-256 hash of the archive
     let mut f = File::open(&archive_path).unwrap();
     let mut hasher = Sha256::new();
     std::io::copy(&mut f, &mut hasher).unwrap();
     let expected_hash = format!("{:x}", hasher.finalize());
 
-    // 4. Test offline import and verification
+    // Test offline import and verification
     let result = AirGapImporter::import_and_verify(&archive_path, &expected_hash, &extract_path);
     assert!(result.is_ok(), "Air-gap import failed: {:?}", result.err());
 
-    // 5. Verify unpacked contents exist
+    // Verify unpacked contents exist
     assert!(extract_path.join("dmz.lock").exists());
 }

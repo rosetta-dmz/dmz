@@ -407,7 +407,7 @@ pub fn run_bundle(args: BundleArgs) {
         args.store
     };
 
-    // 1. Resolve manifests if lockfile is missing or refresh_lock is requested
+    // Resolve manifests if lockfile is missing or refresh_lock is requested
     let should_resolve = args.refresh_lock || !effective_lockfile.exists();
     if should_resolve {
         info!("Resolving workspace dependency manifests at {:?}", ws_canon);
@@ -434,7 +434,7 @@ pub fn run_bundle(args: BundleArgs) {
         );
     }
 
-    // 2. Fetch dependencies into store cache
+    // Fetch dependencies into store cache
     info!(
         "Fetching and caching dependencies into store {:?}",
         effective_store
@@ -452,7 +452,7 @@ pub fn run_bundle(args: BundleArgs) {
         }
     }
 
-    // 3. Export unified air-gap archive
+    // Export unified air-gap archive
     let effective_output = if args.output == Path::new("dist/workspace_closure.tar.zst") {
         ws_canon.join("dist/workspace_closure.tar.zst")
     } else if args.output.is_relative() {
@@ -713,7 +713,7 @@ pub fn run_shell(
     command: Option<String>,
     args: Vec<String>,
 ) {
-    // 1. Advisory pre-flight check for dmz.lock
+    // Advisory pre-flight check for dmz.lock
     let lockfile_path = workspace.join("dmz.lock");
     let store_path = workspace.join(".dmz").join("store");
     if !lockfile_path.exists() {
@@ -724,18 +724,18 @@ pub fn run_shell(
         );
     }
 
-    // 2. Resolve shell binary: user option -> $SHELL -> /bin/sh
+    // Resolve shell binary: user option -> $SHELL -> /bin/sh
     let shell_cmd =
         shell.unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()));
 
-    // 3. Assemble command arguments (-c string vs interactive)
+    // Assemble command arguments (-c string vs interactive)
     let mut final_args = args;
     if let Some(cmd_str) = command {
         final_args.insert(0, "-c".to_string());
         final_args.insert(1, cmd_str);
     }
 
-    // 4. Prepare environment variables
+    // Prepare environment variables
     let mut envs: std::collections::HashMap<String, String> = std::env::vars().collect();
     let abs_workspace = std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
     envs.insert(

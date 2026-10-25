@@ -1,8 +1,8 @@
-# Roadmap & Current Status
+# Roadmap
 
 ## Slated for Future Implementation:
 
-### 1. Stack Compatibility & Verification
+### Stack Compatibility & Verification
 * **Automated Target VM Pre-flight Bundle Testing (Roadmap v1.2):**
   Automated spin-up of target-compatible lightweight VMs to execute pre-flight bundle compilation and verify runtime ABI/dynamic linker compatibility before deployment.
 * **System Package Stack Analysis (Roadmap v1.1):**
@@ -10,12 +10,12 @@
 * **Deep ABI/Binary Header Analysis:**
   Static inspection of compiled native C/C++ addons in `node_modules` or Python wheels to check dynamic glibc/musl and architecture constraints before runtime.
 
-### 2. Image Building
+### Image Building
 * **OCI / Docker Container Image Export (Roadmap v1.2):**
   * Converting the locked dependency closure and workspace into standard OCI layer tarballs, image manifests, and config JSON (`application/vnd.oci.image.manifest.v1+json`).
   * Creating runnable container images exportable to `docker load` or standard container registries without requiring an active Docker daemon.
 
-### 3. Containerization & Process Sandboxing
+### Containerization & Process Sandboxing
 * **True Linux Namespace Confinement (Refining Sandbox):**
   Transitioning `linux.rs` from direct process launching to unprivileged Linux User Namespaces (`unshare` with `CLONE_NEWUSER`, `CLONE_NEWNS`, `CLONE_NEWNET`) and `pivot_root`/`chroot`.
 * **Windows Job Objects & Restricted Tokens:**

@@ -3,7 +3,7 @@ pub mod handlers;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-/// Represents a standardized command configuration for delegated resolution and verification.
+/// Command configuration for delegated resolution and verification.
 #[derive(Debug, Clone)]
 pub struct CommandSpec {
     pub program: String,
@@ -17,7 +17,7 @@ pub trait EcosystemHandler: Send + Sync {
     fn resolution_command(&self) -> Option<CommandSpec>;
     fn verification_command(&self, workspace_root: &Path) -> Option<CommandSpec>;
 
-    /// Default implementation: invokes unified InstallerEngine to materialize dependencies
+    /// Default: invokes unified InstallerEngine to materialize dependencies
     fn materialize(
         &self,
         workspace_root: &Path,

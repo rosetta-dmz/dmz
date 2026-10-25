@@ -220,7 +220,7 @@ pub(super) fn show(
 
     ui.add_space(16.0);
 
-    // Incremental Delta Transfer Generator
+    // Incremental Delta Transfer & Diff Preview
     components::section(ui, |ui| {
         components::section_header(ui, "Incremental Delta Packaging & Diff Preview");
 
