@@ -24,7 +24,7 @@ The DMZ workspace is organized into **five primary crates**:
 * **`dmz-core`** — Core resolution engines, lockfiles (`dmz.lock`), embedded `libgit2` provider, and cryptographic air-gap packaging/verification pipeline.
 * **`dmz-gui`** — egui-based control center for real-time telemetry, build progress monitoring, and dependency version pinning.
 * **`dmz-sandbox`** — Secure process isolation and native containerless execution engines across Linux, macOS, and Windows.
-* **`dmz-supervisor`** — Volatile workspace supervisor managing collateral stack services (Postgres/Redis), localized IDE IPC sockets, AI sandboxes with ephemeral `tmpfs` scratchpads, and outbound network proxy auditors[cite: 1, 2].
+* **`dmz-supervisor`** — Volatile workspace supervisor managing collateral stack services (Postgres/Redis), localized IDE IPC sockets, AI sandboxes with ephemeral `tmpfs` scratchpads, and outbound network proxy auditors.
 
 ---
 
@@ -52,5 +52,3 @@ The DMZ workspace is organized into **five primary crates**:
 | **`dmz-sandbox` Native Isolation** | **Partially Implemented** | Linux namespace and macOS seatbelt integrations are active; advanced Windows Job Object/WSL2 orchestrations are in progress. |
 | **`dmz-supervisor` & Proxy Auditor** | **Partially Implemented** | Core socket server and domain filtering exist; ephemeral `tmpfs` wipe-on-exit routines are actively being refined. |
 | **`dmz-gui` Telemetry Control Center** | **In Progress** | UI framework is established; live CPU/RAM telemetry integration is pending final polish. |
-
----

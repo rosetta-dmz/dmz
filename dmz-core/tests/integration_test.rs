@@ -20,9 +20,7 @@ fn test_end_to_end_dmz_pipeline() {
     println!("[1/4] Preparing test workspace manifests...");
     create_dummy_manifests(&workspace_path);
 
-    // ------------------------------------------------------------------------
-    // Step 1: Test Dependency Resolution & Lockfile Generation
-    // ------------------------------------------------------------------------
+    // Test Dependency Resolution & Lockfile Generation
     println!("[2/4] Executing ResolverEngine::resolve_workspace...");
     let lockfile =
         ResolverEngine::resolve_workspace(&workspace_path).expect("Dependency resolution failed");
@@ -50,9 +48,7 @@ fn test_end_to_end_dmz_pipeline() {
         "Loaded lockfile closure signature must match original"
     );
 
-    // ------------------------------------------------------------------------
-    // Step 2: Test Packaging Target C (Unified App + Dependencies Closure)
-    // ------------------------------------------------------------------------
+    // Test Packaging Target C (Unified App + Dependencies Closure)
     println!("[3/4] Executing PackageBuilder for Target C (Unified)...");
     let build_config = BuildConfig {
         workspace_dir: workspace_path.clone(),
@@ -79,9 +75,7 @@ fn test_end_to_end_dmz_pipeline() {
         "SHA-256 hash must be computed"
     );
 
-    // ------------------------------------------------------------------------
-    // Step 3: Test Process Sandbox Execution
-    // ------------------------------------------------------------------------
+    // Test Process Sandbox Execution
     println!("[4/4] Executing Process inside sandbox...");
 
     #[cfg(unix)]

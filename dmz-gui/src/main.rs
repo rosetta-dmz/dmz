@@ -20,7 +20,7 @@ fn main() -> eframe::Result<()> {
         .with_active(true)
         .with_visible(true);
 
-    // macOS handles app icons natively via the .app bundle (Info.plist -> AppIcon.icns).
+    // MacOS handles app icons natively via the .app bundle (Info.plist -> AppIcon.icns).
     // Window-level icons are used primarily for Windows and Linux.
     #[cfg(not(target_os = "macos"))]
     let viewport_builder = {

@@ -7,7 +7,7 @@ fn test_workspace_resolution_fail_fast_and_inheritance() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
 
-    // 1. Create root Cargo.toml with workspace and inheritance
+    // Create root Cargo.toml with workspace and inheritance
     let root_cargo = r#"
         [workspace]
         resolver = "2"
@@ -18,7 +18,7 @@ fn test_workspace_resolution_fail_fast_and_inheritance() {
     "#;
     fs::write(root.join("Cargo.toml"), root_cargo).unwrap();
 
-    // 2. Create workspace member crate-a using workspace inheritance
+    // Create workspace member crate-a using workspace inheritance
     fs::create_dir_all(root.join("crate-a/src")).unwrap();
     let member_cargo = r#"
         [package]
@@ -32,7 +32,7 @@ fn test_workspace_resolution_fail_fast_and_inheritance() {
     fs::write(root.join("crate-a/Cargo.toml"), member_cargo).unwrap();
     fs::write(root.join("crate-a/src/lib.rs"), "").unwrap();
 
-    // 3. Run resolver engine and verify packages are correctly populated
+    // Run resolver engine and verify packages are correctly populated
     let lockfile_result = ResolverEngine::resolve_workspace(root);
     assert!(
         lockfile_result.is_ok(),
@@ -66,14 +66,14 @@ fn test_npm_workspace_resolution() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
 
-    // 1. Create root package.json with workspace glob patterns
+    // Create root package.json with workspace glob patterns
     let root_pkg = r#"{
         "name": "root-monorepo",
         "workspaces": ["packages/*"]
     }"#;
     fs::write(root.join("package.json"), root_pkg).unwrap();
 
-    // 2. Create sub-package directory and manifest (with valid quoted keys)
+    // Create sub-package directory and manifest (with valid quoted keys)
     fs::create_dir_all(root.join("packages/app-a")).unwrap();
     let sub_pkg = r#"{
         "name": "app-a",
@@ -86,7 +86,7 @@ fn test_npm_workspace_resolution() {
     }"#;
     fs::write(root.join("packages/app-a/package.json"), sub_pkg).unwrap();
 
-    // 3. Resolve workspace and verify npm packages are captured
+    // Resolve workspace and verify npm packages are captured
     let lockfile_result = ResolverEngine::resolve_workspace(root);
     assert!(
         lockfile_result.is_ok(),
@@ -147,7 +147,7 @@ fn test_version_range_sanitization_and_operators() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
 
-    // 1. Create a package.json with semver ranges (^ and ~)
+    // Create a package.json with semver ranges (^ and ~)
     let root_pkg = r#"{
         "name": "sanitization-test",
         "dependencies": {
@@ -157,7 +157,7 @@ fn test_version_range_sanitization_and_operators() {
     }"#;
     fs::write(root.join("package.json"), root_pkg).unwrap();
 
-    // 2. Create requirements.txt with various comparison operators (>=, ~=, ==)
+    // Create requirements.txt with various comparison operators (>=, ~=, ==)
     let reqs = r#"
         requests >= 2.28.0
         flask ~= 2.2.0
@@ -165,7 +165,7 @@ fn test_version_range_sanitization_and_operators() {
     "#;
     fs::write(root.join("requirements.txt"), reqs).unwrap();
 
-    // 3. Resolve workspace
+    // Resolve workspace
     let lockfile_result = ResolverEngine::resolve_workspace(root);
     assert!(
         lockfile_result.is_ok(),
@@ -174,7 +174,7 @@ fn test_version_range_sanitization_and_operators() {
 
     let lockfile = lockfile_result.unwrap();
 
-    // 4. Verify version requirements are clean and range/comparison symbols are stripped
+    // Verify version requirements are clean and range/comparison symbols are stripped
     assert!(
         lockfile.packages.contains_key("react:18.2.0"),
         "Caret symbol '^' should be stripped from react:^18.2.0, expected react:18.2.0"

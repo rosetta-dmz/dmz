@@ -24,7 +24,7 @@ fn test_airgap_offline_install_workflow() -> Result<(), Box<dyn std::error::Erro
     let pkg_store_dir = store_path.join(&safe_name);
     fs::create_dir_all(&pkg_store_dir)?;
 
-    // 1. Construct a valid minimal gzipped tar archive (.tgz) for testing
+    // Construct a valid minimal gzipped tar archive (.tgz) for testing
     let mut tar_builder = tar::Builder::new(Vec::new());
     let dummy_content = b"{\"name\": \"lodash\"}";
     let mut header = tar::Header::new_gnu();
@@ -39,12 +39,12 @@ fn test_airgap_offline_install_workflow() -> Result<(), Box<dyn std::error::Erro
     std::io::Write::write_all(&mut gz_encoder, &tar_bytes)?;
     let payload = gz_encoder.finish()?;
 
-    // 2. Save valid archive to store
+    // Save valid archive to store
     let archive_filename = format!("{}-{}.archive", safe_name, pkg_version);
     let archive_path = pkg_store_dir.join(&archive_filename);
     fs::write(&archive_path, &payload)?;
 
-    // 3. Compute accurate SHA-256 hash of the valid archive
+    // Compute accurate SHA-256 hash of the valid archive
     let mut hasher = Sha256::new();
     hasher.update(&payload);
     let computed_sha256 = format!("{:x}", hasher.finalize());
@@ -73,7 +73,7 @@ fn test_airgap_offline_install_workflow() -> Result<(), Box<dyn std::error::Erro
     let lockfile_path = workspace_path.join("dmz.lock");
     lockfile.save(&lockfile_path)?;
 
-    // 4. Execute DMZ native offline install
+    // Execute DMZ native offline install
     let config = InstallConfig {
         workspace_path: workspace_path.clone(),
         lockfile_path,
@@ -86,7 +86,7 @@ fn test_airgap_offline_install_workflow() -> Result<(), Box<dyn std::error::Erro
         "Expected exactly 1 package to be installed offline"
     );
 
-    // 5. Verify package was correctly unpacked into node_modules layout
+    // Verify package was correctly unpacked into node_modules layout
     let expected_installed_path = workspace_path
         .join("node_modules")
         .join(pkg_name)
@@ -115,7 +115,7 @@ fn test_airgap_offline_install_cargo_workflow() -> Result<(), Box<dyn std::error
     let pkg_store_dir = store_path.join(&safe_name);
     fs::create_dir_all(&pkg_store_dir)?;
 
-    // 1. Construct a valid minimal gzipped tar archive (.crate) with Cargo.toml and src/lib.rs inside
+    // Construct a valid minimal gzipped tar archive (.crate) with Cargo.toml and src/lib.rs inside
     let mut tar_builder = tar::Builder::new(Vec::new());
     let cargo_toml_content =
         b"[package]\nname = \"serde\"\nversion = \"1.0.104\"\nedition = \"2021\"\n";
@@ -138,7 +138,7 @@ fn test_airgap_offline_install_cargo_workflow() -> Result<(), Box<dyn std::error
     std::io::Write::write_all(&mut gz_encoder, &tar_bytes)?;
     let payload = gz_encoder.finish()?;
 
-    // 2. Save archive to store
+    // Save archive to store
     let archive_filename = format!("{}-{}.archive", safe_name, pkg_version);
     let archive_path = pkg_store_dir.join(&archive_filename);
     fs::write(&archive_path, &payload)?;
@@ -168,11 +168,11 @@ store_path = "{}/{}"
         "[package]\nname = \"test-app\"\nversion = \"1.0.0\"\nedition = \"2021\"\n\n[dependencies]\nserde = \"1.0.104\"\n",
     )?;
 
-    // 3. Execute DMZ multi-ecosystem workspace installation via the registry trait engine
+    // Execute DMZ multi-ecosystem workspace installation via the registry trait engine
     let registry = dmz_core::ecosystem::EcosystemRegistry::new();
     registry.install_workspace(&workspace_path, &store_path, &lockfile_path)?;
 
-    // 4. Verify cargo vendor artifacts & directory source config manifest
+    // Verify cargo vendor artifacts & directory source config manifest
     let vendor_cargo_toml = workspace_path
         .join(".cargo")
         .join("vendor")

@@ -102,7 +102,7 @@ serde = "1.0"
 fn test_git_provenance_detection() {
     let (_tmp, workspace, _store, _out, commit_id) = setup_git_workspace();
 
-    // 1. Initial clean state
+    // Initial clean state
     let prov = GitProvider::get_provenance(&workspace)
         .expect("GitProvider must succeed")
         .expect("Provenance must be detected");
@@ -110,7 +110,7 @@ fn test_git_provenance_detection() {
     assert_eq!(prov.commit, commit_id);
     assert!(!prov.dirty, "Repository should be clean initially");
 
-    // 2. Modify a file without committing -> dirty flag must become true
+    // Modify a file without committing -> dirty flag must become true
     fs::write(workspace.join("src/lib.rs"), "// dirty modification").unwrap();
 
     let prov_dirty = GitProvider::get_provenance(&workspace)
@@ -128,7 +128,7 @@ fn test_git_bundle_creation_and_restore() {
     let (tmp, workspace, _store, _out, commit_id) = setup_git_workspace();
     let bundle_file = tmp.path().join("test.bundle");
 
-    // 1. Create bundle
+    // Create bundle
     let bundle_info = GitProvider::create_bundle(&workspace, &bundle_file, None)
         .expect("Bundle creation must succeed");
 
@@ -144,7 +144,7 @@ fn test_git_bundle_creation_and_restore() {
         "Bundle must adhere to Git bundle v2 header"
     );
 
-    // 2. Restore bundle into a fresh destination workspace
+    // Restore bundle into a fresh destination workspace
     let restore_target = tmp.path().join("restored_workspace");
     fs::create_dir_all(&restore_target).unwrap();
 
@@ -158,7 +158,7 @@ fn test_git_bundle_creation_and_restore() {
 fn test_delta_bundle_export_and_import() {
     let (tmp, workspace, store, out, base_commit) = setup_git_workspace();
 
-    // 1. Export baseline bundle
+    // Export baseline bundle
     let base_bundle_path = out.join("baseline.tar.zst");
     let base_config = ExportConfig {
         workspace_path: workspace.clone(),
@@ -172,7 +172,7 @@ fn test_delta_bundle_export_and_import() {
     let base_manifest = AirGapExporter::export(&base_config).expect("Base export failed");
     assert!(base_manifest.delta_base.is_none());
 
-    // 2. Set up target air-gapped machine with baseline workspace imported
+    // Set up target air-gapped machine with baseline workspace imported
     let target_ws = tmp.path().join("target_workspace");
     let target_store = tmp.path().join("target_store");
 
@@ -190,13 +190,13 @@ fn test_delta_bundle_export_and_import() {
     fs::rename(target_ws.join("git_clone_tmp/.git"), target_ws.join(".git")).unwrap();
     let _ = fs::remove_dir_all(target_ws.join("git_clone_tmp"));
 
-    // 3. Make changes in original workspace: add a new file and modify an existing one, then commit
+    // Make changes in original workspace: add a new file and modify an existing one, then commit
     fs::write(workspace.join("src/lib.rs"), "// updated in commit 2").unwrap();
     fs::write(workspace.join("new_feature.rs"), "pub fn extra() {}").unwrap();
     let repo = Repository::open(&workspace).unwrap();
     let _second_commit = commit_all(&repo, "Second commit adding new_feature");
 
-    // 4. Export delta bundle referencing base commit
+    // Export delta bundle referencing base commit
     let delta_bundle_path = out.join("delta.tar.zst");
     let delta_config = ExportConfig {
         workspace_path: workspace.clone(),
@@ -214,7 +214,7 @@ fn test_delta_bundle_export_and_import() {
     let dinfo = delta_manifest.delta_base.unwrap();
     assert_eq!(dinfo.base_commit, Some(base_commit));
 
-    // 5. Apply delta bundle onto the target workspace
+    // Apply delta bundle onto the target workspace
     let import_delta_cfg = ImportConfig {
         archive_path: delta_bundle_path,
         target_store_dir: target_store.clone(),

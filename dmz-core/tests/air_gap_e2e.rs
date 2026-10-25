@@ -6,7 +6,7 @@ use dmz_core::archive::importer::{AirGapImporter, ImportConfig};
 
 #[test]
 fn test_multiecosystem_airgap_roundtrip() -> anyhow::Result<()> {
-    // 1. Setup a temporary source workspace mimicking a multi-ecosystem project
+    // Setup temporary source workspace mimicking a multi-ecosystem project
     let src_dir = tempdir()?;
     let workspace_path = src_dir.path().join("my_project");
     fs::create_dir_all(&workspace_path)?;
@@ -35,7 +35,7 @@ fn test_multiecosystem_airgap_roundtrip() -> anyhow::Result<()> {
     fs::create_dir_all(&cargo_cache)?;
     fs::write(cargo_cache.join("config.toml"), "# mock config")?;
 
-    // 2. Setup export destination
+    // Setup export destination
     let dist_dir = tempdir()?;
     let archive_path = dist_dir.path().join("workspace_closure.tar.zst");
 
@@ -47,12 +47,12 @@ fn test_multiecosystem_airgap_roundtrip() -> anyhow::Result<()> {
         ..Default::default()
     };
 
-    // 3. Execute Export
+    // Execute Export
     println!("Running air-gap export test...");
     let _manifest = AirGapExporter::export(&export_config)?;
     assert!(archive_path.exists(), "Export archive must be created");
 
-    // 4. Setup import destination (simulating disconnected air-gap target machine)
+    // Setup import destination (simulating disconnected air-gap target machine)
     let target_dir = tempdir()?;
     let import_target = target_dir.path().join("imported_workspace");
     let store_path = target_dir.path().join("offline_store");
@@ -64,11 +64,11 @@ fn test_multiecosystem_airgap_roundtrip() -> anyhow::Result<()> {
         verify_closure_hash: true,
     };
 
-    // 5. Execute Import
+    // Execute Import
     println!("Running air-gap import test...");
     AirGapImporter::import(&import_config)?;
 
-    // 6. Assertions: verify files landed correctly and multi-ecosystem detection works post-import
+    // Assertions: verify files landed correctly and multi-ecosystem detection works post-import
     assert!(
         import_target.join("Cargo.toml").exists(),
         "Cargo.toml should be unpacked"

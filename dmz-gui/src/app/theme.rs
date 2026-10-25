@@ -204,8 +204,6 @@ impl ThemeFile {
         visuals.widgets.inactive.bg_fill = parse_color(&self.palette.panel)?;
         visuals.widgets.inactive.fg_stroke.color = text;
         visuals.widgets.inactive.bg_stroke.color = border;
-        // egui sizes button padding as `button_padding - bg_stroke.width`, so every
-        // interactive state must share the same stroke width or buttons resize on hover/press.
         visuals.widgets.inactive.bg_stroke.width = visuals.widgets.hovered.bg_stroke.width;
         visuals.widgets.noninteractive.bg_fill = parse_color(&self.palette.panel)?;
         visuals.widgets.noninteractive.fg_stroke.color = muted;

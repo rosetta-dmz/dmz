@@ -120,7 +120,7 @@ impl AirGapImporter {
             )));
         }
 
-        // 1. Prepare target directories
+        // Prepare target directories
         if !effective_store.exists() {
             fs::create_dir_all(&effective_store).map_err(|e| {
                 ImportError::IoError(format!("Failed to create target store: {}", e))
@@ -133,7 +133,7 @@ impl AirGapImporter {
             })?;
         }
 
-        // 2. Open archive and initialize zstd stream
+        // Open archive and initialize zstd stream
         let file = File::open(&effective_archive)
             .map_err(|e| ImportError::IoError(format!("Failed to open archive: {}", e)))?;
 
@@ -149,7 +149,7 @@ impl AirGapImporter {
         let mut has_git_history = false;
         let mut vcs_provenance = None;
 
-        // 3. Single-pass entry iteration, extraction, and verification
+        // Single-pass entry iteration, extraction, and verification
         let entries = archive.entries().map_err(|e| {
             ImportError::ExtractionError(format!("Failed to read tar entries: {}", e))
         })?;
@@ -325,7 +325,7 @@ impl AirGapImporter {
             }
         }
 
-        // 4. Run post-import ecosystem validation using the registry
+        // Run post-import ecosystem validation using the registry
         let registry = EcosystemRegistry::new();
         match registry.process_workspace(&effective_workspace) {
             Ok(stacks) => {

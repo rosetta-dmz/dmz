@@ -10,13 +10,13 @@ echo "=========================================================="
 
 mkdir -p "${DIST_DIR}"
 
-# 1. Detect Host Environment
+# Detect Host Environment
 HOST_OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 HOST_ARCH="$(uname -m)"
 
 echo "[+] Host Environment: ${HOST_OS} (${HOST_ARCH})"
 
-# 2. Configure Static Compilation Flags
+# Configure Static Compilation Flags
 export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-s"
 
 build_target() {
@@ -41,7 +41,7 @@ build_target() {
     cp "target/${target_triple}/release/dmz-gui${ext}" "${DIST_DIR}/dmz-gui-${output_suffix}${ext}"
 }
 
-# 3. Dispatch Build Pipeline
+# Dispatch Build Pipeline
 case "${BUILD_TARGET}" in
     "linux-musl")
         build_target "x86_64-unknown-linux-musl" "linux-x86_64"
@@ -75,7 +75,7 @@ case "${BUILD_TARGET}" in
         ;;
 esac
 
-# 4. Verify Static Binary & Print Telemetry
+# Verify Static Binary & Print Telemetry
 echo ""
 echo "=========================================================="
 echo "                 Build Output Telemetry                   "

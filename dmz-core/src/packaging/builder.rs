@@ -101,17 +101,17 @@ impl PackageBuilder {
             "Starting DMZ package build pipeline"
         );
 
-        // 1. Ensure destination directory exists
+        // Ensure destination directory exists
         if !effective_output_dir.exists() {
             fs::create_dir_all(&effective_output_dir)
                 .map_err(|e| BuildError::IoError(format!("Failed to create output dir: {}", e)))?;
         }
 
-        // 2. Load and cryptographically verify dmz.lock
+        // Load and cryptographically verify dmz.lock
         let lockfile = DmzLockfile::load_and_verify(&effective_lockfile)
             .map_err(|e| BuildError::LockfileError(e.to_string()))?;
 
-        // 3. Prepare target output file stream (.tar.zst)
+        // Prepare target output file stream (.tar.zst)
         let artifact_filename = format!("{}.tar.zst", config.archive_name);
         let artifact_path = effective_output_dir.join(&artifact_filename);
 
@@ -124,7 +124,7 @@ impl PackageBuilder {
 
         let mut tar_builder = TarBuilder::new(zstd_encoder);
 
-        // 4. Assemble package layers based on selected Build Target
+        // Assemble package layers based on selected Build Target
         match config.target {
             BuildTarget::DependenciesOnly => {
                 Self::bundle_dependencies(&mut tar_builder, &lockfile)?;
@@ -138,7 +138,7 @@ impl PackageBuilder {
             }
         }
 
-        // 5. Embed root dmz.lock directly inside the archive header for air-gap verification
+        // Embed root dmz.lock directly inside the archive header for air-gap verification
         if effective_lockfile.exists() {
             tar_builder
                 .append_path_with_name(&effective_lockfile, "dmz.lock")
@@ -147,7 +147,7 @@ impl PackageBuilder {
                 })?;
         }
 
-        // 6. Finalize archive and flush zstd encoder
+        // Finalize archive and flush zstd encoder
         let zstd_encoder = tar_builder.into_inner().map_err(|e| {
             BuildError::ArchiveError(format!("Failed to finalize tar stream: {}", e))
         })?;
@@ -156,7 +156,7 @@ impl PackageBuilder {
             BuildError::ArchiveError(format!("Zstd compression finish failed: {}", e))
         })?;
 
-        // 7. Calculate SHA-256 integrity hash and byte size of final artifact
+        // Calculate SHA-256 integrity hash and byte size of final artifact
         let (sha256, size_bytes) = Self::calculate_checksum_and_size(&artifact_path)?;
 
         info!(

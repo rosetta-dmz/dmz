@@ -46,7 +46,7 @@ impl ServiceRunner {
         }
     }
 
-    /// Register and start a background collateral service
+    /// Register & start a background collateral service
     pub async fn start_service(&self, config: ServiceConfig) -> Result<(), String> {
         let name = config.name.clone();
 

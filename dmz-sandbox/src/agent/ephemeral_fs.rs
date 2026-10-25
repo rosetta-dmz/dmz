@@ -8,7 +8,7 @@ pub struct EphemeralFs {
     pub mount_path: PathBuf,
     /// Maximum allowed memory size in bytes
     pub size_limit_bytes: usize,
-    /// Whether this mount was created as a native RAM disk/tmpfs
+    /// Whether or not mount was created as a native RAM disk/tmpfs
     is_mounted: bool,
 }
 
@@ -73,7 +73,7 @@ impl EphemeralFs {
 
         #[cfg(target_os = "macos")]
         {
-            // Fallback for macOS: create isolated RAM scratchpad directory with restricted permissions (0700)
+            // Fallback for MacOS: create isolated RAM scratchpad directory with restricted permissions (0700)
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&self.mount_path, fs::Permissions::from_mode(0o700))
                 .map_err(|e| EphemeralError::CreationFailed(e.to_string()))?;
