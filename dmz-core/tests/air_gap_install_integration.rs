@@ -362,5 +362,105 @@ fn test_airgap_offline_install_python_workflow() -> Result<(), Box<dyn std::erro
         "requests/__init__.py should exist in python site-packages"
     );
 
+    // Verify .pth bridge was written into workspace .venv
+    let pth_bridge = workspace_path
+        .join(".venv")
+        .join("lib")
+        .join("python3.11")
+        .join("site-packages")
+        .join("dmz_store.pth");
+    assert!(
+        pth_bridge.exists(),
+        "dmz_store.pth bridge should exist in .venv"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_airgap_offline_install_npm_bin_links() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp_dir = tempdir()?;
+    let workspace_path = tmp_dir.path().join("workspace");
+    let store_path = tmp_dir.path().join(".dmz/store");
+
+    fs::create_dir_all(&workspace_path)?;
+    fs::create_dir_all(&store_path)?;
+
+    let pkg_name = "eslint";
+    let pkg_version = "8.0.0";
+    let safe_name = pkg_name.replace('/', "__");
+
+    let pkg_store_dir = store_path.join(&safe_name);
+    fs::create_dir_all(&pkg_store_dir)?;
+
+    let mut tar_builder = tar::Builder::new(Vec::new());
+    let pkg_json = br#"{"name":"eslint","version":"8.0.0","bin":{"eslint":"bin/eslint.js"}}"#;
+    let mut header = tar::Header::new_gnu();
+    header.set_size(pkg_json.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    tar_builder.append_data(&mut header, "package.json", &pkg_json[..])?;
+
+    let bin_script = b"#!/usr/bin/env node\nconsole.log('eslint');\n";
+    let mut bin_header = tar::Header::new_gnu();
+    bin_header.set_size(bin_script.len() as u64);
+    bin_header.set_mode(0o755);
+    bin_header.set_cksum();
+    tar_builder.append_data(&mut bin_header, "bin/eslint.js", &bin_script[..])?;
+
+    let tar_bytes = tar_builder.into_inner()?;
+    let mut gz_encoder = GzEncoder::new(Vec::new(), Compression::default());
+    std::io::Write::write_all(&mut gz_encoder, &tar_bytes)?;
+    let payload = gz_encoder.finish()?;
+
+    let archive_filename = format!("{}-{}.archive", safe_name, pkg_version);
+    let archive_path = pkg_store_dir.join(&archive_filename);
+    fs::write(&archive_path, &payload)?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(&payload);
+    let computed_sha256 = format!("{:x}", hasher.finalize());
+
+    let locked_pkg = LockedPackage {
+        name: pkg_name.to_string(),
+        version: pkg_version.to_string(),
+        ecosystem: Ecosystem::Npm,
+        sha256: computed_sha256,
+        source_url: None,
+        dependencies: vec![],
+    };
+
+    let mut packages = BTreeMap::new();
+    packages.insert(format!("{}:{}", pkg_name, pkg_version), locked_pkg);
+
+    let closure_sig = DmzLockfile::compute_closure_hash(&packages);
+    let lockfile = DmzLockfile {
+        version: 1,
+        target_platform: None,
+        closure_signature: closure_sig,
+        packages,
+    };
+
+    let lockfile_path = workspace_path.join("dmz.lock");
+    lockfile.save(&lockfile_path)?;
+
+    let config = InstallConfig {
+        workspace_path: workspace_path.clone(),
+        lockfile_path,
+        store_dir: store_path,
+    };
+
+    let installed_count = InstallerEngine::install(&config)?;
+    assert_eq!(installed_count, 1);
+
+    let bin_link = workspace_path
+        .join("node_modules")
+        .join(".bin")
+        .join("eslint");
+    assert!(
+        bin_link.exists(),
+        "eslint executable should exist in node_modules/.bin"
+    );
+
     Ok(())
 }

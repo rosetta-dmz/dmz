@@ -31,6 +31,19 @@ impl RustVendorMaterializer {
 
     pub fn materialize(&self, lockfile_path: &Path) -> io::Result<()> {
         let lock_content = fs::read_to_string(lockfile_path)?;
+
+        // Support modern JSON DmzLockfile natively
+        if serde_json::from_str::<crate::resolver::lockfile::DmzLockfile>(&lock_content).is_ok() {
+            let config = crate::install::InstallConfig {
+                workspace_path: self.workspace_root.clone(),
+                lockfile_path: lockfile_path.to_path_buf(),
+                store_dir: self.offline_store.clone(),
+            };
+            crate::install::InstallerEngine::install(&config)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            return Ok(());
+        }
+
         let lockfile: DmzLockfile = toml::from_str(&lock_content)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 

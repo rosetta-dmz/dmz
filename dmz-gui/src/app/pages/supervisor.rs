@@ -14,18 +14,14 @@ pub(super) fn show(state: &mut SupervisorState, ui: &mut egui::Ui, status_messag
     let ipc_config = IpcServerConfig::default();
     let socket_str = ipc_config.socket_path.display().to_string();
 
-    components::page_header(
-        ui,
-        "Supervisor IPC",
-        "Manage workspace background services, daemonless IPC sockets, and process supervisor status.",
-    );
+    components::page_header(ui, "Supervisor IPC");
 
     components::section(ui, |ui| {
         components::section_header(ui, "Supervisor Lifecycle");
         if state.active {
             ui.colored_label(egui::Color32::GREEN, "Active · localized session running");
             ui.add_space(16.0);
-            if components::action_button(ui, "Stop session", false).clicked() {
+            if components::action_button(ui, "Stop Session", false).clicked() {
                 state.active = false;
                 state.postgres_service = false;
                 state.redis_service = false;
@@ -41,7 +37,7 @@ pub(super) fn show(state: &mut SupervisorState, ui: &mut egui::Ui, status_messag
                 "Inactive · zero idle footprint",
             );
             ui.add_space(16.0);
-            if components::action_button(ui, "Start session", true).clicked() {
+            if components::action_button(ui, "Start Session", true).clicked() {
                 state.active = true;
                 *status_message = format!("Workspace Supervisor spawned at {socket_str}");
             }

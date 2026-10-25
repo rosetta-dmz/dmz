@@ -1,18 +1,18 @@
 # DMZ Platform Documentation Master Index
 
-Welcome to the official documentation hub for **DMZ** (Universal Daemonless Environment & Packaging Engine). DMZ is a high-performance, modular platform built in Rust that provides zero-dependency sandboxing, cryptographic air-gapped closure distribution, and secure AI agent supervision.
+Welcome to the official documentation hub for **DMZ**. DMZ is a high-performance, modular platform built in Rust that provides zero-dependency sandboxing, cryptographic air-gapped closure distribution, and secure AI agent supervision.
 
 ---
 
 ## 1. Core Architecture & System Blueprints
 
-* **[Architectural Blueprint](Architectural Blueprint.md)** — Deep dive into the statically compiled core engine (targeting Linux musl, macOS, and Windows), native OS sandboxing primitives (Linux User Namespaces, macOS Seatbelt profiles, and Windows Job Objects), and the ephemeral AI Agent Workspace Supervisor.
+* **[Architectural Blueprint] (`Architectural Blueprint.md`)** — Deep dive into the statically compiled core engine (targeting Linux musl, macOS, and Windows), native OS sandboxing primitives (Linux User Namespaces, macOS Seatbelt profiles, and Windows Job Objects), and the ephemeral AI Agent Workspace Supervisor.
 
 
-* **[Functional Requirements (FRD)](Functional Requirements Document (FRD).md)** — Comprehensive coverage of zero-dependency bootstrapping, language-agnostic dependency management, cryptographic air-gap packaging targets (Targets A, B, and C), and real-time telemetry.
+* **[Functional Requirements (FRD)] (`Functional Requirements Document (FRD).md`)** — Comprehensive coverage of zero-dependency bootstrapping, language-agnostic dependency management, cryptographic air-gap packaging targets (Targets A, B, and C), and real-time telemetry.
 
 
-* **[Non-Functional Requirements (NFRD)](Non-Functional Requirements Document (NFRD))** — Performance criteria ensuring a zero idle footprint, native bare-metal speed, least-privilege security models, and complete air-gap offline compliance[cite: 3].
+* **[Non-Functional Requirements (NFRD)] (`Non-Functional Requirements Document (NFRD).md`)** — Performance criteria ensuring a zero idle footprint, native bare-metal speed, least-privilege security models, and complete air-gap offline compliance.
 
 ---
 

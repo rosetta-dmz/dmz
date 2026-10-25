@@ -29,8 +29,10 @@ pub(super) struct AirGapState {
     store_dir: String,
     target_platform: String,
     export_mode: GuiExportMode,
+    zstd_level: i32,
     auto_install: bool,
     verify_closure: bool,
+    show_export_tip: bool,
 }
 
 impl Default for AirGapState {
@@ -40,8 +42,10 @@ impl Default for AirGapState {
             store_dir: String::from(".dmz/store"),
             target_platform: String::new(),
             export_mode: GuiExportMode::Unified,
+            zstd_level: 3,
             auto_install: true,
             verify_closure: true,
+            show_export_tip: true,
         }
     }
 }
@@ -51,14 +55,9 @@ pub(super) fn show(
     ui: &mut egui::Ui,
     workspace_path: &mut String,
     lockfile_path: &mut String,
-    zstd_level: i32,
     status_message: &mut String,
 ) {
-    components::page_header(
-        ui,
-        "Air-Gap Manager",
-        "Export and import verified dependency closures and offline bundles for isolated environments.",
-    );
+    components::page_header(ui, "Air-Gap Manager");
 
     components::section(ui, |ui| {
         components::section_header(ui, "Bundle & Archive Paths");
@@ -67,69 +66,72 @@ pub(super) fn show(
             .spacing([16.0, 8.0])
             .min_col_width(120.0)
             .show(ui, |ui| {
-                ui.label("Workspace directory");
-                ui.horizontal(|ui| {
-                    let browse_width = 86.0;
-                    let field_width = (ui.available_width() - browse_width - 8.0).max(80.0);
-                    ui.add_sized(
-                        egui::vec2(field_width, 32.0),
-                        egui::TextEdit::singleline(workspace_path)
-                            .vertical_align(egui::Align::Center)
-                            .margin(egui::Margin::symmetric(8, 0)),
-                    );
-                    if ui.button("Browse...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                            *workspace_path = path.display().to_string();
-                        }
+                ui.label("Workspace Directory");
+                if components::path_browse_row(ui, workspace_path, None) {
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        *workspace_path = path.display().to_string();
                     }
-                });
+                }
                 ui.end_row();
 
-                ui.label("Bundle archive (.tar.zst)");
-                ui.horizontal(|ui| {
-                    let browse_width = 86.0;
-                    let field_width = (ui.available_width() - browse_width - 8.0).max(80.0);
-                    ui.add_sized(
-                        egui::vec2(field_width, 32.0),
-                        egui::TextEdit::singleline(&mut state.archive_path)
-                            .vertical_align(egui::Align::Center)
-                            .margin(egui::Margin::symmetric(8, 0)),
-                    );
-                    if ui.button("Browse...").clicked() {
-                        let mut dialog =
-                            rfd::FileDialog::new().add_filter("Zstd Archive", &["zst"]);
-                        let ws_path = PathBuf::from(&*workspace_path);
-                        if ws_path.exists() {
-                            dialog = dialog.set_directory(&ws_path);
+                ui.label("Bundle Archive (.tar.zst)");
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), components::FIELD_BUTTON_HEIGHT),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        let btn_width = components::BROWSE_BUTTON_WIDTH;
+                        let spacing = ui.spacing().item_spacing.x;
+                        let field_width =
+                            (ui.available_width() - (btn_width * 2.0) - (spacing * 2.0)).max(80.0);
+                        ui.add_sized(
+                            egui::vec2(field_width, components::FIELD_BUTTON_HEIGHT),
+                            egui::TextEdit::singleline(&mut state.archive_path)
+                                .vertical_align(egui::Align::Center)
+                                .margin(egui::Margin::symmetric(8, 0)),
+                        );
+                        if components::field_button(ui, "Open...", Some(btn_width))
+                            .on_hover_text("Select an existing .tar.zst bundle to import")
+                            .clicked()
+                        {
+                            let mut dialog = rfd::FileDialog::new()
+                                .add_filter("Zstd Archive", &["zst", "tar.zst"]);
+                            let ws_path = PathBuf::from(&*workspace_path);
+                            if ws_path.exists() {
+                                dialog = dialog.set_directory(&ws_path);
+                            }
+                            if let Some(path) = dialog.pick_file() {
+                                state.archive_path = path.display().to_string();
+                            }
                         }
-                        if let Some(path) = dialog.save_file() {
-                            state.archive_path = path.display().to_string();
+                        if components::field_button(ui, "Save As...", Some(btn_width))
+                            .on_hover_text("Choose output file destination for export")
+                            .clicked()
+                        {
+                            let mut dialog = rfd::FileDialog::new()
+                                .add_filter("Zstd Archive", &["zst", "tar.zst"]);
+                            let ws_path = PathBuf::from(&*workspace_path);
+                            if ws_path.exists() {
+                                dialog = dialog.set_directory(&ws_path);
+                            }
+                            if let Some(path) = dialog.save_file() {
+                                state.archive_path = path.display().to_string();
+                            }
                         }
-                    }
-                });
+                    },
+                );
                 ui.end_row();
 
-                ui.label("Dependency store directory");
-                ui.horizontal(|ui| {
-                    let browse_width = 88.0;
-                    let field_width = (ui.available_width() - browse_width - 8.0).max(80.0);
-                    ui.add_sized(
-                        egui::vec2(field_width, 32.0),
-                        egui::TextEdit::singleline(&mut state.store_dir)
-                            .vertical_align(egui::Align::Center)
-                            .margin(egui::Margin::symmetric(8, 0)),
-                    );
-                    if ui.button("Browse...").clicked() {
-                        let mut dialog = rfd::FileDialog::new();
-                        let ws_path = PathBuf::from(&*workspace_path);
-                        if ws_path.exists() {
-                            dialog = dialog.set_directory(&ws_path);
-                        }
-                        if let Some(path) = dialog.pick_folder() {
-                            state.store_dir = path.display().to_string();
-                        }
+                ui.label("Dependency Store Directory");
+                if components::path_browse_row(ui, &mut state.store_dir, None) {
+                    let mut dialog = rfd::FileDialog::new();
+                    let ws_path = PathBuf::from(&*workspace_path);
+                    if ws_path.exists() {
+                        dialog = dialog.set_directory(&ws_path);
                     }
-                });
+                    if let Some(path) = dialog.pick_folder() {
+                        state.store_dir = path.display().to_string();
+                    }
+                }
                 ui.end_row();
 
                 ui.label("Target Platform");
@@ -142,38 +144,19 @@ pub(super) fn show(
                 );
                 ui.end_row();
             });
-
-        let ws_canon = {
-            let ws = PathBuf::from(&*workspace_path);
-            std::fs::canonicalize(&ws).unwrap_or(ws)
-        };
-        let preview_output = if Path::new(&state.archive_path).is_relative() {
-            ws_canon.join(&state.archive_path)
-        } else {
-            PathBuf::from(&state.archive_path)
-        };
-        ui.add_space(8.0);
-        ui.label(
-            egui::RichText::new(format!(
-                "Effective archive destination: {}",
-                preview_output.display()
-            ))
-            .color(ui.visuals().widgets.noninteractive.fg_stroke.color)
-            .size(12.0),
-        );
     });
 
     ui.add_space(16.0);
     components::section(ui, |ui| {
         components::section_header(ui, "Export Air-Gap Bundle");
         ui.horizontal_wrapped(|ui| {
-            ui.label("Package contents:");
+            ui.label("Package Contents:");
             ui.radio_value(
                 &mut state.export_mode,
                 GuiExportMode::Unified,
-                "Unified (Code + Deps)",
+                "Complete Package",
             );
-            ui.radio_value(&mut state.export_mode, GuiExportMode::CodeOnly, "Code Only");
+            ui.radio_value(&mut state.export_mode, GuiExportMode::CodeOnly, "Codebase Only");
             ui.radio_value(
                 &mut state.export_mode,
                 GuiExportMode::DepsOnly,
@@ -181,9 +164,15 @@ pub(super) fn show(
             );
         });
 
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label("Zstandard level:");
+            ui.add(egui::Slider::new(&mut state.zstd_level, 1..=22).show_value(true));
+        });
+
         ui.add_space(12.0);
         ui.horizontal_wrapped(|ui| {
-            if components::action_button(ui, "One-shot bundle (dmz bundle)", true).clicked() {
+            if components::action_button(ui, "Export Bundle", true).clicked() {
                 let workspace = PathBuf::from(&*workspace_path);
                 let ws_canon =
                     std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
@@ -237,7 +226,7 @@ pub(super) fn show(
                     lockfile_path: lockfile,
                     store_dir: store,
                     output_path: output,
-                    zstd_level,
+                    zstd_level: state.zstd_level,
                     mode: state.export_mode.into(),
                     target_platform: target_opt,
                 };
@@ -256,8 +245,7 @@ pub(super) fn show(
                 }
             }
 
-            if components::action_button(ui, "Export archive (dmz airgap export)", false).clicked()
-            {
+            if components::action_button(ui, "Export Archive", false).clicked() {
                 let workspace = PathBuf::from(&*workspace_path);
                 let ws_canon =
                     std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
@@ -288,7 +276,7 @@ pub(super) fn show(
                     lockfile_path: lockfile,
                     store_dir: store,
                     output_path: output,
-                    zstd_level,
+                    zstd_level: state.zstd_level,
                     mode: state.export_mode.into(),
                     target_platform: target_opt,
                 };
@@ -309,9 +297,50 @@ pub(super) fn show(
         });
     });
 
+    if state.show_export_tip {
+        ui.add_space(12.0);
+        components::dismissable_toast(
+            ui,
+            "Level 3 is the default. Higher levels can reduce transfer size at the cost of build time. Select Export Bundle to automatically resolve and fetch dependencies before export, or Export Archive to package an already-cached local store directly.",
+            &mut state.show_export_tip,
+        );
+    }
+
     ui.add_space(16.0);
     components::section(ui, |ui| {
-        components::section_header(ui, "Import & Restore Air-Gap Bundle (dmz import)");
+        components::section_header(ui, "Import Air-Gap Archive");
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), components::FIELD_BUTTON_HEIGHT),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.label("Archive to Import:");
+                let browse_width = 120.0;
+                let spacing = ui.spacing().item_spacing.x;
+                let field_width = (ui.available_width() - browse_width - spacing).max(80.0);
+                ui.add_sized(
+                    egui::vec2(field_width, components::FIELD_BUTTON_HEIGHT),
+                    egui::TextEdit::singleline(&mut state.archive_path)
+                        .vertical_align(egui::Align::Center)
+                        .margin(egui::Margin::symmetric(8, 0)),
+                );
+
+                if components::field_button(ui, "Open Archive...", Some(browse_width))
+                    .on_hover_text("Select an existing .tar.zst archive to import")
+                    .clicked()
+                {
+                    let mut dialog =
+                        rfd::FileDialog::new().add_filter("Zstd Archive", &["zst", "tar.zst"]);
+                    let ws_path = PathBuf::from(&*workspace_path);
+                    if ws_path.exists() {
+                        dialog = dialog.set_directory(&ws_path);
+                    }
+                    if let Some(path) = dialog.pick_file() {
+                        state.archive_path = path.display().to_string();
+                    }
+                }
+            },
+        );
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.checkbox(
                 &mut state.auto_install,
@@ -325,19 +354,32 @@ pub(super) fn show(
         });
 
         ui.add_space(12.0);
-        if components::action_button(ui, "Import & verify bundle", false).clicked() {
+        if components::action_button(ui, "Import & Verify Archive", false).clicked() {
             let workspace = PathBuf::from(&*workspace_path);
+            let _ = std::fs::create_dir_all(&workspace);
             let ws_canon = std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
 
-            let archive = if Path::new(&state.archive_path).is_relative() {
-                if ws_canon.join(&state.archive_path).exists() {
-                    ws_canon.join(&state.archive_path)
+            let archive_raw = Path::new(&state.archive_path);
+            let archive = if archive_raw.is_relative() {
+                if ws_canon.join(archive_raw).exists() {
+                    ws_canon.join(archive_raw)
+                } else if archive_raw.exists() {
+                    std::fs::canonicalize(archive_raw).unwrap_or_else(|_| archive_raw.to_path_buf())
                 } else {
-                    PathBuf::from(&state.archive_path)
+                    ws_canon.join(archive_raw)
                 }
             } else {
-                PathBuf::from(&state.archive_path)
+                archive_raw.to_path_buf()
             };
+
+            if !archive.exists() {
+                *status_message = format!(
+                    "Archive file not found at {:?}. Click 'Open Archive...' to select a valid .tar.zst package.",
+                    archive
+                );
+                return;
+            }
+
             let store = if Path::new(&state.store_dir).is_relative() {
                 ws_canon.join(&state.store_dir)
             } else {
@@ -360,18 +402,21 @@ pub(super) fn show(
                     );
 
                     if state.auto_install {
-                        let lockfile = ws_canon.join("dmz.lock");
+                        let lockfile = result.workspace_path.join("dmz.lock");
                         let install_config = InstallConfig {
-                            workspace_path: ws_canon,
+                            workspace_path: result.workspace_path.clone(),
                             lockfile_path: lockfile,
-                            store_dir: store,
+                            store_dir: result.store_path.clone(),
                         };
                         match InstallerEngine::install(&install_config) {
                             Ok(count) => {
-                                msg.push_str(&format!(" · Installed {} packages offline", count));
+                                msg.push_str(&format!(
+                                    " · Materialized {} packages into workspace offline",
+                                    count
+                                ));
                             }
                             Err(e) => {
-                                msg.push_str(&format!(" · Install error: {}", e));
+                                msg.push_str(&format!(" · Offline install error: {}", e));
                             }
                         }
                     }
@@ -384,4 +429,31 @@ pub(super) fn show(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inspect_airgap_grid_layout() {
+        let ctx = egui::Context::default();
+        let mut state = AirGapState::default();
+        let mut ws = ".".to_string();
+        let mut lock = "dmz.lock".to_string();
+        let mut msg = String::new();
+
+        assert!(state.show_export_tip);
+
+        for _ in 0..3 {
+            let _ = ctx.run_ui(Default::default(), |ui| {
+                show(&mut state, ui, &mut ws, &mut lock, &mut msg);
+            });
+        }
+
+        state.show_export_tip = false;
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            show(&mut state, ui, &mut ws, &mut lock, &mut msg);
+        });
+    }
 }

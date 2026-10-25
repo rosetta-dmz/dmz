@@ -19,7 +19,72 @@ impl NpmMapper {
             super::InstallError::IoError(format!("Failed to create node_modules dir: {}", e))
         })?;
 
-        Self::unpack_archive(archive_path, &target_dir, &pkg.name)
+        Self::unpack_archive(archive_path, &target_dir, &pkg.name)?;
+        Self::link_package_binaries(workspace_path, &target_dir, &pkg.name)?;
+
+        Ok(())
+    }
+
+    pub fn link_package_binaries(
+        workspace_path: &Path,
+        target_dir: &Path,
+        pkg_name: &str,
+    ) -> Result<(), super::InstallError> {
+        let pkg_json_path = target_dir.join("package.json");
+        if !pkg_json_path.exists() {
+            return Ok(());
+        }
+
+        if let Ok(content) = fs::read_to_string(&pkg_json_path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                let bin_dir = workspace_path.join("node_modules").join(".bin");
+                let _ = fs::create_dir_all(&bin_dir);
+
+                let mut bin_map = std::collections::HashMap::new();
+                if let Some(bin_obj) = json.get("bin").and_then(|b| b.as_object()) {
+                    for (k, v) in bin_obj {
+                        if let Some(path_str) = v.as_str() {
+                            bin_map.insert(k.clone(), path_str.to_string());
+                        }
+                    }
+                } else if let Some(bin_str) = json.get("bin").and_then(|b| b.as_str()) {
+                    let short_name = pkg_name.split('/').next_back().unwrap_or(pkg_name);
+                    bin_map.insert(short_name.to_string(), bin_str.to_string());
+                }
+
+                for (cmd_name, rel_target) in bin_map {
+                    let source_file = target_dir.join(&rel_target);
+                    if source_file.exists() {
+                        let dest_link = bin_dir.join(&cmd_name);
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            if let Ok(metadata) = fs::metadata(&source_file) {
+                                let mut perms = metadata.permissions();
+                                perms.set_mode(0o755);
+                                let _ = fs::set_permissions(&source_file, perms);
+                            }
+                            if dest_link.exists() || dest_link.is_symlink() {
+                                let _ = fs::remove_file(&dest_link);
+                            }
+                            let _ = std::os::unix::fs::symlink(&source_file, &dest_link);
+                        }
+                        #[cfg(windows)]
+                        {
+                            let cmd_wrapper = bin_dir.join(format!("{}.cmd", cmd_name));
+                            let script = format!(
+                                "@\"%~dp0\\..\\{}\\{}\" %*\r\n",
+                                pkg_name,
+                                rel_target.replace('/', "\\")
+                            );
+                            let _ = fs::write(cmd_wrapper, script);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn unpack_archive(
@@ -88,6 +153,7 @@ impl PnpmMapper {
         })?;
 
         NpmMapper::unpack_archive(archive_path, &virtual_store_dir, &pkg.name)?;
+        NpmMapper::link_package_binaries(workspace_path, &virtual_store_dir, &pkg.name)?;
 
         let root_link_dir = workspace_path.join("node_modules").join(&pkg.name);
         if let Some(parent) = root_link_dir.parent() {
@@ -250,6 +316,22 @@ directory = ".cargo/vendor"
             super::InstallError::IoError(format!("Failed to write .cargo/config.toml: {}", e))
         })?;
 
+        // Also ensure .cargo/vendor/config.json exists
+        let vendor_root = cargo_dir.join("vendor");
+        let vendor_config_json = vendor_root.join("config.json");
+        if !vendor_config_json.exists() {
+            let _ = fs::write(vendor_config_json, r#"{"packages":{}}"#);
+        }
+
+        // Maintain a root 'vendor' symlink/alias for tools expecting workspace-root 'vendor/'
+        let root_vendor = workspace_path.join("vendor");
+        if !root_vendor.exists() {
+            #[cfg(unix)]
+            {
+                let _ = std::os::unix::fs::symlink(".cargo/vendor", &root_vendor);
+            }
+        }
+
         Ok(())
     }
 }
@@ -284,13 +366,23 @@ impl PyPiMapper {
         let decompressed = GzDecoder::new(file);
         let mut archive = Archive::new(decompressed);
 
-        // Unpacking fully preserves .dist-info and .egg-info metadata directories for importlib.metadata[cite: 3]
+        // Unpacking fully preserves .dist-info and .egg-info metadata directories for importlib.metadata
         archive.unpack(&venv_site_packages).map_err(|e| {
             super::InstallError::MapperError(format!(
                 "Failed to unpack Python package {}: {}",
                 pkg.name, e
             ))
         })?;
+
+        // Mirror/link into workspace .venv so virtual environment commands can locate dependencies directly
+        let root_venv = workspace_path.join(".venv");
+        let root_site_packages = root_venv
+            .join("lib")
+            .join("python3.11")
+            .join("site-packages");
+        let _ = fs::create_dir_all(&root_site_packages);
+        let pth_file = root_site_packages.join("dmz_store.pth");
+        let _ = fs::write(pth_file, format!("{}\n", venv_site_packages.display()));
 
         Ok(())
     }

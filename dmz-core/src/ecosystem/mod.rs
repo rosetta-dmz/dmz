@@ -17,14 +17,20 @@ pub trait EcosystemHandler: Send + Sync {
     fn resolution_command(&self) -> Option<CommandSpec>;
     fn verification_command(&self, workspace_root: &Path) -> Option<CommandSpec>;
 
-    /// Default implementation: returns Ok(()) so other ecosystems
-    /// don't require boilerplate materialization code unless overridden.
+    /// Default implementation: invokes unified InstallerEngine to materialize dependencies
     fn materialize(
         &self,
-        _workspace_root: &Path,
-        _offline_store: &Path,
-        _lockfile_path: &Path,
+        workspace_root: &Path,
+        offline_store: &Path,
+        lockfile_path: &Path,
     ) -> Result<()> {
+        let config = crate::install::InstallConfig {
+            workspace_path: workspace_root.to_path_buf(),
+            lockfile_path: lockfile_path.to_path_buf(),
+            store_dir: offline_store.to_path_buf(),
+        };
+        crate::install::InstallerEngine::install(&config)
+            .map_err(|e| anyhow::anyhow!("Offline install error: {}", e))?;
         Ok(())
     }
 }
