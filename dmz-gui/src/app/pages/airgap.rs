@@ -179,7 +179,7 @@ pub(super) fn show(
         ui.add_space(8.0);
         ui.checkbox(
             &mut state.with_toolchain,
-            "Package active compiler toolchains into bundle (Rust, Node, Python, Go, PHP, Ruby)",
+            "Package compiler toolchains into bundle",
         );
 
         ui.add_space(12.0);
