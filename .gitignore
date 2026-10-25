@@ -4,6 +4,8 @@
 
 # --- Documentation Artifacts ---
 /documentation/
+!/documentation/**/*.md
+!/documentation/*.md
 
 # --- Air-Gap & Local Packaging Artifacts ---
 *.tar.zst

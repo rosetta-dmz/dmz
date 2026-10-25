@@ -185,7 +185,11 @@ impl ResolverEngine {
         let mut fetched_count = 0;
 
         let client = reqwest::blocking::Client::builder()
-            .user_agent("dmz-airgap-tool/1.0.8 (air-gap workspace manager)")
+            .user_agent(concat!(
+                "dmz-airgap-tool/",
+                env!("CARGO_PKG_VERSION"),
+                " (air-gap workspace manager)"
+            ))
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 

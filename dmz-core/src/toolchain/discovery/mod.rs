@@ -18,6 +18,10 @@ pub use ruby::RubyDiscoverer;
 pub use rust::RustDiscoverer;
 
 /// Core abstraction for discovering a standalone host toolchain for a specific language ecosystem.
+///
+/// Adhering to the Open/Closed Principle (OCP) and Dependency Inversion Principle (DIP),
+/// new language runtimes and toolchain detection strategies implement this trait
+/// without modifying closed provider orchestration logic.
 pub trait ToolchainDiscoverer: Send + Sync {
     /// Returns the target ecosystem managed by this discoverer.
     fn ecosystem(&self) -> ToolchainEcosystem;

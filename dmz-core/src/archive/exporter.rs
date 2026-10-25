@@ -43,6 +43,8 @@ pub struct AirGapManifest {
     pub toolchains: Vec<crate::toolchain::ToolchainManifestEntry>,
     pub closure_signature: String,
     pub package_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toolchains: Vec<crate::toolchain::ToolchainManifestEntry>,
     pub created_at_utc: u64,
     pub archive_sha256: String,
 }
