@@ -240,7 +240,11 @@ pub(super) fn show(
                     output_path: output,
                     zstd_level: state.zstd_level,
                     mode: state.export_mode.into(),
+<<<<<<< Updated upstream
                     target_platform: target_opt,
+=======
+                    target_platform: target_opt.clone(),
+>>>>>>> Stashed changes
                     with_toolchain: state.with_toolchain,
                     ..Default::default()
                 };
