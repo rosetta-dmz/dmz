@@ -69,6 +69,8 @@ pub fn dispatch(command: Commands) {
             zstd_level,
             mode,
             refresh_lock,
+            with_git_history,
+            since,
         } => {
             run_bundle(BundleArgs {
                 target,
@@ -79,6 +81,8 @@ pub fn dispatch(command: Commands) {
                 zstd_level,
                 mode,
                 refresh_lock,
+                with_git_history,
+                since,
             });
         }
 
@@ -134,6 +138,8 @@ pub fn dispatch(command: Commands) {
                 zstd_level,
                 mode,
                 refresh_lock,
+                with_git_history,
+                since,
             } => {
                 run_bundle(BundleArgs {
                     target,
@@ -144,6 +150,8 @@ pub fn dispatch(command: Commands) {
                     zstd_level,
                     mode,
                     refresh_lock,
+                    with_git_history,
+                    since,
                 });
             }
 
@@ -155,8 +163,20 @@ pub fn dispatch(command: Commands) {
                 output,
                 zstd_level,
                 mode,
+                with_git_history,
+                since,
             } => {
-                run_export(target, workspace, lockfile, store, output, zstd_level, mode);
+                run_export(ExportArgs {
+                    target,
+                    workspace,
+                    lockfile,
+                    store,
+                    output,
+                    zstd_level,
+                    mode,
+                    with_git_history,
+                    since,
+                });
             }
 
             AirgapCommands::Import {
@@ -346,6 +366,8 @@ pub struct BundleArgs {
     pub zstd_level: i32,
     pub mode: CliExportMode,
     pub refresh_lock: bool,
+    pub with_git_history: bool,
+    pub since: Option<String>,
 }
 
 pub fn run_bundle(args: BundleArgs) {
@@ -449,6 +471,8 @@ pub fn run_bundle(args: BundleArgs) {
         zstd_level: args.zstd_level,
         mode: args.mode.into(),
         target_platform: args.target,
+        with_git_history: args.with_git_history,
+        since: args.since,
     };
 
     match AirGapExporter::export(&config) {
@@ -467,55 +491,60 @@ pub fn run_bundle(args: BundleArgs) {
     }
 }
 
-pub fn run_export(
-    target: Option<String>,
-    workspace: PathBuf,
-    lockfile: PathBuf,
-    store: PathBuf,
-    output: PathBuf,
-    zstd_level: i32,
-    mode: CliExportMode,
-) {
-    let ws_canon = std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
+pub struct ExportArgs {
+    pub target: Option<String>,
+    pub workspace: PathBuf,
+    pub lockfile: PathBuf,
+    pub store: PathBuf,
+    pub output: PathBuf,
+    pub zstd_level: i32,
+    pub mode: CliExportMode,
+    pub with_git_history: bool,
+    pub since: Option<String>,
+}
 
-    let effective_lockfile = if lockfile == Path::new("dmz.lock") {
+pub fn run_export(args: ExportArgs) {
+    let ws_canon =
+        std::fs::canonicalize(&args.workspace).unwrap_or_else(|_| args.workspace.clone());
+
+    let effective_lockfile = if args.lockfile == Path::new("dmz.lock") {
         ws_canon.join("dmz.lock")
-    } else if lockfile.is_relative() {
-        if ws_canon.join(&lockfile).exists() {
-            ws_canon.join(&lockfile)
-        } else if lockfile.exists() {
-            std::fs::canonicalize(&lockfile).unwrap_or(lockfile)
+    } else if args.lockfile.is_relative() {
+        if ws_canon.join(&args.lockfile).exists() {
+            ws_canon.join(&args.lockfile)
+        } else if args.lockfile.exists() {
+            std::fs::canonicalize(&args.lockfile).unwrap_or(args.lockfile)
         } else {
-            ws_canon.join(&lockfile)
+            ws_canon.join(&args.lockfile)
         }
     } else {
-        lockfile
+        args.lockfile
     };
 
-    let effective_store = if store == Path::new(".dmz/store") {
+    let effective_store = if args.store == Path::new(".dmz/store") {
         ws_canon.join(".dmz/store")
-    } else if store.is_relative() {
-        if ws_canon.join(&store).exists() {
-            ws_canon.join(&store)
-        } else if store.exists() {
-            std::fs::canonicalize(&store).unwrap_or(store)
+    } else if args.store.is_relative() {
+        if ws_canon.join(&args.store).exists() {
+            ws_canon.join(&args.store)
+        } else if args.store.exists() {
+            std::fs::canonicalize(&args.store).unwrap_or(args.store)
         } else {
-            ws_canon.join(&store)
+            ws_canon.join(&args.store)
         }
     } else {
-        store
+        args.store
     };
 
-    let effective_output = if output == Path::new("dist/airgap_bundle.tar.zst")
-        || output == Path::new("dist/workspace_closure.tar.zst")
+    let effective_output = if args.output == Path::new("dist/airgap_bundle.tar.zst")
+        || args.output == Path::new("dist/workspace_closure.tar.zst")
     {
         ws_canon.join("dist/workspace_closure.tar.zst")
-    } else if output.is_relative() {
+    } else if args.output.is_relative() {
         std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
-            .join(&output)
+            .join(&args.output)
     } else {
-        output
+        args.output
     };
 
     let config = ExportConfig {
@@ -523,9 +552,11 @@ pub fn run_export(
         lockfile_path: effective_lockfile,
         store_dir: effective_store,
         output_path: effective_output,
-        zstd_level,
-        mode: mode.into(),
-        target_platform: target,
+        zstd_level: args.zstd_level,
+        mode: args.mode.into(),
+        target_platform: args.target,
+        with_git_history: args.with_git_history,
+        since: args.since,
     };
 
     match AirGapExporter::export(&config) {
@@ -592,6 +623,9 @@ pub fn run_import(
             info!(
                 imported = result.imported_packages,
                 closure = %result.closure_signature,
+                is_delta = result.is_delta,
+                has_git = result.has_git_history,
+                vcs = ?result.vcs,
                 "Air-gap import completed successfully"
             );
         }

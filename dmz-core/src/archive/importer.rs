@@ -1,12 +1,13 @@
 use crate::archive::exporter::AirGapManifest;
 use crate::ecosystem::EcosystemRegistry;
 use crate::resolver::lockfile::DmzLockfile;
+use crate::vcs::{GitProvider, VcsProvenance};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use tar::Archive as TarArchive;
-use tracing::info;
+use tracing::{info, warn};
 use zstd::stream::read::Decoder as ZstdDecoder;
 
 #[derive(Debug, Clone)]
@@ -35,6 +36,12 @@ pub struct ImportResult {
     pub store_path: PathBuf,
     #[serde(default)]
     pub workspace_path: PathBuf,
+    #[serde(default)]
+    pub is_delta: bool,
+    #[serde(default)]
+    pub has_git_history: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcs: Option<VcsProvenance>,
 }
 
 #[derive(Debug)]
@@ -138,6 +145,9 @@ impl AirGapImporter {
 
         let mut closure_signature = String::new();
         let mut imported_count = 0;
+        let mut is_delta = false;
+        let mut has_git_history = false;
+        let mut vcs_provenance = None;
 
         // 3. Single-pass entry iteration, extraction, and verification
         let entries = archive.entries().map_err(|e| {
@@ -164,18 +174,64 @@ impl AirGapImporter {
                 })?;
 
                 closure_signature = manifest.closure_signature;
+                is_delta = manifest.delta_base.is_some();
+                has_git_history = manifest.has_git_history;
+                vcs_provenance = manifest.vcs.clone();
+
                 info!(
                     closure = %closure_signature,
                     version = %manifest.dmz_version,
                     target_platform = ?manifest.target_platform,
+                    is_delta = is_delta,
+                    has_git = has_git_history,
                     "Air-gap manifest verified"
                 );
+
+                // Delta Base Verification
+                if let Some(ref delta) = manifest.delta_base {
+                    info!(
+                        base_commit = ?delta.base_commit,
+                        base_closure = ?delta.base_closure_signature,
+                        "Verifying target workspace matches delta base"
+                    );
+
+                    if let Some(ref expected_closure) = delta.base_closure_signature {
+                        let ws_lock = effective_workspace.join("dmz.lock");
+                        if ws_lock.exists() {
+                            if let Ok(lock) = DmzLockfile::load_and_verify(&ws_lock) {
+                                if &lock.closure_signature != expected_closure {
+                                    return Err(ImportError::VerificationFailed(format!(
+                                        "Delta base mismatch! Expected closure signature {}, but workspace has {}",
+                                        expected_closure, lock.closure_signature
+                                    )));
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(ref expected_commit) = delta.base_commit {
+                        if effective_workspace.join(".git").exists() {
+                            if let Ok(Some(prov)) =
+                                GitProvider::get_provenance(&effective_workspace)
+                            {
+                                if !prov.commit.starts_with(expected_commit)
+                                    && !expected_commit.starts_with(&prov.commit)
+                                {
+                                    return Err(ImportError::VerificationFailed(format!(
+                                        "Delta base mismatch! Expected git commit {}, but workspace has {}",
+                                        expected_commit, prov.commit
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                }
 
                 if let Some(target) = &manifest.target_platform {
                     let host_platform =
                         format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
                     if target != &host_platform {
-                        tracing::warn!(
+                        warn!(
                             bundle_target = %target,
                             host_platform = %host_platform,
                             "Bundle target platform does not match current host platform!"
@@ -215,6 +271,25 @@ impl AirGapImporter {
                     fs::create_dir_all(parent).map_err(|e| ImportError::IoError(e.to_string()))?;
                 }
                 fs::write(&dest, content).map_err(|e| ImportError::IoError(e.to_string()))?;
+            } else if path == Path::new("workspace.bundle") {
+                // Extract Git bundle into workspace and initialize / link repository
+                let bundle_dest = effective_workspace.join("workspace.bundle");
+                entry.unpack(&bundle_dest).map_err(|e| {
+                    ImportError::ExtractionError(format!(
+                        "Failed to unpack workspace.bundle: {}",
+                        e
+                    ))
+                })?;
+                info!(path = ?bundle_dest, "Unpacked embedded git bundle");
+
+                if let Err(e) = GitProvider::restore_bundle(&effective_workspace, &bundle_dest) {
+                    warn!(
+                        "Could not automatically restore git repository from bundle: {}",
+                        e
+                    );
+                } else {
+                    info!("Successfully restored offline Git repository from bundle");
+                }
             } else if path.starts_with("store") {
                 let rel_path = path.strip_prefix("store").unwrap_or(&path);
                 if rel_path.as_os_str().is_empty() {
@@ -264,6 +339,8 @@ impl AirGapImporter {
         info!(
             imported_files = imported_count,
             closure = %closure_signature,
+            is_delta = is_delta,
+            has_git = has_git_history,
             "Air-gap import completed successfully"
         );
 
@@ -272,6 +349,9 @@ impl AirGapImporter {
             closure_signature,
             store_path: effective_store,
             workspace_path: effective_workspace,
+            is_delta,
+            has_git_history,
+            vcs: vcs_provenance,
         })
     }
 }

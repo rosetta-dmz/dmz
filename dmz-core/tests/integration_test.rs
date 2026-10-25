@@ -172,6 +172,7 @@ fn test_package_builder_anchors_relative_paths() {
             .to_string(),
         packages: std::collections::BTreeMap::new(),
         target_platform: None,
+        vcs: None,
     };
     mock_lockfile
         .save(&workspace_path.join("dmz.lock"))

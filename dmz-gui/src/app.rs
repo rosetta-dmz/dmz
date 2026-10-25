@@ -11,6 +11,7 @@ enum Tab {
     WorkspaceSandbox,
     AgentSandbox,
     AirGap,
+    VersionControl,
     Supervisor,
     Settings,
 }

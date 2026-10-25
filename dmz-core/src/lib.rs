@@ -7,3 +7,4 @@ pub mod resolver;
 pub mod vcs;
 
 pub use resolver::ResolverEngine;
+pub use vcs::{BundleInfo, GitProvider, VcsProvenance};

@@ -142,7 +142,16 @@ impl ResolverEngine {
             );
         }
 
-        let lockfile = DmzLockfile::with_platform(locked_packages, target_platform);
+        let mut lockfile = DmzLockfile::with_platform(locked_packages, target_platform);
+        if let Ok(Some(prov)) = crate::vcs::GitProvider::get_provenance(workspace_dir) {
+            info!(
+                commit = %prov.commit,
+                branch = ?prov.branch,
+                dirty = prov.dirty,
+                "Attached VCS provenance to dmz.lock"
+            );
+            lockfile.vcs = Some(prov);
+        }
         info!(closure_sig = %lockfile.closure_signature, count = lockfile.packages.len(), "Generated deterministic agnostic DMZ closure signature");
 
         Ok(lockfile)
