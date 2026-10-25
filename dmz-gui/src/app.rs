@@ -143,19 +143,17 @@ impl eframe::App for DmzGuiApp {
                                                                 path.display().to_string();
                                                         }
                                                     }
-                                                    let ws_label = if self
-                                                        .workspace_path
-                                                        .trim()
-                                                        .is_empty()
-                                                        || self.workspace_path.trim() == "."
-                                                    {
-                                                        "Workspace:".to_string()
-                                                    } else {
-                                                        format!(
-                                                            "Workspace: {}",
-                                                            self.workspace_path
-                                                        )
-                                                    };
+                                                    let ws_label =
+                                                        if self.workspace_path.trim().is_empty()
+                                                            || self.workspace_path.trim() == "."
+                                                        {
+                                                            "Workspace:".to_string()
+                                                        } else {
+                                                            format!(
+                                                                "Workspace: {}",
+                                                                self.workspace_path
+                                                            )
+                                                        };
                                                     ui.label(
                                                         egui::RichText::new(ws_label)
                                                             .font(egui::FontId::proportional(12.0))

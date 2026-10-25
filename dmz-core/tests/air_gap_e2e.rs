@@ -1,7 +1,7 @@
 use std::fs;
 use tempfile::tempdir;
 
-use dmz_core::archive::exporter::{AirGapExporter, ExportConfig};
+use dmz_core::archive::exporter::{AirGapExporter, ExportConfig, ExportMode};
 use dmz_core::archive::importer::{AirGapImporter, ImportConfig};
 
 #[test]
@@ -127,6 +127,7 @@ fn test_relative_paths_anchor_to_selected_workspace() -> anyhow::Result<()> {
 }
 
 #[test]
+<<<<<<< Updated upstream
 fn test_toolchain_packaging_and_import_roundtrip() -> anyhow::Result<()> {
     let src_dir = tempdir()?;
     let workspace_path = src_dir.path().join("mock_app");
@@ -138,11 +139,27 @@ fn test_toolchain_packaging_and_import_roundtrip() -> anyhow::Result<()> {
     )?;
 
     let lockfile_path = workspace_path.join("dmz.lock");
+=======
+fn test_toolchain_packaging_and_import_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let workspace_path = temp.path().join("source_ws");
+    fs::create_dir_all(&workspace_path)?;
+
+    // Create mock workspace with Cargo.toml
+    let cargo_toml = r#"[package]
+name = "mock-app"
+version = "0.1.0"
+edition = "2021"
+"#;
+    fs::write(workspace_path.join("Cargo.toml"), cargo_toml)?;
+
+>>>>>>> Stashed changes
     let mock_lockfile_json = r#"{
         "version": 1,
         "closure_signature": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "packages": {}
     }"#;
+<<<<<<< Updated upstream
     fs::write(&lockfile_path, mock_lockfile_json)?;
 
     let dist_dir = tempdir()?;
@@ -158,6 +175,25 @@ fn test_toolchain_packaging_and_import_roundtrip() -> anyhow::Result<()> {
     };
 
     println!("Testing air-gap export with toolchain bundling...");
+=======
+    fs::write(workspace_path.join("dmz.lock"), mock_lockfile_json)?;
+
+    let archive_path = temp.path().join("bundle_with_toolchains.tar.zst");
+
+    let export_config = ExportConfig {
+        workspace_path: workspace_path.clone(),
+        lockfile_path: workspace_path.join("dmz.lock"),
+        store_dir: workspace_path.join(".dmz/store"),
+        output_path: archive_path.clone(),
+        zstd_level: 3,
+        mode: ExportMode::Unified,
+        target_platform: None,
+        with_git_history: false,
+        since: None,
+        with_toolchain: true,
+    };
+
+>>>>>>> Stashed changes
     let manifest = AirGapExporter::export(&export_config)?;
     assert!(archive_path.exists(), "Export archive must exist");
     assert!(
@@ -165,6 +201,7 @@ fn test_toolchain_packaging_and_import_roundtrip() -> anyhow::Result<()> {
         "Archive SHA256 must be computed"
     );
 
+<<<<<<< Updated upstream
     // If host has rustc/cargo, toolchains should be detected and recorded in manifest
     if which::which("rustc").is_ok() {
         assert!(
@@ -183,18 +220,34 @@ fn test_toolchain_packaging_and_import_roundtrip() -> anyhow::Result<()> {
     let import_config = ImportConfig {
         archive_path,
         target_store_dir: store_path,
+=======
+    // Import into fresh target directory
+    let import_target = temp.path().join("target_ws");
+    fs::create_dir_all(&import_target)?;
+
+    let import_config = ImportConfig {
+        archive_path: archive_path.clone(),
+        target_store_dir: import_target.join(".dmz/store"),
+>>>>>>> Stashed changes
         target_workspace_dir: import_target.clone(),
         verify_closure_hash: true,
     };
 
+<<<<<<< Updated upstream
     println!("Testing air-gap import of bundle with toolchains...");
     let result = AirGapImporter::import(&import_config)?;
 
     if which::which("rustc").is_ok() {
+=======
+    let result = AirGapImporter::import(&import_config)?;
+
+    if !manifest.toolchains.is_empty() {
+>>>>>>> Stashed changes
         assert!(
             result.has_toolchains,
             "ImportResult must report has_toolchains"
         );
+<<<<<<< Updated upstream
         let tc_rust = import_target.join(".dmz/toolchains/rust/bin");
         assert!(
             tc_rust.exists(),
@@ -215,14 +268,25 @@ fn test_toolchain_packaging_and_import_roundtrip() -> anyhow::Result<()> {
         let mut envs = std::collections::HashMap::new();
         dmz_core::toolchain::ToolchainPackager::inject_toolchain_paths(&import_target, &mut envs);
         assert!(envs.contains_key("PATH"), "PATH should be injected");
+=======
+        let env_sh = import_target.join(".dmz/env.sh");
+        assert!(env_sh.exists(), ".dmz/env.sh activator must be generated");
+
+        let mut envs = std::collections::HashMap::new();
+        dmz_core::toolchain::ToolchainPackager::inject_toolchain_paths(&import_target, &mut envs);
+        assert!(envs.contains_key("PATH"), "PATH must be injected");
+>>>>>>> Stashed changes
         assert!(
             envs.get("PATH").unwrap().contains(".dmz/toolchains"),
             "PATH should contain .dmz/toolchains"
         );
+<<<<<<< Updated upstream
         assert!(
             envs.contains_key("RUSTUP_HOME"),
             "RUSTUP_HOME should be configured"
         );
+=======
+>>>>>>> Stashed changes
     }
 
     Ok(())
