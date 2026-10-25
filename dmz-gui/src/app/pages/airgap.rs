@@ -174,6 +174,12 @@ pub(super) fn show(
             ui.add(egui::Slider::new(&mut state.zstd_level, 1..=22).show_value(true));
         });
 
+        ui.add_space(8.0);
+        ui.checkbox(
+            &mut state.with_toolchain,
+            "Package compiler toolchains into bundle",
+        );
+
         ui.add_space(12.0);
         ui.horizontal_wrapped(|ui| {
             if components::action_button(ui, "Export Bundle", true).clicked() {
