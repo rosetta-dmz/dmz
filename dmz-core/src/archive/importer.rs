@@ -332,7 +332,7 @@ impl AirGapImporter {
                     if !parent.exists() {
                         fs::create_dir_all(parent).map_err(|e| {
                             ImportError::IoError(format!(
-                                "Failed to create toolchain path {:?}: {}",
+                                "Failed to create toolchain directory {:?}: {}",
                                 parent, e
                             ))
                         })?;

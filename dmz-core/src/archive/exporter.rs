@@ -354,25 +354,20 @@ impl AirGapExporter {
             }
         }
 
-        // Capture host compiler toolchains if requested (`--with-toolchain`)
-        let mut toolchain_entries = Vec::new();
+        // Package active host toolchains if requested (`--with-toolchain`)
+        let mut toolchain_manifest_entries = Vec::new();
         if config.with_toolchain {
             info!("Initiating host toolchain discovery and packaging");
-            let active_eco_names: Vec<&str> = detected_stacks.iter().map(|s| s.as_str()).collect();
-            let discovered = crate::toolchain::ToolchainProvider::discover_active_toolchains(
-                &workspace_root,
-                &active_eco_names,
-            );
             match crate::toolchain::ToolchainPackager::package_toolchains(
+                &workspace_root,
                 &mut tar_builder,
-                &discovered,
             ) {
                 Ok(entries) => {
                     info!(
-                        count = entries.len(),
-                        "Captured and packaged language toolchains into bundle"
+                        "Captured and packaged language toolchains into bundle count={}",
+                        entries.len()
                     );
-                    toolchain_entries = entries;
+                    toolchain_manifest_entries = entries;
                 }
                 Err(e) => {
                     warn!("Toolchain packaging encountered error: {}", e);
@@ -394,7 +389,7 @@ impl AirGapExporter {
             vcs: vcs_provenance,
             delta_base,
             has_git_history,
-            toolchains: toolchain_entries,
+            toolchains: toolchain_manifest_entries,
             closure_signature: lockfile.closure_signature.clone(),
             package_count: packed_count,
             created_at_utc: std::time::SystemTime::now()

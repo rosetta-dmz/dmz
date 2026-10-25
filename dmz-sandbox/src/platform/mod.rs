@@ -77,9 +77,9 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     if bundled_toolchains_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&bundled_toolchains_dir) {
             for entry in entries.flatten() {
-                let bin_dir = entry.path().join("bin");
-                if bin_dir.exists() {
-                    current_path = format!("{}:{}", bin_dir.display(), current_path);
+                let bin = entry.path().join("bin");
+                if bin.exists() {
+                    current_path = format!("{}:{}", bin.display(), current_path);
                 }
             }
         }
@@ -101,6 +101,31 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
                         .to_string(),
                 );
             }
+            let rust_lib = bundled_toolchains_dir
+                .join("rust/lib")
+                .to_string_lossy()
+                .to_string();
+            let existing_dyld = env_map
+                .get("DYLD_LIBRARY_PATH")
+                .cloned()
+                .unwrap_or_default();
+            env_map.insert(
+                "DYLD_LIBRARY_PATH".into(),
+                if existing_dyld.is_empty() {
+                    rust_lib.clone()
+                } else {
+                    format!("{}:{}", rust_lib, existing_dyld)
+                },
+            );
+            let existing_ld = env_map.get("LD_LIBRARY_PATH").cloned().unwrap_or_default();
+            env_map.insert(
+                "LD_LIBRARY_PATH".into(),
+                if existing_ld.is_empty() {
+                    rust_lib
+                } else {
+                    format!("{}:{}", rust_lib, existing_ld)
+                },
+            );
         }
         if bundled_toolchains_dir.join("go").exists() {
             env_map.insert(
