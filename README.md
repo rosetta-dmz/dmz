@@ -11,6 +11,7 @@ Of course, it's still recommended to use a daemon when necessary (Docker, Podman
 - **Multi-Ecosystem Support:** Native discovery, dependency resolution, and sandbox verification for Rust (`Cargo.toml`), Node.js (`pnpm`, `yarn`, `npm`), Go (`go.mod`), and Python (`pyproject.toml`, `requirements.txt`).
 - **Zero Host Dependencies:** Ships as a single self-contained binary embedding deterministic package handling for offline management.
 - **Air-Gap Capable:** Pack, cryptographically verify, and extract complete `.tar.zst` dependency closures for completely offline environments.
+- **Native Toolchain Packaging:** Optionally packages host compiler and runtime binaries (`cargo`, `rustc`, `node`, `pnpm`, `python3`, `go`, `php`, `ruby`) directly into bundles (`--with-toolchain`) so air-gapped target machines without pre-installed compilers can compile and run out of the box.
 - **Engine-Driven Verification:** Programmatically validates imported workspaces using native ecosystem rules via `dmz ecosystem verify`.
 - **Supervisor & IPC Sockets:** Manages collateral stack services and exposes local API sockets for tool and IDE integrations.
 ---
@@ -55,12 +56,27 @@ dmz fetch --store .dmz/store
 dmz ecosystem verify
 ```
 
-## Air-Gap Import & Pipeline Usage
+## Air-Gap Packaging & Offline Toolchain Workflow
 
-To unpack and verify an isolated closure archive offline:
+Export an entire workspace, its dependencies, and the active compiler toolchains in one shot:
 
 ```bash
-dmz airgap import --archive dist/workspace_closure.tar.zst --store ./offline_store
+# Package workspace code, locked dependencies, and host toolchains
+dmz bundle --with-toolchain --output dist/workspace_closure.tar.zst
+```
+
+On the air-gapped target machine (even with no pre-installed Rust, Node, or Python), unpack and verify:
+
+```bash
+# Unpack workspace, local dependency store, and compiler toolchains
+dmz import --archive dist/workspace_closure.tar.zst --workspace ./my-workspace
+
+# Enter the isolated workspace with extracted toolchains automatically in PATH
+cd my-workspace
+source .dmz/env.sh       # Or run inside an isolated sandbox via: dmz shell
+
+# Immediately compile and test using the bundled toolchains
+cargo run -p dmz-gui
 ```
 
 ## License

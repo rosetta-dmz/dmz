@@ -30,6 +30,7 @@
   * *Target C:* Package repository code combined with locked dependencies (Unified distribution).  
 * **FR-4.2:** Using embedded compression libraries (e.g., `tar`, `zstd`), the system shall export built environments into self-contained binary archives optimized for physical transfer.  
 * **FR-4.3:** The system shall support importing, verifying, and mounting these archives on air-gapped target machines with zero internet access required.
+* **FR-4.4 (Host Toolchain Capture & Self-Extraction):** The engine shall support optional capture and encapsulation of host compiler toolchains and runtime interpreters (Rust `cargo`/`rustc`, Node.js, Python, Go, PHP, Ruby) directly within the air-gap archive (`--with-toolchain`). On target air-gapped systems, the platform shall autonomously unpack these toolchains, clear host quarantine flags (e.g. macOS `xattr -cr`), and generate shell environment activators (`.dmz/env.sh` and `.dmz/env.bat`) to enable immediate offline compilation and execution.
 
 ### **5\. Localized Workspace Supervisor & AI Agent Architecture**
 

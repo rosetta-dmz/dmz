@@ -72,6 +72,56 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
         std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".to_string())
     });
 
+    // Prepend bundled DMZ toolchains (<workspace>/.dmz/toolchains/*/bin) if present
+    let bundled_toolchains_dir = resolved_config.workspace_path.join(".dmz/toolchains");
+    if bundled_toolchains_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&bundled_toolchains_dir) {
+            for entry in entries.flatten() {
+                let bin_dir = entry.path().join("bin");
+                if bin_dir.exists() {
+                    current_path = format!("{}:{}", bin_dir.display(), current_path);
+                }
+            }
+        }
+        if bundled_toolchains_dir.join("rust").exists() {
+            env_map.insert(
+                "RUSTUP_HOME".into(),
+                bundled_toolchains_dir
+                    .join("rust")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            if !env_map.contains_key("CARGO_HOME") {
+                env_map.insert(
+                    "CARGO_HOME".into(),
+                    resolved_config
+                        .workspace_path
+                        .join(".cargo")
+                        .to_string_lossy()
+                        .to_string(),
+                );
+            }
+        }
+        if bundled_toolchains_dir.join("go").exists() {
+            env_map.insert(
+                "GOROOT".into(),
+                bundled_toolchains_dir
+                    .join("go")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+        }
+        if bundled_toolchains_dir.join("python").exists() {
+            env_map.insert(
+                "PYTHONHOME".into(),
+                bundled_toolchains_dir
+                    .join("python")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+        }
+    }
+
     let toolchain_bins = [
         format!("{}/.cargo/bin", home),
         "/opt/homebrew/bin".to_string(),
