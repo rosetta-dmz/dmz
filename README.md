@@ -4,7 +4,7 @@
 
 Named after military terminology, DMZ is a fully open-source, daemonless workspace management and standalone sandbox platform. It provides isolated developer environments, secure proxy-audited AI agent execution, and deterministic air-gapped closure imports with no host system dependencies. No pre-installed Python, Node, Docker, or system Git needed.
 
-Of course, it's still recommended to use a daemon when necessary (Docker, Podman, etc.), however DMZ provides a lightweight solution to ensure interoperability and workspace/codebase reproducibility across Windows/Linux/MacOS regardless of connectivity, programming language, or dependencies used. DMZ focuses on eliminating the need to have a ridiculous amount of tools to manage the most important aspect of software development -- supply chain/SBOM visibility, management, and vulnerability analysis across your stack. A lot of ground work was done to ensure a simple and seamless GUI experience as well for developers/users who prefer fast and minimal button workflows.
+Of course, it's still recommended to use a daemon when necessary (Docker, Podman, etc.), however DMZ provides a lightweight solution to ensure interoperability and workspace/codebase reproducibility across Windows/Linux/MacOS regardless of connectivity, programming language, or dependencies used. DMZ focuses on eliminating the need to have a ridiculous amount of tools to manage the most important aspects of software development -- reproducibility, SBOM management, and vulnerability analysis across your stack. A lot of ground work was done to ensure a simple and seamless GUI experience as well for those who prefer fast and minimal button workflows.
 
 ## Features
 
