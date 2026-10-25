@@ -107,58 +107,70 @@ impl eframe::App for DmzGuiApp {
                                 content_ui.set_clip_rect(content_rect);
                                 content_ui.vertical(|ui| {
                                     ui.add_space(2.0);
-                                    ui.horizontal(|ui| {
-                                        ui.heading("DMZ Engine");
-                                        ui.add_space(4.0);
-                                        let (indicator_rect, _) = ui.allocate_exact_size(
-                                            egui::vec2(10.0, 10.0),
-                                            egui::Sense::hover(),
-                                        );
-                                        ui.painter().circle_filled(
-                                            indicator_rect.center(),
-                                            5.0,
-                                            egui::Color32::from_rgb(92, 224, 160),
-                                        );
-                                        ui.add_space(4.0);
-                                        ui.label(
-                                            egui::RichText::new("online")
-                                                .font(egui::FontId::proportional(12.0))
-                                                .color(egui::Color32::from_rgb(92, 224, 160)),
-                                        );
-
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if components::browse_button(ui).clicked() {
-                                                    if let Some(path) =
-                                                        rfd::FileDialog::new().pick_folder()
-                                                    {
-                                                        self.workspace_path =
-                                                            path.display().to_string();
-                                                    }
-                                                }
-                                                let display_ws = if self.workspace_path.is_empty() {
-                                                    "."
-                                                } else {
-                                                    &self.workspace_path
-                                                };
-                                                ui.label(
-                                                    egui::RichText::new(format!(
-                                                        "Workspace: {}",
-                                                        display_ws
-                                                    ))
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(
+                                            ui.available_width(),
+                                            components::FIELD_BUTTON_HEIGHT,
+                                        ),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            ui.heading("DMZ Engine");
+                                            ui.add_space(4.0);
+                                            let (indicator_rect, _) = ui.allocate_exact_size(
+                                                egui::vec2(10.0, 10.0),
+                                                egui::Sense::hover(),
+                                            );
+                                            ui.painter().circle_filled(
+                                                indicator_rect.center(),
+                                                5.0,
+                                                egui::Color32::from_rgb(92, 224, 160),
+                                            );
+                                            ui.add_space(4.0);
+                                            ui.label(
+                                                egui::RichText::new("online")
                                                     .font(egui::FontId::proportional(12.0))
-                                                    .color(
-                                                        visuals
-                                                            .widgets
-                                                            .noninteractive
-                                                            .fg_stroke
-                                                            .color,
-                                                    ),
-                                                );
-                                            },
-                                        );
-                                    });
+                                                    .color(egui::Color32::from_rgb(92, 224, 160)),
+                                            );
+
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    if components::browse_button(ui).clicked() {
+                                                        if let Some(path) =
+                                                            rfd::FileDialog::new().pick_folder()
+                                                        {
+                                                            self.workspace_path =
+                                                                path.display().to_string();
+                                                        }
+                                                    }
+                                                    let ws_label = if self
+                                                        .workspace_path
+                                                        .trim()
+                                                        .is_empty()
+                                                        || self.workspace_path.trim() == "."
+                                                    {
+                                                        "Workspace:".to_string()
+                                                    } else {
+                                                        format!(
+                                                            "Workspace: {}",
+                                                            self.workspace_path
+                                                        )
+                                                    };
+                                                    ui.label(
+                                                        egui::RichText::new(ws_label)
+                                                            .font(egui::FontId::proportional(12.0))
+                                                            .color(
+                                                                visuals
+                                                                    .widgets
+                                                                    .noninteractive
+                                                                    .fg_stroke
+                                                                    .color,
+                                                            ),
+                                                    );
+                                                },
+                                            );
+                                        },
+                                    );
                                     ui.add_space(4.0);
                                     ui.separator();
                                     ui.add_space(10.0);
