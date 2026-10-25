@@ -781,11 +781,7 @@ pub fn run_shell(
         abs_workspace.join("node_modules").display().to_string(),
     );
 
-<<<<<<< Updated upstream
-    // Inject bundled toolchain paths and environment configurations
-=======
     // Inject bundled toolchain paths if available (.dmz/toolchains/*/bin)
->>>>>>> Stashed changes
     dmz_core::toolchain::ToolchainPackager::inject_toolchain_paths(&abs_workspace, &mut envs);
 
     let is_sandbox = !no_sandbox;

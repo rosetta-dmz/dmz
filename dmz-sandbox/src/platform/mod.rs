@@ -72,24 +72,14 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
         std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".to_string())
     });
 
-<<<<<<< Updated upstream
     // Prepend bundled DMZ toolchains (<workspace>/.dmz/toolchains/*/bin) if present
-=======
-    // Inject bundled toolchain paths if available (.dmz/toolchains/*/bin)
->>>>>>> Stashed changes
     let bundled_toolchains_dir = resolved_config.workspace_path.join(".dmz/toolchains");
     if bundled_toolchains_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&bundled_toolchains_dir) {
             for entry in entries.flatten() {
-<<<<<<< Updated upstream
-                let bin_dir = entry.path().join("bin");
-                if bin_dir.exists() {
-                    current_path = format!("{}:{}", bin_dir.display(), current_path);
-=======
                 let bin = entry.path().join("bin");
                 if bin.exists() {
                     current_path = format!("{}:{}", bin.display(), current_path);
->>>>>>> Stashed changes
                 }
             }
         }
@@ -111,8 +101,6 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
                         .to_string(),
                 );
             }
-<<<<<<< Updated upstream
-=======
             let rust_lib = bundled_toolchains_dir
                 .join("rust/lib")
                 .to_string_lossy()
@@ -138,7 +126,6 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
                     format!("{}:{}", rust_lib, existing_ld)
                 },
             );
->>>>>>> Stashed changes
         }
         if bundled_toolchains_dir.join("go").exists() {
             env_map.insert(
