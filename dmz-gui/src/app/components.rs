@@ -84,9 +84,13 @@ fn with_button_looks<R>(
     .inner
 }
 
+/// Horizontal clearance margin (2.0px) preventing frame borders from touching the viewport
+/// clip boundary while maintaining equal visual clearance with the left margin.
+pub(super) const CARD_RIGHT_CLEARANCE: f32 = 2.0;
+
 pub(super) fn section(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
     let visuals = &ui.visuals();
-    let card_width = ui.available_width();
+    let card_width = (ui.available_width() - CARD_RIGHT_CLEARANCE).max(0.0);
     egui::Frame::new()
         .fill(visuals.faint_bg_color)
         .stroke(egui::Stroke::new(
@@ -96,7 +100,9 @@ pub(super) fn section(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
         .corner_radius(egui::CornerRadius::same(12))
         .inner_margin(egui::Margin::same(16))
         .show(ui, |ui| {
-            ui.set_min_width((card_width - 32.0).max(0.0));
+            let inner_width = (card_width - 32.0).max(0.0);
+            ui.set_min_width(inner_width);
+            ui.set_max_width(inner_width);
             contents(ui);
         });
 }
@@ -126,7 +132,7 @@ pub(super) fn card(
     } else {
         visuals.widgets.noninteractive.bg_stroke.color
     };
-    let card_width = ui.available_width();
+    let card_width = (ui.available_width() - CARD_RIGHT_CLEARANCE).max(0.0);
     egui::Frame::new()
         .fill(if selected {
             visuals.selection.bg_fill.gamma_multiply(0.2)
@@ -137,7 +143,9 @@ pub(super) fn card(
         .corner_radius(egui::CornerRadius::same(12))
         .inner_margin(egui::Margin::same(16))
         .show(ui, |ui| {
-            ui.set_min_width((card_width - 32.0).max(0.0));
+            let inner_width = (card_width - 32.0).max(0.0);
+            ui.set_min_width(inner_width);
+            ui.set_max_width(inner_width);
             ui.set_min_height(64.0);
             contents(ui);
         })
@@ -271,10 +279,10 @@ pub(super) fn dismissable_toast(ui: &mut egui::Ui, text: &str, open: &mut bool) 
     if !*open {
         return false;
     }
-    let visuals = ui.visuals();
+    let visuals = ui.visuals().clone();
     let accent = visuals.selection.stroke.color;
     let text_color = visuals.widgets.noninteractive.fg_stroke.color;
-    let card_width = ui.available_width();
+    let card_width = (ui.available_width() - CARD_RIGHT_CLEARANCE).max(0.0);
     let mut closed = false;
 
     egui::Frame::new()
@@ -284,39 +292,96 @@ pub(super) fn dismissable_toast(ui: &mut egui::Ui, text: &str, open: &mut bool) 
             visuals.widgets.noninteractive.bg_stroke.color,
         ))
         .corner_radius(egui::CornerRadius::same(12))
-        .inner_margin(egui::Margin::symmetric(16, 12))
+        .inner_margin(egui::Margin::same(16))
         .show(ui, |ui| {
-            ui.set_min_width((card_width - 32.0).max(0.0));
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("ℹ").color(accent).size(15.0).strong());
-                ui.add_space(6.0);
-                let close_button_width = 24.0;
-                let text_width = (ui.available_width() - close_button_width - 12.0).max(80.0);
-                ui.add_sized(
-                    egui::vec2(text_width, 0.0),
-                    egui::Label::new(
-                        egui::RichText::new(text)
-                            .color(text_color)
-                            .size(12.0),
-                    )
-                    .wrap(),
+            let inner_width = (card_width - 32.0).max(0.0);
+            ui.set_min_width(inner_width);
+            ui.set_max_width(inner_width);
+            let icon_size = 18.0;
+            let close_size = 20.0;
+            let gap = 12.0;
+
+            let text_wrap_width = (inner_width - icon_size - gap - close_size - gap).max(60.0);
+            let galley = ui.painter().layout(
+                text.to_owned(),
+                egui::FontId::proportional(12.0),
+                text_color,
+                text_wrap_width,
+            );
+            let text_size = galley.size();
+            let row_height = text_size.y.max(close_size);
+
+            let (row_rect, _) =
+                ui.allocate_exact_size(egui::vec2(inner_width, row_height), egui::Sense::hover());
+            let center_y = row_rect.center().y;
+
+            // 1. Vector info badge (vertically centered with text message)
+            let icon_center = egui::pos2(row_rect.left() + icon_size / 2.0, center_y);
+            ui.painter()
+                .circle_filled(icon_center, 9.0, accent.gamma_multiply(0.2));
+            ui.painter()
+                .circle_stroke(icon_center, 9.0, egui::Stroke::new(1.0, accent));
+            ui.painter()
+                .circle_filled(egui::pos2(icon_center.x, icon_center.y - 3.5), 1.2, accent);
+            ui.painter().line_segment(
+                [
+                    egui::pos2(icon_center.x, icon_center.y - 1.0),
+                    egui::pos2(icon_center.x, icon_center.y + 4.0),
+                ],
+                egui::Stroke::new(1.5, accent),
+            );
+
+            // 2. Wrapped text galley (vertically centered)
+            let text_pos = egui::pos2(
+                row_rect.left() + icon_size + gap,
+                center_y - text_size.y / 2.0,
+            );
+            ui.painter().galley(text_pos, galley, text_color);
+
+            // 3. Vector close button (vertically centered with text message)
+            let close_rect = egui::Rect::from_center_size(
+                egui::pos2(row_rect.right() - close_size / 2.0, center_y),
+                egui::vec2(close_size, close_size),
+            );
+            let close_resp = ui.interact(
+                close_rect,
+                ui.id().with("toast_close"),
+                egui::Sense::click(),
+            );
+            if close_resp.clicked() {
+                *open = false;
+                closed = true;
+            }
+            let close_hovered = close_resp.hovered();
+            if close_hovered {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                ui.painter().rect_filled(
+                    close_rect,
+                    egui::CornerRadius::same(4),
+                    visuals.widgets.hovered.bg_fill,
                 );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let close_btn = egui::Button::new(
-                        egui::RichText::new("✕").size(12.0).color(text_color),
-                    )
-                    .frame(false)
-                    .min_size(egui::vec2(20.0, 20.0));
-                    if ui
-                        .add(close_btn)
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .clicked()
-                    {
-                        *open = false;
-                        closed = true;
-                    }
-                });
-            });
+            }
+            let cross_color = if close_hovered {
+                visuals.widgets.hovered.fg_stroke.color
+            } else {
+                visuals.widgets.noninteractive.fg_stroke.color
+            };
+            let r = 4.5;
+            let cross_stroke = egui::Stroke::new(1.5, cross_color);
+            ui.painter().line_segment(
+                [
+                    close_rect.center() + egui::vec2(-r, -r),
+                    close_rect.center() + egui::vec2(r, r),
+                ],
+                cross_stroke,
+            );
+            ui.painter().line_segment(
+                [
+                    close_rect.center() + egui::vec2(-r, r),
+                    close_rect.center() + egui::vec2(r, -r),
+                ],
+                cross_stroke,
+            );
         });
 
     closed

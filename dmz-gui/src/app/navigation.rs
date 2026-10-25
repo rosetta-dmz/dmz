@@ -34,6 +34,7 @@ pub(super) fn show(ui: &mut egui::Ui, active_tab: &mut Tab, width: f32, visuals:
                 (Tab::WorkspaceSandbox, "Workspace Sandbox"),
                 (Tab::AgentSandbox, "Agent Sandbox"),
                 (Tab::AirGap, "Air-Gap Manager"),
+                (Tab::VersionControl, "Version Control"),
                 (Tab::Supervisor, "Supervisor IPC"),
                 (Tab::Settings, "Settings"),
             ] {

@@ -33,6 +33,10 @@
 | **Native Ecosystem Verification** | **Implemented** (`dmz ecosystem verify`) | Stable | `handlers.rs`, `commands.rs` |
 | **Target Platform Compatibility Check** | **Implemented** (Lockfile/manifest tags + import warning) | Stable | `importer.rs`, `lockfile.rs` |
 | **Air-Gap Bundle Packaging (`.tar.zst`)** | **Implemented** (Target A, B, C; CLI & GUI) | Stable | `builder.rs`, `exporter.rs` |
+| **Embedded Git Provenance & Status** | **Implemented** (`dmz.lock` & `airgap_manifest.json` tracking) | Stable | `vcs/provider.rs`, `lockfile.rs` |
+| **Incremental Delta Air-Gap Bundles** | **Implemented** (`--since` delta diffs & import baseline check) | Stable | `exporter.rs`, `importer.rs` |
+| **Deterministic Git Bundle Inclusion** | **Implemented** (`--with-git-history` Git bundle v2 packaging) | Stable | `vcs/provider.rs`, `importer.rs` |
+| **GUI Version Control Page** | **Implemented** (Dedicated tab above Settings in `dmz-gui`) | Stable | `version_control.rs`, `navigation.rs` |
 | **Daemonless Process Sandbox** | **Implemented** (macOS Seatbelt, `dmz shell`) | Active hardening (Linux namespaces) | `macos.rs`, `linux.rs` |
 | **System Package Capture (apt, brew)** | **Planned** | Roadmap v1.1 | `what-is-dmz.md` |
 | **OCI / Container Image Export** | **Planned** | Roadmap v1.2 | `what-is-dmz.md` |

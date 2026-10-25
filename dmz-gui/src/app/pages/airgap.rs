@@ -156,7 +156,11 @@ pub(super) fn show(
                 GuiExportMode::Unified,
                 "Complete Package",
             );
-            ui.radio_value(&mut state.export_mode, GuiExportMode::CodeOnly, "Codebase Only");
+            ui.radio_value(
+                &mut state.export_mode,
+                GuiExportMode::CodeOnly,
+                "Codebase Only",
+            );
             ui.radio_value(
                 &mut state.export_mode,
                 GuiExportMode::DepsOnly,
@@ -229,6 +233,7 @@ pub(super) fn show(
                     zstd_level: state.zstd_level,
                     mode: state.export_mode.into(),
                     target_platform: target_opt,
+                    ..Default::default()
                 };
 
                 match AirGapExporter::export(&config) {
@@ -279,6 +284,7 @@ pub(super) fn show(
                     zstd_level: state.zstd_level,
                     mode: state.export_mode.into(),
                     target_platform: target_opt,
+                    ..Default::default()
                 };
 
                 match AirGapExporter::export(&config) {

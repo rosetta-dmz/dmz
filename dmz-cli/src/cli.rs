@@ -153,6 +153,14 @@ pub enum Commands {
         /// Force re-resolving dependency manifests even if dmz.lock already exists
         #[arg(long, default_value_t = false)]
         refresh_lock: bool,
+
+        /// Archive deterministic Git bundle alongside closure
+        #[arg(long, default_value_t = false)]
+        with_git_history: bool,
+
+        /// Baseline commit, ref, or previous manifest/bundle for incremental delta export
+        #[arg(long)]
+        since: Option<String>,
     },
 
     /// Unpack, verify, and restore an air-gap bundle into local store
@@ -328,6 +336,14 @@ pub enum AirgapCommands {
         /// Force re-resolving dependency manifests even if dmz.lock already exists
         #[arg(long, default_value_t = false)]
         refresh_lock: bool,
+
+        /// Archive deterministic Git bundle alongside closure
+        #[arg(long, default_value_t = false)]
+        with_git_history: bool,
+
+        /// Baseline commit, ref, or previous manifest/bundle for incremental delta export
+        #[arg(long)]
+        since: Option<String>,
     },
 
     /// Bundle store items and dmz.lock into a portable air-gap archive (.tar.zst)
@@ -359,6 +375,14 @@ pub enum AirgapCommands {
         /// Air-gap export target mode
         #[arg(long, value_enum, default_value_t = CliExportMode::Unified)]
         mode: CliExportMode,
+
+        /// Archive deterministic Git bundle alongside closure
+        #[arg(long, default_value_t = false)]
+        with_git_history: bool,
+
+        /// Baseline commit, ref, or previous manifest/bundle for incremental delta export
+        #[arg(long)]
+        since: Option<String>,
     },
 
     /// Unpack and cryptographically verify an air-gap bundle into local store

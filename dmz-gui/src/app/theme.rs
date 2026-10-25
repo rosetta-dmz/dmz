@@ -74,11 +74,11 @@ impl ThemeFile {
     pub(super) fn builtins() -> [Self; 4] {
         [
             Self {
-                name: String::from("Mac Dark"),
+                name: String::from("Dark"),
                 ..Self::default()
             },
             Self {
-                name: String::from("Mac Light"),
+                name: String::from("Light"),
                 appearance: Appearance::Light,
                 palette: ThemePalette {
                     background: String::from("#f6f6f8"),
@@ -137,13 +137,6 @@ impl ThemeFile {
             )?,
             parse_color(&self.palette.border)?,
         ])
-    }
-
-    pub(super) fn appearance_label(&self) -> &'static str {
-        match self.appearance {
-            Appearance::Light => "Light appearance",
-            Appearance::Dark => "Dark appearance",
-        }
     }
 
     pub(super) fn egui_theme(&self) -> egui::Theme {
@@ -260,12 +253,12 @@ mod tests {
     fn mac_light_is_available_with_light_palette() {
         let theme = ThemeFile::builtins()
             .into_iter()
-            .find(|theme| theme.name == "Mac Light")
-            .expect("Mac Light is a built-in theme");
+            .find(|theme| theme.name == "Light")
+            .expect("Light is a built-in theme");
         assert!(matches!(theme.appearance, Appearance::Light));
         assert!(theme.validate().is_ok());
 
-        let visuals = theme.visuals().expect("Mac Light visuals are valid");
+        let visuals = theme.visuals().expect("Light visuals are valid");
         assert_eq!(visuals.panel_fill, parse_color("#f6f6f8").unwrap());
         assert_eq!(visuals.extreme_bg_color, parse_color("#ffffff").unwrap());
         assert_eq!(

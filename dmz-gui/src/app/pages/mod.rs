@@ -4,12 +4,13 @@ mod resolver;
 mod sandbox;
 mod settings;
 mod supervisor;
+mod version_control;
 
 use eframe::egui;
 
 use self::{
-    agent::AgentState, airgap::AirGapState, resolver::ResolverState,
-    sandbox::SandboxState, settings::AppearanceState, supervisor::SupervisorState,
+    agent::AgentState, airgap::AirGapState, resolver::ResolverState, sandbox::SandboxState,
+    settings::AppearanceState, supervisor::SupervisorState, version_control::VersionControlState,
 };
 use crate::app::Tab;
 
@@ -19,6 +20,7 @@ pub(super) struct Pages {
     sandbox: SandboxState,
     agent: AgentState,
     airgap: AirGapState,
+    version_control: VersionControlState,
     supervisor: SupervisorState,
     appearance: AppearanceState,
 }
@@ -67,6 +69,13 @@ impl Pages {
             Tab::AgentSandbox => agent::show(&mut self.agent, ui, status_message),
             Tab::AirGap => airgap::show(
                 &mut self.airgap,
+                ui,
+                workspace_path,
+                lockfile_path,
+                status_message,
+            ),
+            Tab::VersionControl => version_control::show(
+                &mut self.version_control,
                 ui,
                 workspace_path,
                 lockfile_path,

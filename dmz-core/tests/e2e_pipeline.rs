@@ -72,6 +72,7 @@ fn test_e2e_unified_airgap_export_and_import() {
         zstd_level: 3,
         mode: ExportMode::Unified,
         target_platform: None,
+        ..Default::default()
     };
 
     let manifest = AirGapExporter::export(&export_config).expect("Unified air-gap export failed");
@@ -110,6 +111,7 @@ fn test_e2e_code_only_and_deps_only_modes() {
         zstd_level: 3,
         mode: ExportMode::CodeOnly,
         target_platform: None,
+        ..Default::default()
     };
     let code_manifest = AirGapExporter::export(&code_config).expect("CodeOnly export failed");
     assert_eq!(code_manifest.package_count, 0); // No store items packed
@@ -125,6 +127,7 @@ fn test_e2e_code_only_and_deps_only_modes() {
         zstd_level: 3,
         mode: ExportMode::DepsOnly,
         target_platform: None,
+        ..Default::default()
     };
     let deps_manifest = AirGapExporter::export(&deps_config).expect("DepsOnly export failed");
     assert_eq!(deps_manifest.package_count, 1); // Store items packed, workspace code omitted

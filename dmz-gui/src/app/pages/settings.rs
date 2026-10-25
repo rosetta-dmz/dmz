@@ -134,10 +134,7 @@ impl AppearanceState {
 
         if self.preferences.theme_name == "System" {
             ctx.set_theme(egui::ThemePreference::System);
-            for (theme, name) in [
-                (egui::Theme::Dark, "Mac Dark"),
-                (egui::Theme::Light, "Mac Light"),
-            ] {
+            for (theme, name) in [(egui::Theme::Dark, "Dark"), (egui::Theme::Light, "Light")] {
                 let palette = ThemeFile::builtins()
                     .into_iter()
                     .find(|candidate| candidate.name == name)
@@ -208,28 +205,31 @@ impl AppearanceState {
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
                             ui.label("Widget Size");
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                egui::ComboBox::from_id_salt("widget_size_combo")
-                                    .selected_text(self.preferences.widget_size.label())
-                                    .width(140.0)
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut self.preferences.widget_size,
-                                            WidgetSize::Small,
-                                            "Small",
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.preferences.widget_size,
-                                            WidgetSize::Medium,
-                                            "Medium",
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.preferences.widget_size,
-                                            WidgetSize::Large,
-                                            "Large",
-                                        );
-                                    });
-                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    egui::ComboBox::from_id_salt("widget_size_combo")
+                                        .selected_text(self.preferences.widget_size.label())
+                                        .width(140.0)
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(
+                                                &mut self.preferences.widget_size,
+                                                WidgetSize::Small,
+                                                "Small",
+                                            );
+                                            ui.selectable_value(
+                                                &mut self.preferences.widget_size,
+                                                WidgetSize::Medium,
+                                                "Medium",
+                                            );
+                                            ui.selectable_value(
+                                                &mut self.preferences.widget_size,
+                                                WidgetSize::Large,
+                                                "Large",
+                                            );
+                                        });
+                                },
+                            );
                         },
                     );
                     ui.add_space(12.0);
@@ -238,12 +238,15 @@ impl AppearanceState {
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
                             ui.label("Show Status Bar");
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                super::super::components::toggle(
-                                    ui,
-                                    &mut self.preferences.show_status_bar,
-                                );
-                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    super::super::components::toggle(
+                                        ui,
+                                        &mut self.preferences.show_status_bar,
+                                    );
+                                },
+                            );
                         },
                     );
                 });
@@ -274,71 +277,55 @@ impl AppearanceState {
             .chain(self.imported_themes.iter().cloned())
             .collect::<Vec<_>>();
         let mut selected = None;
-        egui::Window::new("Theme gallery")
+        egui::Window::new("Theme Gallery")
             .open(&mut self.gallery_open)
             .default_size(egui::vec2(540.0, 480.0))
             .min_size(egui::vec2(440.0, 280.0))
             .resizable(true)
             .show(ctx, |ui| {
-                ui.label(
-                    egui::RichText::new("Pick a palette for your DMZ workspace.")
-                        .color(ui.visuals().widgets.noninteractive.fg_stroke.color),
-                );
-                ui.add_space(8.0);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for theme in &themes {
                             let is_selected = self.preferences.theme_name == theme.name;
                             super::super::components::card(ui, is_selected, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.vertical(|ui| {
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(
+                                        ui.available_width(),
+                                        super::super::components::FIELD_BUTTON_HEIGHT,
+                                    ),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
                                         ui.label(
                                             egui::RichText::new(theme.name.as_str())
                                                 .strong()
                                                 .size(15.0),
                                         );
-                                        let meta = theme
-                                            .author
-                                            .as_deref()
-                                            .map(|author| {
-                                                format!("{author} · {}", theme.appearance_label())
-                                            })
-                                            .unwrap_or_else(|| theme.appearance_label().to_owned());
-                                        ui.label(
-                                            egui::RichText::new(meta)
-                                                .color(
-                                                    ui.visuals()
-                                                        .widgets
-                                                        .noninteractive
-                                                        .fg_stroke
-                                                        .color,
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if is_selected {
+                                                    ui.label(
+                                                        egui::RichText::new("Selected")
+                                                            .color(
+                                                                ui.visuals().selection.stroke.color,
+                                                            )
+                                                            .strong(),
+                                                    );
+                                                } else if super::super::components::action_button(
+                                                    ui,
+                                                    "Use Theme",
+                                                    true,
                                                 )
-                                                .size(12.0),
+                                                .clicked()
+                                                {
+                                                    selected = Some(theme.name.clone());
+                                                }
+                                            },
                                         );
-                                    });
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if is_selected {
-                                                ui.label(
-                                                    egui::RichText::new("Selected")
-                                                        .color(ui.visuals().selection.stroke.color)
-                                                        .strong(),
-                                                );
-                                            } else if super::super::components::action_button(
-                                                ui,
-                                                "Use theme",
-                                                true,
-                                            )
-                                            .clicked()
-                                            {
-                                                selected = Some(theme.name.clone());
-                                            }
-                                        },
-                                    );
-                                });
-                                ui.add_space(8.0);
+                                    },
+                                );
+                                ui.add_space(4.0);
                                 match theme.palette_preview() {
                                     Ok(colors) => {
                                         ui.horizontal(|ui| {
@@ -516,10 +503,10 @@ mod tests {
     #[test]
     fn selecting_mac_light_switches_egui_to_light_theme() {
         let mut state = AppearanceState::default();
-        state.preferences.theme_name = String::from("Mac Light");
+        state.preferences.theme_name = String::from("Light");
         let ctx = egui::Context::default();
 
-        state.apply(&ctx).expect("Mac Light theme applies");
+        state.apply(&ctx).expect("Light theme applies");
 
         assert_eq!(ctx.theme(), egui::Theme::Light);
         assert_eq!(

@@ -1,4 +1,5 @@
 use crate::resolver::manifest::Ecosystem;
+use crate::vcs::VcsProvenance;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -20,6 +21,8 @@ pub struct DmzLockfile {
     pub version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_platform: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcs: Option<VcsProvenance>,
     pub closure_signature: String,
     pub packages: BTreeMap<String, LockedPackage>,
 }
@@ -64,9 +67,15 @@ impl DmzLockfile {
         Self {
             version: 1,
             target_platform,
+            vcs: None,
             closure_signature,
             packages: package_map,
         }
+    }
+
+    pub fn with_vcs(mut self, vcs: Option<VcsProvenance>) -> Self {
+        self.vcs = vcs;
+        self
     }
 
     /// Computes a deterministic SHA-256 signature across the entire ordered package map
