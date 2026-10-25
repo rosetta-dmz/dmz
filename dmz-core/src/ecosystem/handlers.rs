@@ -181,3 +181,53 @@ impl EcosystemHandler for PythonEcosystem {
         })
     }
 }
+
+pub struct PhpEcosystem;
+impl EcosystemHandler for PhpEcosystem {
+    fn name(&self) -> &str {
+        "php"
+    }
+    fn detect(&self, root: &Path) -> bool {
+        root.join("composer.json").exists()
+    }
+    fn cache_paths(&self, root: &Path) -> Vec<PathBuf> {
+        vec![root.join("vendor")]
+    }
+    fn resolution_command(&self) -> Option<CommandSpec> {
+        Some(CommandSpec {
+            program: "composer".into(),
+            args: vec!["install".into(), "--no-dev".into()],
+        })
+    }
+    fn verification_command(&self, _root: &Path) -> Option<CommandSpec> {
+        Some(CommandSpec {
+            program: "composer".into(),
+            args: vec!["validate".into()],
+        })
+    }
+}
+
+pub struct RubyEcosystem;
+impl EcosystemHandler for RubyEcosystem {
+    fn name(&self) -> &str {
+        "ruby"
+    }
+    fn detect(&self, root: &Path) -> bool {
+        root.join("Gemfile").exists()
+    }
+    fn cache_paths(&self, root: &Path) -> Vec<PathBuf> {
+        vec![root.join("vendor/bundle"), root.join(".bundle")]
+    }
+    fn resolution_command(&self) -> Option<CommandSpec> {
+        Some(CommandSpec {
+            program: "bundle".into(),
+            args: vec!["install".into(), "--path".into(), "vendor/bundle".into()],
+        })
+    }
+    fn verification_command(&self, _root: &Path) -> Option<CommandSpec> {
+        Some(CommandSpec {
+            program: "bundle".into(),
+            args: vec!["check".into()],
+        })
+    }
+}

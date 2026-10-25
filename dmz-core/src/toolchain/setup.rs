@@ -90,6 +90,24 @@ if [ -d "$DMZ_WS/.dmz/toolchains/python" ]; then
     export PYTHONHOME="$DMZ_WS/.dmz/toolchains/python"
 fi
 
+if [ -d "$DMZ_WS/.dmz/toolchains/cmake" ]; then
+    export CMAKE="$DMZ_WS/.dmz/toolchains/cmake/bin/cmake"
+    for cm_share in "$DMZ_WS"/.dmz/toolchains/cmake/share/cmake-*; do
+        if [ -d "$cm_share" ]; then
+            export CMAKE_ROOT="$cm_share"
+            break
+        fi
+    done
+fi
+
+if [ -d "$DMZ_WS/.dmz/toolchains/juce" ]; then
+    export JUCE_PATH="$DMZ_WS/.dmz/toolchains/juce"
+fi
+
+if [ -d "$DMZ_WS/.dmz/toolchains/pkgconfig" ]; then
+    export PKG_CONFIG="$DMZ_WS/.dmz/toolchains/pkgconfig/bin/pkg-config"
+fi
+
 echo "DMZ bundled toolchains activated. PATH and runtime variables configured."
 "#;
 
@@ -114,6 +132,18 @@ if exist "%DMZ_WORKSPACE%\.dmz\toolchains\go" (
 
 if exist "%DMZ_WORKSPACE%\.dmz\toolchains\python" (
     set "PYTHONHOME=%DMZ_WORKSPACE%\.dmz\toolchains\python"
+)
+
+if exist "%DMZ_WORKSPACE%\.dmz\toolchains\cmake\bin\cmake.exe" (
+    set "CMAKE=%DMZ_WORKSPACE%\.dmz\toolchains\cmake\bin\cmake.exe"
+)
+
+if exist "%DMZ_WORKSPACE%\.dmz\toolchains\juce" (
+    set "JUCE_PATH=%DMZ_WORKSPACE%\.dmz\toolchains\juce"
+)
+
+if exist "%DMZ_WORKSPACE%\.dmz\toolchains\pkgconfig\bin\pkg-config.exe" (
+    set "PKG_CONFIG=%DMZ_WORKSPACE%\.dmz\toolchains\pkgconfig\bin\pkg-config.exe"
 )
 
 echo DMZ bundled toolchains activated.

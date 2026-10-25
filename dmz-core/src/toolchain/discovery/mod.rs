@@ -1,18 +1,29 @@
 use super::types::{DiscoveredToolchain, ToolchainEcosystem};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
+pub mod cmake;
 pub mod go;
+pub mod juce;
+pub mod make;
+pub mod ninja;
 pub mod node;
 pub mod php;
+pub mod pkgconfig;
 pub mod python;
 pub mod ruby;
 pub mod rust;
 
+pub use cmake::CMakeDiscoverer;
 pub use go::GoDiscoverer;
+pub use juce::JuceDiscoverer;
+pub use make::MakeDiscoverer;
+pub use ninja::NinjaDiscoverer;
 pub use node::NodeDiscoverer;
 pub use php::PhpDiscoverer;
+pub use pkgconfig::PkgConfigDiscoverer;
 pub use python::PythonDiscoverer;
 pub use ruby::RubyDiscoverer;
 pub use rust::RustDiscoverer;
@@ -52,6 +63,11 @@ impl DiscoveryRegistry {
                 Box::new(GoDiscoverer),
                 Box::new(PhpDiscoverer),
                 Box::new(RubyDiscoverer),
+                Box::new(CMakeDiscoverer),
+                Box::new(NinjaDiscoverer),
+                Box::new(MakeDiscoverer),
+                Box::new(JuceDiscoverer),
+                Box::new(PkgConfigDiscoverer),
             ],
         }
     }
@@ -74,6 +90,22 @@ impl DiscoveryRegistry {
         for discoverer in &self.discoverers {
             if let Ok(Some(tc)) = discoverer.discover() {
                 toolchains.push(tc);
+            }
+        }
+        toolchains
+    }
+
+    /// Discovers standalone host toolchains scoped strictly to the specified active ecosystems.
+    pub fn discover_for_ecosystems(
+        &self,
+        ecosystems: &HashSet<ToolchainEcosystem>,
+    ) -> Vec<DiscoveredToolchain> {
+        let mut toolchains = Vec::new();
+        for discoverer in &self.discoverers {
+            if ecosystems.contains(&discoverer.ecosystem()) {
+                if let Ok(Some(tc)) = discoverer.discover() {
+                    toolchains.push(tc);
+                }
             }
         }
         toolchains
