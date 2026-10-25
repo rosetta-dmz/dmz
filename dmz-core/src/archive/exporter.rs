@@ -39,6 +39,8 @@ pub struct AirGapManifest {
     pub delta_base: Option<DeltaBaseInfo>,
     #[serde(default)]
     pub has_git_history: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toolchains: Vec<crate::toolchain::ToolchainManifestEntry>,
     pub closure_signature: String,
     pub package_count: usize,
     pub created_at_utc: u64,
@@ -56,6 +58,7 @@ pub struct ExportConfig {
     pub target_platform: Option<String>,
     pub with_git_history: bool,
     pub since: Option<String>,
+    pub with_toolchain: bool,
 }
 
 impl Default for ExportConfig {
@@ -70,6 +73,7 @@ impl Default for ExportConfig {
             target_platform: None,
             with_git_history: false,
             since: None,
+            with_toolchain: false,
         }
     }
 }
@@ -350,10 +354,38 @@ impl AirGapExporter {
             }
         }
 
+        // Capture host compiler toolchains if requested (`--with-toolchain`)
+        let mut toolchain_entries = Vec::new();
+        if config.with_toolchain {
+            info!("Initiating host toolchain discovery and packaging");
+            let active_eco_names: Vec<&str> = detected_stacks.iter().map(|s| s.as_str()).collect();
+            let discovered = crate::toolchain::ToolchainProvider::discover_active_toolchains(
+                &workspace_root,
+                &active_eco_names,
+            );
+            match crate::toolchain::ToolchainPackager::package_toolchains(
+                &mut tar_builder,
+                &discovered,
+            ) {
+                Ok(entries) => {
+                    info!(
+                        count = entries.len(),
+                        "Captured and packaged language toolchains into bundle"
+                    );
+                    toolchain_entries = entries;
+                }
+                Err(e) => {
+                    warn!("Toolchain packaging encountered error: {}", e);
+                }
+            }
+        }
+
+        let host_platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
         let target_platform = config
             .target_platform
             .clone()
-            .or_else(|| lockfile.target_platform.clone());
+            .or_else(|| lockfile.target_platform.clone())
+            .or_else(|| config.with_toolchain.then_some(host_platform));
 
         // Write air-gap manifest header
         let manifest = AirGapManifest {
@@ -362,6 +394,7 @@ impl AirGapExporter {
             vcs: vcs_provenance,
             delta_base,
             has_git_history,
+            toolchains: toolchain_entries,
             closure_signature: lockfile.closure_signature.clone(),
             package_count: packed_count,
             created_at_utc: std::time::SystemTime::now()

@@ -40,6 +40,8 @@ pub struct ImportResult {
     pub is_delta: bool,
     #[serde(default)]
     pub has_git_history: bool,
+    #[serde(default)]
+    pub has_toolchains: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcs: Option<VcsProvenance>,
 }
@@ -147,6 +149,7 @@ impl AirGapImporter {
         let mut imported_count = 0;
         let mut is_delta = false;
         let mut has_git_history = false;
+        let mut has_toolchains = false;
         let mut vcs_provenance = None;
 
         // Single-pass entry iteration, extraction, and verification
@@ -317,11 +320,54 @@ impl AirGapImporter {
                 })?;
 
                 imported_count += 1;
+            } else if path.starts_with("toolchains") {
+                let rel_path = path.strip_prefix("toolchains").unwrap_or(&path);
+                if rel_path.as_os_str().is_empty() {
+                    continue;
+                }
+
+                let dest_path = effective_workspace.join(".dmz/toolchains").join(rel_path);
+
+                if let Some(parent) = dest_path.parent() {
+                    if !parent.exists() {
+                        fs::create_dir_all(parent).map_err(|e| {
+                            ImportError::IoError(format!(
+                                "Failed to create toolchain path {:?}: {}",
+                                parent, e
+                            ))
+                        })?;
+                    }
+                }
+
+                entry.unpack(&dest_path).map_err(|e| {
+                    ImportError::ExtractionError(format!(
+                        "Failed to unpack toolchain file {:?}: {}",
+                        dest_path, e
+                    ))
+                })?;
+
+                has_toolchains = true;
             } else {
                 // Workspace source files (Cargo.toml, src/, etc.)
                 entry.unpack_in(&effective_workspace).map_err(|e| {
                     ImportError::ExtractionError(format!("Failed to unpack workspace file: {}", e))
                 })?;
+            }
+        }
+
+        // Setup imported toolchain permissions, quarantine flags, and activator scripts
+        if has_toolchains {
+            if let Err(e) =
+                crate::toolchain::ToolchainPackager::setup_imported_toolchains(&effective_workspace)
+            {
+                warn!(
+                    "Failed to finalize imported toolchains configuration: {}",
+                    e
+                );
+            } else {
+                info!(
+                    "Successfully materialized and activated bundled toolchains in .dmz/toolchains"
+                );
             }
         }
 
@@ -341,6 +387,7 @@ impl AirGapImporter {
             closure = %closure_signature,
             is_delta = is_delta,
             has_git = has_git_history,
+            has_toolchains = has_toolchains,
             "Air-gap import completed successfully"
         );
 
@@ -351,6 +398,7 @@ impl AirGapImporter {
             workspace_path: effective_workspace,
             is_delta,
             has_git_history,
+            has_toolchains,
             vcs: vcs_provenance,
         })
     }

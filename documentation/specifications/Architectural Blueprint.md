@@ -11,6 +11,7 @@ To achieve the "zero dependency factory" where open-source contributors can down
 * **Embedded Dependencies:** You link core functionalities directly into the binary rather than relying on host OS commands.  
   * *Git:* Embed `libgit2` (via the `git2-rs` crate) to handle repository cloning, hashing, and version control without requiring `git` to be installed on the host.  
   * *Archive/Compression:* Embed `tar` and `zstd` compression crates natively so the engine can pack and unpack `.nar` closures and OCI images offline.
+  * *Host Toolchain Packaging:* Discover and package active compiler toolchains (Rust `cargo`/`rustc` sysroot, Node.js, Python, Go, PHP, Ruby) directly into `.tar.zst` closures (`--with-toolchain`), autonomously unpack to `.dmz/toolchains/`, clear security quarantines (`xattr -cr` on macOS), and generate `.dmz/env.sh` / `.dmz/env.bat` environment activators.
 
 ### Daemonless Sandbox Engine (Workspace)**
 

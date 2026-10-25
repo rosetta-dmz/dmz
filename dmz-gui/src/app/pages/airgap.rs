@@ -32,6 +32,7 @@ pub(super) struct AirGapState {
     zstd_level: i32,
     auto_install: bool,
     verify_closure: bool,
+    with_toolchain: bool,
     show_export_tip: bool,
 }
 
@@ -45,6 +46,7 @@ impl Default for AirGapState {
             zstd_level: 3,
             auto_install: true,
             verify_closure: true,
+            with_toolchain: true,
             show_export_tip: true,
         }
     }
@@ -174,6 +176,12 @@ pub(super) fn show(
             ui.add(egui::Slider::new(&mut state.zstd_level, 1..=22).show_value(true));
         });
 
+        ui.add_space(8.0);
+        ui.checkbox(
+            &mut state.with_toolchain,
+            "Package active compiler toolchains into bundle (Rust, Node, Python, Go, PHP, Ruby)",
+        );
+
         ui.add_space(12.0);
         ui.horizontal_wrapped(|ui| {
             if components::action_button(ui, "Export Bundle", true).clicked() {
@@ -233,6 +241,7 @@ pub(super) fn show(
                     zstd_level: state.zstd_level,
                     mode: state.export_mode.into(),
                     target_platform: target_opt,
+                    with_toolchain: state.with_toolchain,
                     ..Default::default()
                 };
 
@@ -284,6 +293,7 @@ pub(super) fn show(
                     zstd_level: state.zstd_level,
                     mode: state.export_mode.into(),
                     target_platform: target_opt,
+                    with_toolchain: state.with_toolchain,
                     ..Default::default()
                 };
 

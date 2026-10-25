@@ -1013,6 +1013,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "which",
  "windows-sys 0.52.0",
  "zstd",
 ]

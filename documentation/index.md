@@ -33,7 +33,8 @@ The DMZ workspace is organized into **five primary crates**:
 * **[GUI User Workflow Guide](gui-user-workflow.md)** — Step-by-step GUI workflow instructions for workspace selection (open/save locations), dependency resolution, air-gap bundle export/import, package building, and sandbox testing.
 * **[CLI User Workflow Guide](dev-user-workflow.md)** — Terminal-based resolution, air-gap bundling, and sandbox execution workflow.
 * **[Version Control & Provenance Guide](version-control.md)** — Embedded `libgit2` repository provenance, Git bundle export/import, and incremental delta air-gap packaging.
-* **[Air-Gap Packaging & Transfer Guide]** — Complete instructions on bundling, cryptographically signing, and offline-importing `.tar.zst` closure archives with zero host dependencies.
+* **[Air-Gap Packaging & Transfer Guide](air-gap-pipeline.md)** — Complete instructions on bundling, cryptographically signing, and offline-importing `.tar.zst` closure archives with zero host dependencies.
+* **[Post-Import Tool Execution Guide](post-import-execution.md)** — Running project tools, compilers, and test suites after import via environment activators, `dmz shell`, or `dmz sandbox`.
 * **[Sandbox Execution & Isolation Guide]** — Managing process isolation, resource timeouts, and network-stripped execution boundaries.
 * **[Network Proxy & Whitelist Guide]** — Configuring outbound domain whitelists and reviewing proxy audit trails for AI agent workloads.
 
@@ -48,6 +49,7 @@ The DMZ workspace is organized into **five primary crates**:
 | Feature / Module | Status | Notes |
 | --- | --- | --- |
 | **`dmz-core` Air-Gap Import/Export** | **Implemented & Tested** | Fully functional `.tar.zst` packaging and SHA-256 verification. |
+| **Host Toolchain Packaging** | **Implemented & Tested** | Multi-ecosystem discovery (Rust, Node, Python, Go, PHP, Ruby), `.tar.zst` packaging, target extraction, and `.dmz/env.sh` activation. |
 | **Embedded `libgit2` & Resolution** | **Implemented** | Deterministic repository cloning and lockfile generation (`dmz.lock`). |
 | **`dmz-sandbox` Native Isolation** | **Partially Implemented** | Linux namespace and macOS seatbelt integrations are active; advanced Windows Job Object/WSL2 orchestrations are in progress. |
 | **`dmz-supervisor` & Proxy Auditor** | **Partially Implemented** | Core socket server and domain filtering exist; ephemeral `tmpfs` wipe-on-exit routines are actively being refined. |

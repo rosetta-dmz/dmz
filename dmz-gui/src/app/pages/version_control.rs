@@ -329,6 +329,7 @@ pub(super) fn show(
                     target_platform: None,
                     with_git_history: true,
                     since: Some(state.since_ref.clone()),
+                    with_toolchain: false,
                 };
 
                 match AirGapExporter::export(&config) {

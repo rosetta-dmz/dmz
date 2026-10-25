@@ -3,6 +3,8 @@
 ## Slated for Future Implementation:
 
 ### Stack Compatibility & Verification
+* **Native Toolchain Packaging (`--with-toolchain`):** *(Implemented & Verified)*
+  Automatic discovery, deterministic packaging, extraction, and environment wiring for host compilers and runtimes (Rust `cargo`/`rustc`, Node.js, Python, Go, PHP, Ruby) to enable true zero-dependency offline execution on target air-gapped machines.
 * **Automated Target VM Pre-flight Bundle Testing (Roadmap v1.2):**
   Automated spin-up of target-compatible lightweight VMs to execute pre-flight bundle compilation and verify runtime ABI/dynamic linker compatibility before deployment.
 * **System Package Stack Analysis (Roadmap v1.1):**

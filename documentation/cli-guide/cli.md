@@ -130,13 +130,47 @@ dmz ecosystem verify [OPTIONS]
 
 ---
 
+---
+
 ## Air-Gap Packaging & Distribution
 
-The air-gap command group (`dmz airgap export` and `dmz airgap import`) packages an entire project workspace alongside its locked dependency closures into a single, compressed, cryptographically verifiable `.tar.zst` archive.
+DMZ packages an entire project workspace alongside its locked dependency closures, version control provenance, and active compiler toolchains into a single, compressed, cryptographically verifiable `.tar.zst` archive.
+
+### One-Shot Air-Gap Bundling (`dmz bundle`)
+
+Performs one-shot resolution, dependency fetching, Git history archival, compiler toolchain packaging, and export into a self-contained `.tar.zst` air-gap bundle.
+
+```bash
+dmz bundle [OPTIONS]
+```
+
+#### **Options**
+* `-w, --workspace <PATH>` — Path to workspace root directory. *(Default: `.`)*
+* `-l, --lockfile <PATH>` — Destination path for generated lockfile. *(Default: `dmz.lock`)*
+* `-s, --store <PATH>` — Path to local dependency store directory. *(Default: `.dmz/store`)*
+* `-o, --output <PATH>` — Destination path for generated output archive. *(Default: `dist/workspace_closure.tar.zst`)*
+* `--mode <MODE>` — Export mode: `unified` (code + dependencies), `code-only`, or `deps-only`. *(Default: `unified`)*
+* `--zstd-level <LEVEL>` — Zstandard compression level from `1` to `22`. *(Default: `3`)*
+* `--with-toolchain` — Automatically captures host compiler runtimes (Rust `cargo`/`rustc`, Node.js, Python, Go, PHP, Ruby) directly into the bundle for true zero-dependency target execution.
+* `--with-git-history` — Archives a deterministic Git bundle v2 file (`workspace.bundle`) alongside the closure.
+* `--since <REF>` — Baseline commit, ref, or previous manifest/bundle for incremental delta export.
+* `--refresh-lock` — Force re-resolving dependency manifests even if `dmz.lock` already exists.
+* `-v, --verbose` — Enable verbose debug logging output.
+
+#### **Example**
+```bash
+# Export workspace, dependencies, Git history, and active compiler toolchains
+dmz bundle \
+    --with-toolchain \
+    --with-git-history \
+    --output dist/workspace_closure.tar.zst
+```
+
+---
 
 ### Exporting an Air-Gap Bundle (`dmz airgap export`)
 
-Bundles project workspace code, lockfiles, and secure dependency stores into an air-gap archive.
+Bundles existing workspace code, lockfiles, and secure dependency stores into an air-gap archive.
 
 ```bash
 dmz airgap export [OPTIONS]
@@ -149,6 +183,9 @@ dmz airgap export [OPTIONS]
 * `-o, --output <PATH>` — Destination path for generated `.tar.zst` archive. *(Default: `dist/airgap_bundle.tar.zst`)*
 * `--mode <MODE>` — Export mode: `unified` (code + dependencies), `code-only`, or `deps-only`. *(Default: `unified`)*
 * `--zstd-level <LEVEL>` — Zstandard compression level from `1` to `22`. *(Default: `3`)*
+* `--with-toolchain` — Package active compiler toolchains (cargo, rustc, node, go, python, php, ruby) into bundle.
+* `--with-git-history` — Archive deterministic Git bundle alongside closure.
+* `--since <REF>` — Baseline commit, ref, or previous manifest/bundle for incremental delta export.
 * `-v, --verbose` — Enable verbose debug logging output.
 
 #### **Example**
@@ -158,17 +195,24 @@ dmz airgap export \
     --lockfile dmz.lock \
     --store .dmz/store \
     --output dist/workspace_closure.tar.zst \
-    --mode unified
+    --mode unified \
+    --with-toolchain
 ```
 
 ---
 
-### Importing & Verifying an Air-Gap Bundle (`dmz airgap import`)
+### Importing & Verifying an Air-Gap Bundle (`dmz import` / `dmz airgap import`)
 
 Cryptographically validates the archive SHA-256 and internal `dmz.lock` closure signature, unpacks store packages into the target store, and extracts project source code into the specified workspace destination directory.
 
+When toolchains are bundled (`--with-toolchain`):
+- Extracted automatically to `<workspace>/.dmz/toolchains/<ecosystem>/` with executable (`0o755`) permissions.
+- Runs `xattr -cr` across `.dmz/toolchains` on macOS to eliminate Gatekeeper / quarantine restrictions.
+- Generates `.dmz/env.sh` (Unix/macOS) and `.dmz/env.bat` (Windows) activator scripts that prepend `.dmz/toolchains/*/bin` to `$PATH` and configure `CARGO_HOME`, `RUSTUP_HOME`, `GOROOT`, and `PYTHONHOME`.
+- Injected automatically into subsequent `dmz shell` and `dmz sandbox` sessions.
+
 ```bash
-dmz airgap import [OPTIONS] --archive <ARCHIVE>
+dmz import [OPTIONS] --archive <ARCHIVE>
 ```
 
 #### **Options**
@@ -182,13 +226,12 @@ dmz airgap import [OPTIONS] --archive <ARCHIVE>
 
 ```bash
 # Standard import (extracts store to ./offline_store and source to ./workspace)
-dmz airgap import --archive dist/workspace_closure.tar.zst --store ./offline_store
+dmz import --archive dist/workspace_closure.tar.zst --store ./offline_store
 
-# Custom destination workspace (e.g. testing in a fresh dmz-import directory)
-dmz airgap import \
-    --archive dist/workspace_closure.tar.zst \
-    --store ./dmz-import/offline_store \
-    --workspace ./dmz-import/workspace
+# Activate bundled compilers and compile offline
+cd workspace
+source .dmz/env.sh
+cargo run -p dmz-gui
 ```
 
 ---
