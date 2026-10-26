@@ -11,6 +11,12 @@ pub struct VcsProvenance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     pub dirty: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_untracked: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uncommitted_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub untracked_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -43,7 +49,8 @@ impl GitProvider {
         Ok(commit.id().to_string())
     }
 
-    /// Inspects workspace repository provenance: active commit, active branch, and dirty status.
+    /// Inspects workspace repository provenance: active commit, active branch, dirty status,
+    /// and full breakdown of uncommitted modified files and untracked files.
     /// Returns Ok(None) if workspace_path is not a git repository.
     pub fn get_provenance(workspace_path: &Path) -> Result<Option<VcsProvenance>, GitError> {
         let repo = match Repository::open(workspace_path) {
@@ -74,19 +81,59 @@ impl GitProvider {
 
         let mut status_opts = StatusOptions::new();
         status_opts.include_untracked(true);
+        status_opts.recurse_untracked_dirs(true);
         status_opts.renames_head_to_index(true);
         status_opts.renames_index_to_workdir(true);
 
-        let dirty = match repo.statuses(Some(&mut status_opts)) {
-            Ok(statuses) => !statuses.is_empty(),
-            Err(_) => false,
-        };
+        let mut uncommitted_files = Vec::new();
+        let mut untracked_files = Vec::new();
+
+        if let Ok(statuses) = repo.statuses(Some(&mut status_opts)) {
+            for entry in statuses.iter() {
+                let st = entry.status();
+                if let Some(path) = entry.path() {
+                    if st.intersects(
+                        git2::Status::INDEX_NEW
+                            | git2::Status::INDEX_MODIFIED
+                            | git2::Status::INDEX_DELETED
+                            | git2::Status::INDEX_RENAMED
+                            | git2::Status::INDEX_TYPECHANGE
+                            | git2::Status::WT_MODIFIED
+                            | git2::Status::WT_DELETED
+                            | git2::Status::WT_RENAMED
+                            | git2::Status::WT_TYPECHANGE,
+                    ) {
+                        uncommitted_files.push(path.to_string());
+                    } else if st.contains(git2::Status::WT_NEW) {
+                        untracked_files.push(path.to_string());
+                    }
+                }
+            }
+        }
+
+        let dirty = !uncommitted_files.is_empty();
+        let has_untracked = !untracked_files.is_empty();
 
         Ok(Some(VcsProvenance {
             commit,
             branch,
             dirty,
+            has_untracked,
+            uncommitted_files,
+            untracked_files,
         }))
+    }
+
+    /// Returns the list of uncommitted (modified, deleted, or staged) files in the workspace
+    pub fn get_uncommitted_files(workspace_path: &Path) -> Result<Vec<String>, GitError> {
+        let prov = Self::get_provenance(workspace_path)?;
+        Ok(prov.map(|p| p.uncommitted_files).unwrap_or_default())
+    }
+
+    /// Returns the list of untracked files in the workspace
+    pub fn get_untracked_files(workspace_path: &Path) -> Result<Vec<String>, GitError> {
+        let prov = Self::get_provenance(workspace_path)?;
+        Ok(prov.map(|p| p.untracked_files).unwrap_or_default())
     }
 
     /// Generates a deterministic Git bundle v2 file containing HEAD (and optionally incremental commits)

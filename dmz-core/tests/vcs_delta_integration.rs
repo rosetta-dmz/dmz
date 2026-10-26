@@ -33,6 +33,32 @@ fn commit_all(repo: &Repository, message: &str) -> String {
     commit_oid.to_string()
 }
 
+fn commit_path(repo: &Repository, path: &str, message: &str) -> String {
+    let mut index = repo.index().unwrap();
+    index.add_path(std::path::Path::new(path)).unwrap();
+    index.write().unwrap();
+    let tree_id = index.write_tree().unwrap();
+    let tree = repo.find_tree(tree_id).unwrap();
+
+    let sig = Signature::now("DMZ Test", "test@dmz.local").unwrap();
+
+    let parent = match repo.head() {
+        Ok(head) => Some(head.peel_to_commit().unwrap()),
+        Err(_) => None,
+    };
+
+    let parents: Vec<&git2::Commit> = match &parent {
+        Some(p) => vec![p],
+        None => vec![],
+    };
+
+    let commit_oid = repo
+        .commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
+        .unwrap();
+
+    commit_oid.to_string()
+}
+
 fn setup_git_workspace() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, String) {
     let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let workspace_path = tmp_dir.path().join("workspace");
@@ -110,7 +136,27 @@ fn test_git_provenance_detection() {
     assert_eq!(prov.commit, commit_id);
     assert!(!prov.dirty, "Repository should be clean initially");
 
-    // Modify a file without committing -> dirty flag must become true
+    // Add an untracked file without staging/committing -> dirty flag must remain false, but has_untracked must be true
+    fs::write(workspace.join("untracked_file.txt"), "hello untracked").unwrap();
+    let prov_with_untracked = GitProvider::get_provenance(&workspace)
+        .expect("GitProvider must succeed")
+        .expect("Provenance must be detected");
+    assert!(
+        !prov_with_untracked.dirty,
+        "Repository must not be flagged dirty solely due to untracked files"
+    );
+    assert!(
+        prov_with_untracked.has_untracked,
+        "Repository must report has_untracked = true when untracked files exist"
+    );
+    assert!(
+        prov_with_untracked
+            .untracked_files
+            .contains(&"untracked_file.txt".to_string()),
+        "untracked_files must include newly added untracked file"
+    );
+
+    // Modify a tracked file without committing -> dirty flag must become true and file listed in uncommitted_files
     fs::write(workspace.join("src/lib.rs"), "// dirty modification").unwrap();
 
     let prov_dirty = GitProvider::get_provenance(&workspace)
@@ -119,7 +165,32 @@ fn test_git_provenance_detection() {
 
     assert!(
         prov_dirty.dirty,
-        "Repository must be flagged dirty when files are modified"
+        "Repository must be flagged dirty when tracked files are modified"
+    );
+    assert!(
+        prov_dirty
+            .uncommitted_files
+            .contains(&"src/lib.rs".to_string()),
+        "uncommitted_files must list modified tracked file"
+    );
+
+    // Commit modified file -> dirty flag becomes false while untracked file continues to be reported
+    let repo = Repository::open(&workspace).unwrap();
+    commit_path(&repo, "src/lib.rs", "Commit modifications to src/lib.rs");
+    let prov_after_commit = GitProvider::get_provenance(&workspace)
+        .expect("GitProvider must succeed")
+        .expect("Provenance must be detected");
+    assert!(
+        !prov_after_commit.dirty,
+        "Repository must be clean once tracked changes are committed"
+    );
+    assert!(
+        prov_after_commit.has_untracked,
+        "Untracked file must still be detected after committing other tracked modifications"
+    );
+    assert!(
+        prov_after_commit.uncommitted_files.is_empty(),
+        "uncommitted_files must be empty after committing"
     );
 }
 
