@@ -148,15 +148,22 @@ endif()
 # Source this script to activate bundled compilers and runtimes:
 #   source .dmz/env.sh
 
+# Prevent zsh from aborting on non-matching globs
+if [ -n "$ZSH_VERSION" ]; then
+    setopt localoptions nonomatch nullglob 2>/dev/null || true
+fi
+
 DMZ_WS="$(cd "$(dirname "$0")/.." && pwd)"
 export DMZ_WORKSPACE="$DMZ_WS"
 
 # Prepend all bundled toolchain bin directories to PATH
-for tc_bin in "$DMZ_WS"/.dmz/toolchains/*/bin; do
-    if [ -d "$tc_bin" ]; then
-        export PATH="$tc_bin:$PATH"
-    fi
-done
+if [ -d "$DMZ_WS/.dmz/toolchains" ]; then
+    for tc_dir in "$DMZ_WS"/.dmz/toolchains/*; do
+        if [ -d "$tc_dir/bin" ]; then
+            export PATH="$tc_dir/bin:$PATH"
+        fi
+    done
+fi
 
 # Configure ecosystem environments
 if [ -d "$DMZ_WS/.dmz/toolchains/rust" ]; then
@@ -198,12 +205,18 @@ fi
 
 if [ -d "$DMZ_WS/.dmz/toolchains/cmake" ]; then
     export CMAKE="$DMZ_WS/.dmz/toolchains/cmake/bin/cmake"
-    for cm_share in "$DMZ_WS"/.dmz/toolchains/cmake/share/cmake-*; do
-        if [ -d "$cm_share" ]; then
-            export CMAKE_ROOT="$cm_share"
-            break
-        fi
-    done
+    if [ -d "$DMZ_WS/.dmz/toolchains/cmake/share" ]; then
+        for cm_share in "$DMZ_WS"/.dmz/toolchains/cmake/share/*; do
+            if [ -d "$cm_share" ]; then
+                case "$cm_share" in
+                    *cmake*)
+                        export CMAKE_ROOT="$cm_share"
+                        break
+                        ;;
+                esac
+            fi
+        done
+    fi
 fi
 
 if [ -f "$DMZ_WS/.dmz/toolchains/dmz.toolchain.cmake" ]; then
@@ -239,12 +252,28 @@ fi
 
 if [ -d "$DMZ_WS/.dmz/toolchains/applesdk" ]; then
     export DEVELOPER_DIR="$DMZ_WS/.dmz/toolchains/applesdk"
-    for sdk_path in "$DMZ_WS"/.dmz/toolchains/applesdk/Platforms/MacOSX.platform/Developer/SDKs/MacOSX*.sdk "$DMZ_WS"/.dmz/toolchains/applesdk/SDKs/MacOSX*.sdk; do
-        if [ -d "$sdk_path" ]; then
-            export SDKROOT="$sdk_path"
-            break
+    for sdk_parent in "$DMZ_WS/.dmz/toolchains/applesdk/Platforms/MacOSX.platform/Developer/SDKs" "$DMZ_WS/.dmz/toolchains/applesdk/SDKs"; do
+        if [ -d "$sdk_parent" ]; then
+            for sdk_path in "$sdk_parent"/*; do
+                if [ -d "$sdk_path" ]; then
+                    case "$sdk_path" in
+                        *.sdk)
+                            export SDKROOT="$sdk_path"
+                            break 2
+                            ;;
+                    esac
+                fi
+            done
         fi
     done
+    if [ -z "$SDKROOT" ]; then
+        if command -v xcrun >/dev/null 2>&1; then
+            _host_sdk="$(xcrun --show-sdk-path 2>/dev/null)"
+            if [ -n "$_host_sdk" ] && [ -d "$_host_sdk" ]; then
+                export SDKROOT="$_host_sdk"
+            fi
+        fi
+    fi
 fi
 
 if [ -d "$DMZ_WS/.dmz/toolchains/pkgconfig" ]; then
