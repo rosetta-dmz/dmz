@@ -76,7 +76,7 @@ cd my-workspace
 source .dmz/env.sh       # Or run inside an isolated sandbox via: dmz shell
 
 # Immediately compile and test using the bundled toolchains
-cargo run -p dmz-gui
+cargo run -p dmz-gui # Example
 ```
 
 ## License
