@@ -99,5 +99,42 @@ impl ToolchainEnv {
                 toolchains_dir.join("python").to_string_lossy().to_string(),
             );
         }
+
+        if toolchains_dir.join("cmake").exists() {
+            let cmake_dir = toolchains_dir.join("cmake");
+            let cmake_bin = cmake_dir.join("bin/cmake");
+            if cmake_bin.exists() {
+                env_map.insert("CMAKE".into(), cmake_bin.to_string_lossy().to_string());
+            }
+            let share_dir = cmake_dir.join("share");
+            if share_dir.is_dir() {
+                if let Ok(entries) = fs::read_dir(&share_dir) {
+                    for entry in entries.flatten() {
+                        let fname = entry.file_name();
+                        if fname.to_string_lossy().starts_with("cmake") {
+                            env_map.insert(
+                                "CMAKE_ROOT".into(),
+                                entry.path().to_string_lossy().to_string(),
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if toolchains_dir.join("juce").exists() {
+            env_map.insert(
+                "JUCE_PATH".into(),
+                toolchains_dir.join("juce").to_string_lossy().to_string(),
+            );
+        }
+
+        if toolchains_dir.join("pkgconfig").exists() {
+            let pkg_bin = toolchains_dir.join("pkgconfig/bin/pkg-config");
+            if pkg_bin.exists() {
+                env_map.insert("PKG_CONFIG".into(), pkg_bin.to_string_lossy().to_string());
+            }
+        }
     }
 }

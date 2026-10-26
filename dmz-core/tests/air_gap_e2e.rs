@@ -168,6 +168,16 @@ fn test_toolchain_packaging_and_import_roundtrip() -> anyhow::Result<()> {
         "Archive SHA256 must be computed"
     );
 
+    // Pure Rust workspace must only package Rust toolchain (no Go, Python, Node, etc.)
+    for tc in &manifest.toolchains {
+        assert_eq!(
+            tc.ecosystem,
+            dmz_core::toolchain::ToolchainEcosystem::Rust,
+            "Only Rust toolchain should be packaged for a pure Rust workspace, found {:?}",
+            tc.ecosystem
+        );
+    }
+
     // Test import on target
     let target_dir = tempdir()?;
     let import_target = target_dir.path().join("target_workspace");
@@ -206,6 +216,62 @@ fn test_toolchain_packaging_and_import_roundtrip() -> anyhow::Result<()> {
             "PATH should contain .dmz/toolchains"
         );
     }
+
+    Ok(())
+}
+
+#[test]
+fn test_native_build_tool_cmake_detection_and_packaging() -> anyhow::Result<()> {
+    let src_dir = tempdir()?;
+    let workspace_path = src_dir.path().join("mock_app_with_cmake");
+    fs::create_dir_all(&workspace_path)?;
+
+    fs::write(
+        workspace_path.join("Cargo.toml"),
+        "[package]\nname = \"native-test\"\nversion = \"0.1.0\"\n[dependencies]\ncmake = \"0.1\"",
+    )?;
+
+    // Simulate vendored cmake-rs crate
+    let vendor_cmake = workspace_path.join(".cargo/vendor/cmake-0.1.50");
+    fs::create_dir_all(&vendor_cmake)?;
+    fs::write(
+        vendor_cmake.join("Cargo.toml"),
+        "[package]\nname = \"cmake\"\nversion = \"0.1.50\"",
+    )?;
+
+    // Verify requirement detection detects both Rust and CMake
+    let detected =
+        dmz_core::toolchain::ToolchainProvider::detect_workspace_ecosystems(&workspace_path, None);
+    assert!(
+        detected.contains(&dmz_core::toolchain::ToolchainEcosystem::Rust),
+        "Must detect Rust"
+    );
+    assert!(
+        detected.contains(&dmz_core::toolchain::ToolchainEcosystem::CMake),
+        "Must detect CMake when cmake crate is vendored"
+    );
+
+    // Test environment injection when bundled cmake is present
+    let target_ws = src_dir.path().join("imported_target");
+    let cmake_bin_dir = target_ws.join(".dmz/toolchains/cmake/bin");
+    fs::create_dir_all(&cmake_bin_dir)?;
+    fs::write(cmake_bin_dir.join("cmake"), "#!/bin/sh\necho cmake")?;
+
+    let mut envs = std::collections::HashMap::new();
+    dmz_core::toolchain::ToolchainPackager::inject_toolchain_paths(&target_ws, &mut envs);
+
+    assert!(envs.contains_key("CMAKE"), "CMAKE env var must be injected");
+    assert!(
+        envs.get("CMAKE").unwrap().ends_with("bin/cmake"),
+        "CMAKE env var must point to cmake binary"
+    );
+    assert!(envs.contains_key("PATH"), "PATH must be injected");
+    assert!(
+        envs.get("PATH")
+            .unwrap()
+            .contains(".dmz/toolchains/cmake/bin"),
+        "PATH must contain cmake bin"
+    );
 
     Ok(())
 }

@@ -56,6 +56,8 @@ impl EcosystemRegistry {
                 Box::new(handlers::NpmEcosystem),
                 Box::new(handlers::GoEcosystem),
                 Box::new(handlers::PythonEcosystem),
+                Box::new(handlers::PhpEcosystem),
+                Box::new(handlers::RubyEcosystem),
             ],
         }
     }
