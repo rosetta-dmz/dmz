@@ -4,6 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
+pub mod android;
+pub mod apple;
+pub mod cc;
 pub mod cmake;
 pub mod go;
 pub mod juce;
@@ -16,6 +19,9 @@ pub mod python;
 pub mod ruby;
 pub mod rust;
 
+pub use android::AndroidNdkDiscoverer;
+pub use apple::AppleSdkDiscoverer;
+pub use cc::CcDiscoverer;
 pub use cmake::CMakeDiscoverer;
 pub use go::GoDiscoverer;
 pub use juce::JuceDiscoverer;
@@ -68,6 +74,9 @@ impl DiscoveryRegistry {
                 Box::new(MakeDiscoverer),
                 Box::new(JuceDiscoverer),
                 Box::new(PkgConfigDiscoverer),
+                Box::new(CcDiscoverer),
+                Box::new(AndroidNdkDiscoverer),
+                Box::new(AppleSdkDiscoverer),
             ],
         }
     }
