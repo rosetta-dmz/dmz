@@ -29,7 +29,7 @@ git tag -a v* -m "DMZ v*: DMZ Platform Release"
 git push origin v*
 ```
 
-**Note**: Creating the tag (`git tag`) is strictly local to your machine. Pushing the tag (`git push origin v*`) is what triggers the GitHub Actions release workflow ([`.github/workflows/release.yml`](../.github/workflows/release.yml)), which provisions multi-platform runners (`ubuntu-latest`, `macos-14`, `windows-latest`) to compile CLI/GUI binaries, generate release notes, and publish the release.
+**Note**: Creating the tag (`git tag`) is strictly local to your machine. Pushing the tag (`git push origin v*`) is what triggers the GitHub Actions release workflow ([`.github/workflows/release.yml`](../.github/workflows/release.yml)), which provisions multi-platform runners (`ubuntu-24.04`, `macos-15`, `windows-latest`) to compile CLI/GUI binaries, generate release notes, and publish the release.
 
 ```bash
 # (Optional) Monitor workflow progress in real-time

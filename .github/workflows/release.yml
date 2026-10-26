@@ -15,16 +15,16 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-musl
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -32,7 +32,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install Linux Musl Tools
-        if: matrix.os == 'ubuntu-latest'
+        if: contains(matrix.os, 'ubuntu')
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
@@ -52,7 +52,7 @@ jobs:
           fi
 
       - name: Upload CLI Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: cli-${{ matrix.target }}
           path: dist/*
@@ -63,16 +63,16 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             artifact_name: DMZ-GUI-Linux.tar.gz
-          - os: macos-14
+          - os: macos-15
             artifact_name: DMZ-GUI-macOS.zip
           - os: windows-latest
             artifact_name: DMZ-GUI-Windows.zip
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -128,7 +128,7 @@ jobs:
           zip -r DMZ-GUI-macOS.zip DMZ.app
 
       - name: Package Windows GUI
-        if: matrix.os == 'windows-latest'
+        if: contains(matrix.os, 'windows')
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist-gui
@@ -136,7 +136,7 @@ jobs:
           Compress-Archive -Path dist-gui/dmz-gui.exe -DestinationPath DMZ-GUI-Windows.zip -Force
 
       - name: Package Linux GUI
-        if: matrix.os == 'ubuntu-latest'
+        if: contains(matrix.os, 'ubuntu')
         shell: bash
         run: |
           mkdir -p dist-gui
@@ -145,7 +145,7 @@ jobs:
           tar -czvf DMZ-GUI-Linux.tar.gz -C dist-gui dmz-gui
 
       - name: Upload GUI Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: gui-${{ matrix.os }}
           path: ${{ matrix.artifact_name }}
@@ -153,13 +153,13 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: [build-cli, build-gui]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download All Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: final-release-assets
           merge-multiple: true
