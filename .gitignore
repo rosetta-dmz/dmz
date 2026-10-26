@@ -3,7 +3,7 @@
 **/*.rs.bk
 
 # --- Documentation Artifacts ---
-/documentation/
+/documentation/*
 !/documentation/**/*.md
 !/documentation/*.md
 

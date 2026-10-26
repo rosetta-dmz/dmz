@@ -69,22 +69,30 @@ pub(super) fn show(
                         ui.horizontal(|ui| {
                             let (badge_rect, _) = ui
                                 .allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                            let color = if prov.dirty {
-                                egui::Color32::from_rgb(230, 160, 40) // Amber for dirty
+                            let (color, text) = if prov.dirty && prov.has_untracked {
+                                (
+                                    egui::Color32::from_rgb(230, 160, 40),
+                                    "Detected (Uncommitted Changes & Untracked Files)",
+                                )
+                            } else if prov.dirty {
+                                (
+                                    egui::Color32::from_rgb(230, 160, 40),
+                                    "Detected (Uncommitted Changes)",
+                                )
+                            } else if prov.has_untracked {
+                                (
+                                    egui::Color32::from_rgb(100, 180, 240),
+                                    "Detected (Working Tree Clean, Untracked Files Present)",
+                                )
                             } else {
-                                egui::Color32::from_rgb(92, 224, 160) // Green for clean
+                                (
+                                    egui::Color32::from_rgb(92, 224, 160),
+                                    "Detected (Working Tree Clean)",
+                                )
                             };
                             ui.painter().circle_filled(badge_rect.center(), 5.0, color);
                             ui.add_space(4.0);
-                            ui.label(
-                                egui::RichText::new(if prov.dirty {
-                                    "Detected (Uncommitted Changes)"
-                                } else {
-                                    "Detected (Working Tree Clean)"
-                                })
-                                .color(color)
-                                .strong(),
-                            );
+                            ui.label(egui::RichText::new(text).color(color).strong());
                         });
                         ui.end_row();
 
@@ -95,6 +103,38 @@ pub(super) fn show(
                         ui.label("Active Branch:");
                         ui.monospace(prov.branch.as_deref().unwrap_or("(Detached HEAD)"));
                         ui.end_row();
+
+                        if prov.dirty && !prov.uncommitted_files.is_empty() {
+                            ui.label("Uncommitted Changes:");
+                            ui.vertical(|ui| {
+                                for f in prov.uncommitted_files.iter().take(5) {
+                                    ui.monospace(format!("  • {}", f));
+                                }
+                                if prov.uncommitted_files.len() > 5 {
+                                    ui.label(format!(
+                                        "  ... and {} more",
+                                        prov.uncommitted_files.len() - 5
+                                    ));
+                                }
+                            });
+                            ui.end_row();
+                        }
+
+                        if prov.has_untracked && !prov.untracked_files.is_empty() {
+                            ui.label("Untracked Files:");
+                            ui.vertical(|ui| {
+                                for f in prov.untracked_files.iter().take(5) {
+                                    ui.monospace(format!("  • {}", f));
+                                }
+                                if prov.untracked_files.len() > 5 {
+                                    ui.label(format!(
+                                        "  ... and {} more",
+                                        prov.untracked_files.len() - 5
+                                    ));
+                                }
+                            });
+                            ui.end_row();
+                        }
                     }
                     None => {
                         ui.label(
@@ -444,6 +484,14 @@ mod tests {
             let _ = ctx.run_ui(Default::default(), |ui| {
                 show(&mut state, ui, &mut ws, &mut lock, &mut msg);
             });
+        }
+
+        // When all changes are committed, cached provenance must detect working tree clean (dirty == false)
+        if let Some(ref prov) = state.cached_provenance {
+            assert!(
+                !prov.dirty,
+                "Expected working tree clean (dirty == false) when all changes are committed"
+            );
         }
     }
 }
