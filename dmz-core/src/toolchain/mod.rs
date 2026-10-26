@@ -5,9 +5,10 @@ pub mod setup;
 pub mod types;
 
 pub use discovery::{
-    emit_non_relocatable_notice, is_non_standalone_path, CMakeDiscoverer, DiscoveryRegistry,
-    GoDiscoverer, JuceDiscoverer, MakeDiscoverer, NinjaDiscoverer, NodeDiscoverer, PhpDiscoverer,
-    PkgConfigDiscoverer, PythonDiscoverer, RubyDiscoverer, RustDiscoverer, ToolchainDiscoverer,
+    emit_non_relocatable_notice, is_non_standalone_path, AndroidNdkDiscoverer, AppleSdkDiscoverer,
+    CMakeDiscoverer, CcDiscoverer, DiscoveryRegistry, GoDiscoverer, JuceDiscoverer, MakeDiscoverer,
+    NinjaDiscoverer, NodeDiscoverer, PhpDiscoverer, PkgConfigDiscoverer, PythonDiscoverer,
+    RubyDiscoverer, RustDiscoverer, ToolchainDiscoverer,
 };
 pub use env::ToolchainEnv;
 pub use packager::ToolchainArchivePackager;
@@ -67,15 +68,51 @@ fn scan_dir_for_ecosystems(
     // Auxiliary native build files
     if dir.join("CMakeLists.txt").is_file() {
         ecosystems.insert(ToolchainEcosystem::CMake);
+        ecosystems.insert(ToolchainEcosystem::Cc);
     }
     if dir.join("build.ninja").is_file() {
         ecosystems.insert(ToolchainEcosystem::Ninja);
+        ecosystems.insert(ToolchainEcosystem::Cc);
     }
     if dir.join("Makefile").is_file()
         || dir.join("GNUmakefile").is_file()
         || dir.join("makefile").is_file()
     {
         ecosystems.insert(ToolchainEcosystem::Make);
+        ecosystems.insert(ToolchainEcosystem::Cc);
+    }
+
+    // Android build manifests
+    if dir.join("AndroidManifest.xml").is_file()
+        || dir.join("Android.mk").is_file()
+        || dir.join("Application.mk").is_file()
+    {
+        ecosystems.insert(ToolchainEcosystem::AndroidNdk);
+        ecosystems.insert(ToolchainEcosystem::CMake);
+    }
+    for gradle_name in &["build.gradle", "build.gradle.kts"] {
+        let p = dir.join(gradle_name);
+        if p.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&p) {
+                if content.contains("android")
+                    || content.contains("ndk")
+                    || content.contains("externalNativeBuild")
+                    || content.contains("cmake")
+                {
+                    ecosystems.insert(ToolchainEcosystem::AndroidNdk);
+                    ecosystems.insert(ToolchainEcosystem::CMake);
+                }
+            }
+        }
+    }
+
+    // Apple project manifests
+    if dir.join("Package.swift").is_file()
+        || dir.join("Podfile").is_file()
+        || dir.join("Cartfile").is_file()
+    {
+        ecosystems.insert(ToolchainEcosystem::AppleSdk);
+        ecosystems.insert(ToolchainEcosystem::Cc);
     }
 
     if depth < max_depth {
@@ -96,16 +133,24 @@ fn scan_dir_for_ecosystems(
                     {
                         continue;
                     }
+                    if name_str.ends_with(".xcodeproj") || name_str.ends_with(".xcworkspace") {
+                        ecosystems.insert(ToolchainEcosystem::AppleSdk);
+                        ecosystems.insert(ToolchainEcosystem::Cc);
+                    }
                     if name_str == "modules" && path.join("juce_core").exists() {
                         ecosystems.insert(ToolchainEcosystem::Juce);
+                        ecosystems.insert(ToolchainEcosystem::Cc);
                     }
                     scan_dir_for_ecosystems(&path, depth + 1, max_depth, ecosystems);
                 } else if path.is_file() {
                     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                     if ext == "jucer" {
                         ecosystems.insert(ToolchainEcosystem::Juce);
+                        ecosystems.insert(ToolchainEcosystem::Cc);
                     } else if ext == "pc" {
                         ecosystems.insert(ToolchainEcosystem::PkgConfig);
+                    } else if matches!(ext, "c" | "cpp" | "cc" | "cxx" | "h" | "hpp") {
+                        ecosystems.insert(ToolchainEcosystem::Cc);
                     }
                 }
             }
@@ -158,6 +203,19 @@ impl ToolchainProvider {
                 ecosystems.insert(ToolchainEcosystem::Juce);
             } else if s == "pkg-config" || s.starts_with("pkg-config-") || s == "pkgconf" {
                 ecosystems.insert(ToolchainEcosystem::PkgConfig);
+            } else if s == "cc" || s.starts_with("cc-") || s == "clang" || s == "gcc" {
+                ecosystems.insert(ToolchainEcosystem::Cc);
+            } else if s.contains("android") || s.contains("ndk") {
+                ecosystems.insert(ToolchainEcosystem::AndroidNdk);
+            } else if s.contains("swift")
+                || s.contains("apple")
+                || s.contains("xcode")
+                || s == "objc"
+                || s.starts_with("objc-")
+                || s.starts_with("metal-")
+                || s.starts_with("core-foundation")
+            {
+                ecosystems.insert(ToolchainEcosystem::AppleSdk);
             }
         };
 
@@ -200,6 +258,12 @@ impl ToolchainProvider {
                 if content.contains("name = \"pkg-config\"") || content.contains("\"pkg-config\"") {
                     ecosystems.insert(ToolchainEcosystem::PkgConfig);
                 }
+                if content.contains("name = \"cc\"") || content.contains("\"cc\"") {
+                    ecosystems.insert(ToolchainEcosystem::Cc);
+                }
+                if content.contains("android") || content.contains("ndk") {
+                    ecosystems.insert(ToolchainEcosystem::AndroidNdk);
+                }
             }
         }
 
@@ -217,6 +281,30 @@ impl ToolchainProvider {
                     }
                 }
             }
+        }
+
+        // 5. Companion toolchain inference & propagation
+        if ecosystems.contains(&ToolchainEcosystem::CMake) {
+            ecosystems.insert(ToolchainEcosystem::Cc);
+            if !ecosystems.contains(&ToolchainEcosystem::Make) {
+                ecosystems.insert(ToolchainEcosystem::Ninja);
+            }
+        }
+        if ecosystems.contains(&ToolchainEcosystem::Make)
+            || ecosystems.contains(&ToolchainEcosystem::Ninja)
+        {
+            ecosystems.insert(ToolchainEcosystem::Cc);
+        }
+        if ecosystems.contains(&ToolchainEcosystem::Juce) {
+            ecosystems.insert(ToolchainEcosystem::Cc);
+            ecosystems.insert(ToolchainEcosystem::CMake);
+        }
+        if ecosystems.contains(&ToolchainEcosystem::AndroidNdk) {
+            ecosystems.insert(ToolchainEcosystem::CMake);
+            ecosystems.insert(ToolchainEcosystem::Ninja);
+        }
+        if ecosystems.contains(&ToolchainEcosystem::AppleSdk) {
+            ecosystems.insert(ToolchainEcosystem::Cc);
         }
 
         ecosystems
@@ -322,6 +410,24 @@ impl ToolchainProvider {
     #[inline]
     pub fn discover_pkgconfig() -> Result<Option<DiscoveredToolchain>, String> {
         PkgConfigDiscoverer.discover()
+    }
+
+    /// Discovers standalone C/C++ compiler toolchain.
+    #[inline]
+    pub fn discover_cc() -> Result<Option<DiscoveredToolchain>, String> {
+        CcDiscoverer.discover()
+    }
+
+    /// Discovers standalone Android NDK distribution.
+    #[inline]
+    pub fn discover_android_ndk() -> Result<Option<DiscoveredToolchain>, String> {
+        AndroidNdkDiscoverer.discover()
+    }
+
+    /// Discovers Apple Developer SDK and toolchain distribution.
+    #[inline]
+    pub fn discover_apple_sdk() -> Result<Option<DiscoveredToolchain>, String> {
+        AppleSdkDiscoverer.discover()
     }
 }
 
@@ -436,7 +542,10 @@ mod tests {
         assert_eq!(ToolchainEcosystem::Make.as_str(), "make");
         assert_eq!(ToolchainEcosystem::Juce.as_str(), "juce");
         assert_eq!(ToolchainEcosystem::PkgConfig.as_str(), "pkgconfig");
-        assert_eq!(ToolchainEcosystem::all().len(), 11);
+        assert_eq!(ToolchainEcosystem::Cc.as_str(), "cc");
+        assert_eq!(ToolchainEcosystem::AndroidNdk.as_str(), "androidndk");
+        assert_eq!(ToolchainEcosystem::AppleSdk.as_str(), "applesdk");
+        assert_eq!(ToolchainEcosystem::all().len(), 14);
     }
 
     #[test]
@@ -621,11 +730,100 @@ mod tests {
             mock_toolchain: Some(go_tc),
         }));
 
-        let mut filter = HashSet::new();
-        filter.insert(ToolchainEcosystem::Rust);
+        let filter = vec![ToolchainEcosystem::Rust]
+            .into_iter()
+            .collect::<HashSet<_>>();
 
         let discovered = registry.discover_for_ecosystems(&filter);
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0].ecosystem, ToolchainEcosystem::Rust);
+    }
+
+    #[test]
+    fn test_detect_android_ndk_manifest_and_companion_inference() {
+        let temp = tempfile::tempdir().unwrap();
+        let ws = temp.path();
+        std::fs::write(
+            ws.join("build.gradle"),
+            "android {\n    ndkVersion \"26.1.10909125\"\n}\n",
+        )
+        .unwrap();
+
+        let detected = ToolchainProvider::detect_workspace_ecosystems(ws, None);
+        assert!(
+            detected.contains(&ToolchainEcosystem::AndroidNdk),
+            "Must detect Android NDK from build.gradle"
+        );
+        assert!(
+            detected.contains(&ToolchainEcosystem::CMake),
+            "Must infer companion CMake when Android NDK is required"
+        );
+        assert!(
+            detected.contains(&ToolchainEcosystem::Ninja),
+            "Must infer companion Ninja when Android NDK is required"
+        );
+    }
+
+    #[test]
+    fn test_detect_apple_sdk_manifest_and_companion_inference() {
+        let temp = tempfile::tempdir().unwrap();
+        let ws = temp.path();
+        std::fs::write(
+            ws.join("Package.swift"),
+            "// swift-tools-version:5.9\nimport PackageDescription\nlet package = Package(name: \"MyPkg\")\n",
+        )
+        .unwrap();
+
+        let detected = ToolchainProvider::detect_workspace_ecosystems(ws, None);
+        assert!(
+            detected.contains(&ToolchainEcosystem::AppleSdk),
+            "Must detect Apple SDK from Package.swift"
+        );
+        assert!(
+            detected.contains(&ToolchainEcosystem::Cc),
+            "Must infer companion Cc compiler when Apple SDK is required"
+        );
+    }
+
+    #[test]
+    fn test_detect_android_and_apple_from_lockfile() {
+        let temp = tempfile::tempdir().unwrap();
+        let ws = temp.path();
+
+        let mut packages = std::collections::BTreeMap::new();
+        packages.insert(
+            "ndk-sys:0.5.0".into(),
+            crate::resolver::lockfile::LockedPackage {
+                name: "ndk-sys".into(),
+                version: "0.5.0".into(),
+                ecosystem: crate::resolver::manifest::Ecosystem::Cargo,
+                sha256: "fake".into(),
+                source_url: None,
+                dependencies: vec![],
+            },
+        );
+        packages.insert(
+            "swift-rs:1.0.0".into(),
+            crate::resolver::lockfile::LockedPackage {
+                name: "swift-rs".into(),
+                version: "1.0.0".into(),
+                ecosystem: crate::resolver::manifest::Ecosystem::Cargo,
+                sha256: "fake".into(),
+                source_url: None,
+                dependencies: vec![],
+            },
+        );
+
+        let lockfile = crate::resolver::lockfile::DmzLockfile {
+            version: 1,
+            target_platform: None,
+            vcs: None,
+            closure_signature: "sig".into(),
+            packages,
+        };
+
+        let detected = ToolchainProvider::detect_workspace_ecosystems(ws, Some(&lockfile));
+        assert!(detected.contains(&ToolchainEcosystem::AndroidNdk));
+        assert!(detected.contains(&ToolchainEcosystem::AppleSdk));
     }
 }

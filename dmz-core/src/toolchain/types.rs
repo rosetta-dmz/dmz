@@ -18,6 +18,9 @@ pub enum ToolchainEcosystem {
     Make,
     Juce,
     PkgConfig,
+    Cc,
+    AndroidNdk,
+    AppleSdk,
 }
 
 impl ToolchainEcosystem {
@@ -35,6 +38,9 @@ impl ToolchainEcosystem {
             Self::Make => "make",
             Self::Juce => "juce",
             Self::PkgConfig => "pkgconfig",
+            Self::Cc => "cc",
+            Self::AndroidNdk => "androidndk",
+            Self::AppleSdk => "applesdk",
         }
     }
 
@@ -52,6 +58,9 @@ impl ToolchainEcosystem {
             Self::Make,
             Self::Juce,
             Self::PkgConfig,
+            Self::Cc,
+            Self::AndroidNdk,
+            Self::AppleSdk,
         ]
     }
 
@@ -67,7 +76,14 @@ impl ToolchainEcosystem {
     pub fn is_auxiliary_build_tool(&self) -> bool {
         matches!(
             self,
-            Self::CMake | Self::Ninja | Self::Make | Self::Juce | Self::PkgConfig
+            Self::CMake
+                | Self::Ninja
+                | Self::Make
+                | Self::Juce
+                | Self::PkgConfig
+                | Self::Cc
+                | Self::AndroidNdk
+                | Self::AppleSdk
         )
     }
 
@@ -87,6 +103,9 @@ impl ToolchainEcosystem {
             "make" | "gmake" => Some(Self::Make),
             "juce" | "projucer" => Some(Self::Juce),
             "pkgconfig" | "pkg-config" | "pkgconf" => Some(Self::PkgConfig),
+            "cc" | "c" | "cpp" | "c++" | "clang" | "gcc" | "llvm" => Some(Self::Cc),
+            "android" | "androidndk" | "ndk" => Some(Self::AndroidNdk),
+            "apple" | "applesdk" | "xcode" | "swift" | "darwin" => Some(Self::AppleSdk),
             _ => None,
         }
     }
