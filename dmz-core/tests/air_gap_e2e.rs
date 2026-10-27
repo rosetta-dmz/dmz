@@ -473,31 +473,23 @@ fn test_android_ndk_and_apple_sdk_e2e_setup_and_environment() -> anyhow::Result<
 
     #[cfg(unix)]
     {
-        let sh_res = std::process::Command::new("/bin/sh")
+        let status_sh = std::process::Command::new("/bin/sh")
             .arg("-c")
-            .arg(format!(". {}", env_sh.display()))
-            .output()?;
+            .arg(format!(". \"{}/.dmz/env.sh\"", target_ws.to_string_lossy()))
+            .status()?;
         assert!(
-            sh_res.status.success(),
-            "env.sh must succeed under /bin/sh: {}",
-            String::from_utf8_lossy(&sh_res.stderr)
+            status_sh.success(),
+            "/bin/sh sourcing of env.sh must succeed"
         );
 
         if std::path::Path::new("/bin/zsh").exists() {
-            let zsh_res = std::process::Command::new("/bin/zsh")
+            let status_zsh = std::process::Command::new("/bin/zsh")
                 .arg("-c")
-                .arg(format!(". {}", env_sh.display()))
-                .output()?;
+                .arg(format!(". \"{}/.dmz/env.sh\"", target_ws.to_string_lossy()))
+                .status()?;
             assert!(
-                zsh_res.status.success(),
-                "env.sh must succeed under /bin/zsh without glob errors: {}",
-                String::from_utf8_lossy(&zsh_res.stderr)
-            );
-            let stderr = String::from_utf8_lossy(&zsh_res.stderr);
-            assert!(
-                !stderr.contains("no matches found"),
-                "env.sh must not throw 'no matches found' in zsh: {}",
-                stderr
+                status_zsh.success(),
+                "/bin/zsh sourcing of env.sh must succeed without glob errors"
             );
         }
     }

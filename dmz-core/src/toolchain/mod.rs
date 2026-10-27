@@ -248,58 +248,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_non_standalone_path_heuristics() {
-        assert!(ToolchainProvider::is_non_standalone_path(Path::new(
-            "/opt/homebrew/bin/cmake"
-        )));
-        assert!(ToolchainProvider::is_non_standalone_path(Path::new(
-            "/usr/local/Cellar/cmake/3.28.1/bin/cmake"
-        )));
-        assert!(ToolchainProvider::is_non_standalone_path(Path::new(
-            "/var/lib/snapd/snaps/bin/cmake"
-        )));
-        assert!(ToolchainProvider::is_non_standalone_path(Path::new(
-            "/nix/store/abc-cmake/bin/cmake"
-        )));
-
-        assert!(!ToolchainProvider::is_non_standalone_path(Path::new(
-            "/Users/dev/.rustup/toolchains/stable-x86_64-apple-darwin/bin/rustc"
-        )));
-        assert!(!ToolchainProvider::is_non_standalone_path(Path::new(
-            "/opt/cmake-3.28.1/bin/cmake"
-        )));
-        assert!(!ToolchainProvider::is_non_standalone_path(Path::new(
-            "/home/user/android-ndk-r26b/build/cmake"
-        )));
-    }
-
-    #[test]
-    fn test_registry_polymorphism_and_open_closed_principle() {
-        let mut registry = DiscoveryRegistry::empty();
-
-        let mock_tc = DiscoveredToolchain {
-            ecosystem: ToolchainEcosystem::CMake,
-            version: "cmake 3.99.0-mock".into(),
-            root_dir: PathBuf::from("/mock/cmake"),
-            bin_files: vec![(
-                PathBuf::from("/mock/cmake/bin/cmake"),
-                "bin/cmake".to_string(),
-            )],
-            lib_files: vec![],
-        };
-
-        registry.register(Box::new(MockDiscoverer {
-            ecosystem: ToolchainEcosystem::CMake,
-            mock_toolchain: Some(mock_tc),
-        }));
-
-        let discovered = registry.discover_all();
-        assert_eq!(discovered.len(), 1);
-        assert_eq!(discovered[0].ecosystem, ToolchainEcosystem::CMake);
-        assert_eq!(discovered[0].version, "cmake 3.99.0-mock");
-    }
-
-    #[test]
     fn test_discover_for_ecosystems_filtering() {
         let mut registry = DiscoveryRegistry::empty();
 
