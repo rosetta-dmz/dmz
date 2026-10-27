@@ -471,5 +471,36 @@ fn test_android_ndk_and_apple_sdk_e2e_setup_and_environment() -> anyhow::Result<
         "PATH must contain applesdk bin"
     );
 
+    #[cfg(unix)]
+    {
+        let sh_res = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(". {}", env_sh.display()))
+            .output()?;
+        assert!(
+            sh_res.status.success(),
+            "env.sh must succeed under /bin/sh: {}",
+            String::from_utf8_lossy(&sh_res.stderr)
+        );
+
+        if std::path::Path::new("/bin/zsh").exists() {
+            let zsh_res = std::process::Command::new("/bin/zsh")
+                .arg("-c")
+                .arg(format!(". {}", env_sh.display()))
+                .output()?;
+            assert!(
+                zsh_res.status.success(),
+                "env.sh must succeed under /bin/zsh without glob errors: {}",
+                String::from_utf8_lossy(&zsh_res.stderr)
+            );
+            let stderr = String::from_utf8_lossy(&zsh_res.stderr);
+            assert!(
+                !stderr.contains("no matches found"),
+                "env.sh must not throw 'no matches found' in zsh: {}",
+                stderr
+            );
+        }
+    }
+
     Ok(())
 }
