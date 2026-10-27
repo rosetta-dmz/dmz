@@ -48,11 +48,14 @@ impl ToolchainSetup {
                 .output();
         }
 
-        // 3. Generate .dmz/toolchains/dmz.toolchain.cmake if cmake or cc toolchains are present
+        // 3. Generate .dmz/toolchains/dmz.toolchain.cmake only if CMake is actually used
         Self::generate_cmake_toolchain(workspace_root)?;
 
         // 4. Generate .dmz/env.sh and .dmz/env.bat activator scripts
         Self::generate_activator_scripts(workspace_root)?;
+
+        // 5. Configure IDE workspace settings (.vscode/settings.json)
+        Self::generate_ide_settings(workspace_root)?;
 
         Ok(())
     }
@@ -64,13 +67,16 @@ impl ToolchainSetup {
             return Ok(());
         }
 
-        let has_cmake_or_native = toolchains_dir.join("cmake").exists()
-            || toolchains_dir.join("cc").exists()
+        let has_cmake_or_cross_toolchain = toolchains_dir.join("cmake").exists()
+            || workspace_root.join("CMakeLists.txt").exists()
             || toolchains_dir.join("androidndk").exists()
-            || toolchains_dir.join("applesdk").exists()
-            || workspace_root.join("CMakeLists.txt").exists();
+            || toolchains_dir.join("applesdk").exists();
 
-        if !has_cmake_or_native {
+        if !has_cmake_or_cross_toolchain {
+            let stale_cmake = toolchains_dir.join("dmz.toolchain.cmake");
+            if stale_cmake.exists() {
+                let _ = fs::remove_file(stale_cmake);
+            }
             return Ok(());
         }
 
@@ -163,7 +169,24 @@ if [ -n "$ZSH_VERSION" ]; then
     setopt localoptions nonomatch nullglob 2>/dev/null || true
 fi
 
-DMZ_WS="$(cd "$(dirname "$0")/.." && pwd)"
+# Determine DMZ workspace root reliably across bash, zsh, and dash/POSIX sh
+if [ -n "$BASH_SOURCE" ]; then
+    _DMZ_SELF="$BASH_SOURCE"
+elif [ -n "$ZSH_VERSION" ]; then
+    _DMZ_SELF="${(%):-%x}"
+else
+    _DMZ_SELF="$0"
+fi
+
+if [ -f "$_DMZ_SELF" ]; then
+    DMZ_WS="$(cd "$(dirname "$_DMZ_SELF")/.." && pwd)"
+elif [ -d "./.dmz" ]; then
+    DMZ_WS="$(pwd)"
+elif [ -d "../.dmz" ]; then
+    DMZ_WS="$(cd .. && pwd)"
+else
+    DMZ_WS="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
+fi
 export DMZ_WORKSPACE="$DMZ_WS"
 
 # Prepend all bundled toolchain bin directories to PATH
@@ -189,6 +212,20 @@ fi
 
 if [ -d "$DMZ_WS/.dmz/toolchains/python" ]; then
     export PYTHONHOME="$DMZ_WS/.dmz/toolchains/python"
+fi
+
+if [ -d "$DMZ_WS/.dmz/toolchains/node" ]; then
+    if [ -d "$DMZ_WS/.dmz/toolchains/node/lib/node_modules" ]; then
+        export NODE_PATH="$DMZ_WS/.dmz/toolchains/node/lib/node_modules${NODE_PATH:+:$NODE_PATH}"
+    fi
+fi
+
+if [ -d "$DMZ_WS/.dmz/toolchains/php" ]; then
+    export PHPRC="$DMZ_WS/.dmz/toolchains/php"
+fi
+
+if [ -d "$DMZ_WS/.dmz/toolchains/ruby" ]; then
+    export GEM_HOME="$DMZ_WS/.dmz/toolchains/ruby"
 fi
 
 if [ -d "$DMZ_WS/.dmz/toolchains/cc" ]; then
@@ -225,7 +262,7 @@ if [ -f "$DMZ_WS/.dmz/toolchains/cmake/bin/cmake" ]; then
     fi
 fi
 
-if [ -f "$DMZ_WS/.dmz/toolchains/dmz.toolchain.cmake" ] && ([ -d "$DMZ_WS/.dmz/toolchains/cmake" ] || [ -f "$DMZ_WS/CMakeLists.txt" ] || command -v cmake >/dev/null 2>&1); then
+if [ -f "$DMZ_WS/.dmz/toolchains/dmz.toolchain.cmake" ] && ([ -d "$DMZ_WS/.dmz/toolchains/cmake" ] || [ -f "$DMZ_WS/CMakeLists.txt" ]); then
     export CMAKE_TOOLCHAIN_FILE="$DMZ_WS/.dmz/toolchains/dmz.toolchain.cmake"
     export HOST_CMAKE_TOOLCHAIN_FILE="$DMZ_WS/.dmz/toolchains/dmz.toolchain.cmake"
     export TARGET_CMAKE_TOOLCHAIN_FILE="$DMZ_WS/.dmz/toolchains/dmz.toolchain.cmake"
@@ -309,6 +346,18 @@ if exist "%DMZ_WORKSPACE%\.dmz\toolchains\python" (
     set "PYTHONHOME=%DMZ_WORKSPACE%\.dmz\toolchains\python"
 )
 
+if exist "%DMZ_WORKSPACE%\.dmz\toolchains\node\lib\node_modules" (
+    set "NODE_PATH=%DMZ_WORKSPACE%\.dmz\toolchains\node\lib\node_modules;%NODE_PATH%"
+)
+
+if exist "%DMZ_WORKSPACE%\.dmz\toolchains\php" (
+    set "PHPRC=%DMZ_WORKSPACE%\.dmz\toolchains\php"
+)
+
+if exist "%DMZ_WORKSPACE%\.dmz\toolchains\ruby" (
+    set "GEM_HOME=%DMZ_WORKSPACE%\.dmz\toolchains\ruby"
+)
+
 if exist "%DMZ_WORKSPACE%\.dmz\toolchains\cc\bin\clang.exe" (
     set "CC=%DMZ_WORKSPACE%\.dmz\toolchains\cc\bin\clang.exe"
     set "CXX=%DMZ_WORKSPACE%\.dmz\toolchains\cc\bin\clang++.exe"
@@ -371,5 +420,245 @@ echo DMZ bundled toolchains activated.
             .map_err(|e| format!("Failed to write env.bat: {}", e))?;
 
         Ok(())
+    }
+
+    /// Configures `.vscode/settings.json` so IDE extensions work out-of-the-box in air-gapped environments.
+    /// In non-CMake workspaces, silences CMake Tools extension auto-probing to eliminate "Bad CMake executable: ''" popups.
+    /// In CMake workspaces with bundled CMake, automatically configures cmake.cmakePath and toolchain file.
+    /// Pre-configures terminal PATH and language server environments (such as rust-analyzer).
+    pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), String> {
+        let vscode_dir = workspace_root.join(".vscode");
+        let settings_path = vscode_dir.join("settings.json");
+
+        let mut settings: serde_json::Map<String, serde_json::Value> = if settings_path.exists() {
+            match fs::read_to_string(&settings_path) {
+                Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+                Err(_) => serde_json::Map::new(),
+            }
+        } else {
+            serde_json::Map::new()
+        };
+
+        let toolchains_dir = workspace_root.join(".dmz/toolchains");
+        let has_cmake =
+            workspace_root.join("CMakeLists.txt").exists() || toolchains_dir.join("cmake").exists();
+
+        if has_cmake {
+            if toolchains_dir.join("cmake/bin/cmake").exists() {
+                settings.insert(
+                    "cmake.cmakePath".into(),
+                    serde_json::Value::String(
+                        "${workspaceFolder}/.dmz/toolchains/cmake/bin/cmake".into(),
+                    ),
+                );
+            }
+            if toolchains_dir.join("dmz.toolchain.cmake").exists() {
+                let mut configure_settings = settings
+                    .get("cmake.configureSettings")
+                    .and_then(|v| v.as_object().cloned())
+                    .unwrap_or_default();
+                configure_settings.insert(
+                    "CMAKE_TOOLCHAIN_FILE".into(),
+                    serde_json::Value::String(
+                        "${workspaceFolder}/.dmz/toolchains/dmz.toolchain.cmake".into(),
+                    ),
+                );
+                settings.insert(
+                    "cmake.configureSettings".into(),
+                    serde_json::Value::Object(configure_settings),
+                );
+            }
+            settings.insert(
+                "cmake.configureOnOpen".into(),
+                serde_json::Value::Bool(true),
+            );
+        } else {
+            // Workspace does NOT use CMake. Explicitly disable CMake Tools auto-probing
+            // to eliminate IDE popups ("Bad CMake executable: ''").
+            settings.insert(
+                "cmake.configureOnOpen".into(),
+                serde_json::Value::Bool(false),
+            );
+            settings.insert(
+                "cmake.autoSelectActiveFolder".into(),
+                serde_json::Value::Bool(false),
+            );
+        }
+
+        // Configure terminal environment for bundled toolchains (e.g., Rust, Go, Python)
+        if toolchains_dir.exists() {
+            let mut bin_subpaths: Vec<String> = Vec::new();
+            if let Ok(entries) = fs::read_dir(&toolchains_dir) {
+                for entry in entries.flatten() {
+                    let bin = entry.path().join("bin");
+                    if bin.exists() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        bin_subpaths
+                            .push(format!("${{workspaceFolder}}/.dmz/toolchains/{}/bin", name));
+                    }
+                }
+            }
+
+            if !bin_subpaths.is_empty() {
+                let unix_path = format!("{}:${{env:PATH}}", bin_subpaths.join(":"));
+                let win_path = format!("{};${{env:PATH}}", bin_subpaths.join(";"));
+
+                for platform in &[
+                    "terminal.integrated.env.osx",
+                    "terminal.integrated.env.linux",
+                ] {
+                    let mut env_obj = settings
+                        .get(*platform)
+                        .and_then(|v| v.as_object().cloned())
+                        .unwrap_or_default();
+                    env_obj.insert("PATH".into(), serde_json::Value::String(unix_path.clone()));
+                    settings.insert(platform.to_string(), serde_json::Value::Object(env_obj));
+                }
+
+                let mut win_env = settings
+                    .get("terminal.integrated.env.windows")
+                    .and_then(|v| v.as_object().cloned())
+                    .unwrap_or_default();
+                win_env.insert("PATH".into(), serde_json::Value::String(win_path));
+                settings.insert(
+                    "terminal.integrated.env.windows".into(),
+                    serde_json::Value::Object(win_env),
+                );
+            }
+
+            // Configure rust-analyzer if Rust is bundled
+            if toolchains_dir.join("rust").exists() {
+                let ra_bin = toolchains_dir.join("rust/bin/rust-analyzer");
+                if ra_bin.exists() {
+                    settings.insert(
+                        "rust-analyzer.server.path".into(),
+                        serde_json::Value::String(
+                            "${workspaceFolder}/.dmz/toolchains/rust/bin/rust-analyzer".into(),
+                        ),
+                    );
+                }
+
+                let mut ra_extra_env = settings
+                    .get("rust-analyzer.runnables.extraEnv")
+                    .and_then(|v| v.as_object().cloned())
+                    .unwrap_or_default();
+                ra_extra_env.insert(
+                    "RUSTUP_HOME".into(),
+                    serde_json::Value::String("${workspaceFolder}/.dmz/toolchains/rust".into()),
+                );
+                ra_extra_env.insert(
+                    "CARGO_HOME".into(),
+                    serde_json::Value::String("${workspaceFolder}/.cargo".into()),
+                );
+                settings.insert(
+                    "rust-analyzer.runnables.extraEnv".into(),
+                    serde_json::Value::Object(ra_extra_env),
+                );
+            }
+
+            // Configure Python if Python is bundled
+            if toolchains_dir.join("python").exists() {
+                let py_bin = if cfg!(windows) {
+                    "${workspaceFolder}/.dmz/toolchains/python/python.exe"
+                } else {
+                    "${workspaceFolder}/.dmz/toolchains/python/bin/python3"
+                };
+                settings.insert(
+                    "python.defaultInterpreterPath".into(),
+                    serde_json::Value::String(py_bin.into()),
+                );
+            }
+
+            // Configure Go if Go is bundled
+            if toolchains_dir.join("go").exists() {
+                settings.insert(
+                    "go.goroot".into(),
+                    serde_json::Value::String("${workspaceFolder}/.dmz/toolchains/go".into()),
+                );
+                let mut alt_tools = settings
+                    .get("go.alternateTools")
+                    .and_then(|v| v.as_object().cloned())
+                    .unwrap_or_default();
+                alt_tools.insert(
+                    "go".into(),
+                    serde_json::Value::String(
+                        "${workspaceFolder}/.dmz/toolchains/go/bin/go".into(),
+                    ),
+                );
+                settings.insert(
+                    "go.alternateTools".into(),
+                    serde_json::Value::Object(alt_tools),
+                );
+            }
+        }
+
+        fs::create_dir_all(&vscode_dir)
+            .map_err(|e| format!("Failed to create .vscode directory: {}", e))?;
+
+        let json_string = serde_json::to_string_pretty(&serde_json::Value::Object(settings))
+            .map_err(|e| format!("Failed to serialize settings.json: {}", e))?;
+
+        fs::write(&settings_path, json_string)
+            .map_err(|e| format!("Failed to write .vscode/settings.json: {}", e))?;
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_non_cmake_workspace_silences_cmake_in_ide_settings() {
+        let temp = tempdir().unwrap();
+        let ws = temp.path();
+
+        // Workspace has no CMakeLists.txt and no bundled cmake
+        fs::create_dir_all(ws.join(".dmz/toolchains/rust/bin")).unwrap();
+        fs::write(ws.join(".dmz/toolchains/rust/bin/cargo"), "cargo").unwrap();
+
+        ToolchainSetup::setup_imported_toolchains(ws).unwrap();
+
+        let settings_path = ws.join(".vscode/settings.json");
+        assert!(settings_path.exists());
+        let content = fs::read_to_string(&settings_path).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(val["cmake.configureOnOpen"], false);
+        assert_eq!(val["cmake.autoSelectActiveFolder"], false);
+        assert!(val.get("cmake.cmakePath").is_none());
+
+        // Check terminal environment has rust toolchain
+        let osx_path = val["terminal.integrated.env.osx"]["PATH"].as_str().unwrap();
+        assert!(osx_path.contains(".dmz/toolchains/rust/bin"));
+
+        // dmz.toolchain.cmake must NOT exist
+        assert!(!ws.join(".dmz/toolchains/dmz.toolchain.cmake").exists());
+    }
+
+    #[test]
+    fn test_cmake_workspace_configures_cmake_in_ide_settings() {
+        let temp = tempdir().unwrap();
+        let ws = temp.path();
+
+        fs::write(ws.join("CMakeLists.txt"), "project(test)").unwrap();
+        fs::create_dir_all(ws.join(".dmz/toolchains/cmake/bin")).unwrap();
+        fs::write(ws.join(".dmz/toolchains/cmake/bin/cmake"), "cmake").unwrap();
+
+        ToolchainSetup::setup_imported_toolchains(ws).unwrap();
+
+        let settings_path = ws.join(".vscode/settings.json");
+        assert!(settings_path.exists());
+        let content = fs::read_to_string(&settings_path).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(val["cmake.configureOnOpen"], true);
+        assert_eq!(
+            val["cmake.cmakePath"],
+            "${workspaceFolder}/.dmz/toolchains/cmake/bin/cmake"
+        );
+        assert!(ws.join(".dmz/toolchains/dmz.toolchain.cmake").exists());
     }
 }

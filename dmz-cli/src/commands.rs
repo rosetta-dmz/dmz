@@ -95,6 +95,7 @@ pub fn dispatch(command: Commands) {
             skip_verify,
             skip_install,
             skip_ecosystem_verify,
+            no_sandbox,
         } => {
             run_import(
                 archive,
@@ -103,6 +104,7 @@ pub fn dispatch(command: Commands) {
                 skip_verify,
                 skip_install,
                 skip_ecosystem_verify,
+                no_sandbox,
             );
         }
 
@@ -192,6 +194,7 @@ pub fn dispatch(command: Commands) {
                 skip_verify,
                 skip_install,
                 skip_ecosystem_verify,
+                no_sandbox,
             } => {
                 run_import(
                     archive,
@@ -200,6 +203,7 @@ pub fn dispatch(command: Commands) {
                     skip_verify,
                     skip_install,
                     skip_ecosystem_verify,
+                    no_sandbox,
                 );
             }
         },
@@ -592,6 +596,7 @@ pub fn run_import(
     skip_verify: bool,
     skip_install: bool,
     skip_ecosystem_verify: bool,
+    no_sandbox: bool,
 ) {
     let _ = std::fs::create_dir_all(&workspace);
     let ws_canon = std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
@@ -655,7 +660,7 @@ pub fn run_import(
         let install_config = dmz_core::install::InstallConfig {
             workspace_path: ws_canon.clone(),
             lockfile_path,
-            store_dir: effective_store,
+            store_dir: effective_store.clone(),
         };
 
         match dmz_core::install::InstallerEngine::install(&install_config) {
@@ -687,8 +692,6 @@ pub fn run_import(
                         cmd.program,
                         cmd.args.join(" ")
                     );
-                    let mut proc_cmd = std::process::Command::new(&cmd.program);
-                    proc_cmd.args(&cmd.args).current_dir(&ws_canon);
 
                     // Inject bundled toolchain paths if available
                     let mut toolchain_envs = std::collections::HashMap::new();
@@ -696,11 +699,29 @@ pub fn run_import(
                         &ws_canon,
                         &mut toolchain_envs,
                     );
-                    for (k, v) in toolchain_envs {
-                        proc_cmd.env(k, v);
-                    }
 
-                    match proc_cmd.status() {
+                    let status_res = if no_sandbox {
+                        info!("Executing verification unsandboxed (--no-sandbox requested)");
+                        let mut proc_cmd = std::process::Command::new(&cmd.program);
+                        proc_cmd.args(&cmd.args).current_dir(&ws_canon);
+                        for (k, v) in toolchain_envs {
+                            proc_cmd.env(k, v);
+                        }
+                        proc_cmd.status().map_err(|e| e.to_string())
+                    } else {
+                        info!("Executing verification inside zero-network sandbox");
+                        let config = SandboxConfig {
+                            workspace_path: ws_canon.clone(),
+                            closure_path: effective_store.clone(),
+                            command: cmd.program.clone(),
+                            args: cmd.args.clone(),
+                            envs: toolchain_envs.into_iter().collect(),
+                            allow_network: false,
+                        };
+                        run_sandboxed(&config).map_err(|e| e.to_string())
+                    };
+
+                    match status_res {
                         Ok(status) => {
                             if !status.success() {
                                 error!("Ecosystem verification failed for '{}'", eco.name());
@@ -709,7 +730,7 @@ pub fn run_import(
                         }
                         Err(e) => {
                             error!(
-                                "Failed to execute verification command for '{}': {}",
+                                "Failed to execute sandboxed verification command for '{}': {}. Pass --no-sandbox to bypass sandbox containment if required by your environment.",
                                 eco.name(),
                                 e
                             );
@@ -914,23 +935,52 @@ pub fn run_ecosystem(action: EcosystemAction) {
                 }
             }
         }
-        EcosystemAction::Verify { workspace } => {
+        EcosystemAction::Verify {
+            workspace,
+            no_sandbox,
+        } => {
             info!("Verifying workspace ecosystems at {:?}", workspace);
+            let ws_canon = std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
             let registry = EcosystemRegistry::new();
-            let active = registry.discover_active(&workspace);
+            let active = registry.discover_active(&ws_canon);
             for eco in active {
-                if let Some(cmd) = eco.verification_command(&workspace) {
+                if let Some(cmd) = eco.verification_command(&ws_canon) {
                     info!(
                         "Running verification for '{}': {} {}",
                         eco.name(),
                         cmd.program,
                         cmd.args.join(" ")
                     );
-                    match std::process::Command::new(&cmd.program)
-                        .args(&cmd.args)
-                        .current_dir(&workspace)
-                        .status()
-                    {
+
+                    let mut toolchain_envs = std::collections::HashMap::new();
+                    dmz_core::toolchain::ToolchainPackager::inject_toolchain_paths(
+                        &ws_canon,
+                        &mut toolchain_envs,
+                    );
+
+                    let status_res = if no_sandbox {
+                        info!("Executing verification unsandboxed (--no-sandbox requested)");
+                        let mut proc_cmd = std::process::Command::new(&cmd.program);
+                        proc_cmd.args(&cmd.args).current_dir(&ws_canon);
+                        for (k, v) in toolchain_envs {
+                            proc_cmd.env(k, v);
+                        }
+                        proc_cmd.status().map_err(|e| e.to_string())
+                    } else {
+                        info!("Executing verification inside zero-network sandbox");
+                        let closure_path = ws_canon.join(".dmz/store");
+                        let config = SandboxConfig {
+                            workspace_path: ws_canon.clone(),
+                            closure_path,
+                            command: cmd.program.clone(),
+                            args: cmd.args.clone(),
+                            envs: toolchain_envs.into_iter().collect(),
+                            allow_network: false,
+                        };
+                        run_sandboxed(&config).map_err(|e| e.to_string())
+                    };
+
+                    match status_res {
                         Ok(status) => {
                             if !status.success() {
                                 error!("Ecosystem verification failed for '{}'", eco.name());
@@ -939,7 +989,7 @@ pub fn run_ecosystem(action: EcosystemAction) {
                         }
                         Err(e) => {
                             error!(
-                                "Failed to execute verification command for '{}': {}",
+                                "Failed to execute sandboxed verification command for '{}': {}. Pass --no-sandbox to bypass sandbox containment if required by your environment.",
                                 eco.name(),
                                 e
                             );

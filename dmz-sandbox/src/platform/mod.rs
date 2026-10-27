@@ -206,6 +206,19 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     env_map.insert("PIP_CACHE_DIR".into(), format!("{}/pip", cache_str));
     env_map.insert("GOCACHE".into(), format!("{}/go", cache_str));
     env_map.insert("GOPATH".into(), format!("{}/gopath", cache_str));
+
+    if !resolved_config.allow_network {
+        env_map.insert("CARGO_NET_OFFLINE".into(), "true".into());
+        env_map.insert("PIP_NO_INDEX".into(), "1".into());
+        env_map.insert("GOPROXY".into(), "off".into());
+        env_map.insert("npm_config_offline".into(), "true".into());
+        env_map.insert("YARN_OFFLINE".into(), "true".into());
+        env_map.insert("PNPM_OFFLINE".into(), "true".into());
+        env_map.insert("COMPOSER_DISABLE_NETWORK".into(), "1".into());
+        env_map.insert("HTTP_PROXY".into(), "http://127.0.0.1:0".into());
+        env_map.insert("HTTPS_PROXY".into(), "http://127.0.0.1:0".into());
+        env_map.insert("ALL_PROXY".into(), "http://127.0.0.1:0".into());
+    }
     resolved_config.envs = env_map.into_iter().collect();
 
     #[cfg(target_os = "macos")]

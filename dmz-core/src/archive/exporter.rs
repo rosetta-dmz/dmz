@@ -437,9 +437,28 @@ impl AirGapExporter {
         };
 
         // Compute final archive checksum
-        let archive_sha256 = Self::calculate_file_sha256(&effective_output)?;
+        let archive_sha256 = Self::calculate_file_sha256(&effective_output).map_err(|e| {
+            ExportError::IoError(format!("Failed to calculate archive hash: {}", e))
+        })?;
         let mut final_manifest = manifest;
         final_manifest.archive_sha256 = archive_sha256;
+
+        // Write sidecar checksum file: <output_path>.sha256
+        let sidecar_path = PathBuf::from(format!("{}.sha256", effective_output.display()));
+        let filename = effective_output
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| "bundle.tar.zst".to_string());
+        let sidecar_content = format!("{}  {}\n", final_manifest.archive_sha256, filename);
+        if let Err(e) = fs::write(&sidecar_path, sidecar_content) {
+            warn!(
+                sidecar = ?sidecar_path,
+                error = %e,
+                "Could not write .sha256 sidecar checksum file"
+            );
+        } else {
+            info!(sidecar = ?sidecar_path, "Wrote .sha256 sidecar checksum file");
+        }
 
         info!(
             checksum = %final_manifest.archive_sha256,
@@ -551,16 +570,13 @@ impl AirGapExporter {
         Err("airgap_manifest.json not found in archive".to_string())
     }
 
-    fn calculate_file_sha256(path: &Path) -> Result<String, ExportError> {
-        let mut file = File::open(path)
-            .map_err(|e| ExportError::IoError(format!("Failed to open file for hash: {}", e)))?;
+    pub fn calculate_file_sha256(path: &Path) -> Result<String, std::io::Error> {
+        let mut file = File::open(path)?;
         let mut hasher = Sha256::new();
         let mut buffer = [0u8; 65536];
 
         loop {
-            let count = file.read(&mut buffer).map_err(|e| {
-                ExportError::IoError(format!("File read error during hashing: {}", e))
-            })?;
+            let count = file.read(&mut buffer)?;
             if count == 0 {
                 break;
             }

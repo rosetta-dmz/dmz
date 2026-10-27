@@ -102,11 +102,14 @@ impl ToolchainDiscoverer for CMakeDiscoverer {
         };
         let version = chosen_version.unwrap_or_else(|| "cmake".to_string());
 
-        let bin_dir = cmake_bin.parent().unwrap_or(Path::new(""));
+        // Canonicalize cmake_bin so symlinks (e.g. /opt/homebrew/bin/cmake -> ../Cellar/cmake/3.x.y/bin/cmake)
+        // resolve to the actual installation directory where share/cmake-*/Modules resides!
+        let canonical_bin = fs::canonicalize(&cmake_bin).unwrap_or_else(|_| cmake_bin.clone());
+        let bin_dir = canonical_bin.parent().unwrap_or(Path::new(""));
         let root_dir = bin_dir.parent().unwrap_or(bin_dir).to_path_buf();
 
         info!(
-            cmake = ?cmake_bin,
+            cmake = ?canonical_bin,
             root = ?root_dir,
             version = %version,
             "Discovered standalone CMake distribution"
@@ -126,6 +129,10 @@ impl ToolchainDiscoverer for CMakeDiscoverer {
                     bin_files.push((exe, format!("bin/{}.exe", name)));
                 }
             }
+        }
+
+        if bin_files.is_empty() && canonical_bin.exists() {
+            bin_files.push((canonical_bin.clone(), "bin/cmake".to_string()));
         }
 
         // Capture standard CMake modules under share/cmake-* or share/cmake

@@ -122,6 +122,47 @@ impl AirGapImporter {
             )));
         }
 
+        // Automatic sidecar .sha256 verification (transit integrity check)
+        let sidecar_sha256_path = PathBuf::from(format!("{}.sha256", effective_archive.display()));
+        if sidecar_sha256_path.exists() {
+            info!(
+                sidecar = ?sidecar_sha256_path,
+                "Found sidecar .sha256 file; verifying physical transport integrity"
+            );
+            let sidecar_raw = fs::read_to_string(&sidecar_sha256_path).map_err(|e| {
+                ImportError::IoError(format!(
+                    "Failed to read checksum sidecar {:?}: {}",
+                    sidecar_sha256_path, e
+                ))
+            })?;
+            let expected_sha256 = sidecar_raw
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
+            if !expected_sha256.is_empty() {
+                let actual_sha256 =
+                    crate::archive::AirGapExporter::calculate_file_sha256(&effective_archive)
+                        .map_err(|e| {
+                            ImportError::IoError(format!(
+                                "Failed to compute archive checksum: {}",
+                                e
+                            ))
+                        })?;
+                if actual_sha256.to_lowercase() != expected_sha256 {
+                    return Err(ImportError::VerificationFailed(format!(
+                        "Archive transport checksum mismatch! Sidecar expected {}, calculated {}",
+                        expected_sha256, actual_sha256
+                    )));
+                }
+                info!(
+                    checksum = %actual_sha256,
+                    "Physical transit archive checksum verified against .sha256 sidecar"
+                );
+            }
+        }
+
         // Prepare target directories
         if !effective_store.exists() {
             fs::create_dir_all(&effective_store).map_err(|e| {
@@ -135,8 +176,35 @@ impl AirGapImporter {
             })?;
         }
 
+        // Pre-import workspace backup snapshot
+        let backup_snapshot = Self::create_backup_snapshot(&effective_workspace)?;
+
+        let result = Self::do_import(
+            &effective_archive,
+            &effective_store,
+            &effective_workspace,
+            config.verify_closure_hash,
+        );
+
+        match result {
+            Ok(res) => Ok(res),
+            Err(e) => {
+                if let Some(ref backup_dir) = backup_snapshot {
+                    let _ = Self::restore_backup_snapshot(&effective_workspace, backup_dir);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn do_import(
+        effective_archive: &Path,
+        effective_store: &Path,
+        effective_workspace: &Path,
+        verify_closure_hash: bool,
+    ) -> Result<ImportResult, ImportError> {
         // Open archive and initialize zstd stream
-        let file = File::open(&effective_archive)
+        let file = File::open(effective_archive)
             .map_err(|e| ImportError::IoError(format!("Failed to open archive: {}", e)))?;
 
         let zstd_decoder = ZstdDecoder::new(file).map_err(|e| {
@@ -214,8 +282,7 @@ impl AirGapImporter {
 
                     if let Some(ref expected_commit) = delta.base_commit {
                         if effective_workspace.join(".git").exists() {
-                            if let Ok(Some(prov)) =
-                                GitProvider::get_provenance(&effective_workspace)
+                            if let Ok(Some(prov)) = GitProvider::get_provenance(effective_workspace)
                             {
                                 if !prov.commit.starts_with(expected_commit)
                                     && !expected_commit.starts_with(&prov.commit)
@@ -259,7 +326,7 @@ impl AirGapImporter {
                     ImportError::VerificationFailed(format!("Invalid embedded dmz.lock: {}", e))
                 })?;
 
-                if config.verify_closure_hash {
+                if verify_closure_hash {
                     let computed = DmzLockfile::compute_closure_hash(&lockfile.packages);
                     if computed != lockfile.closure_signature {
                         return Err(ImportError::VerificationFailed(format!(
@@ -285,7 +352,7 @@ impl AirGapImporter {
                 })?;
                 info!(path = ?bundle_dest, "Unpacked embedded git bundle");
 
-                if let Err(e) = GitProvider::restore_bundle(&effective_workspace, &bundle_dest) {
+                if let Err(e) = GitProvider::restore_bundle(effective_workspace, &bundle_dest) {
                     warn!(
                         "Could not automatically restore git repository from bundle: {}",
                         e
@@ -349,7 +416,7 @@ impl AirGapImporter {
                 has_toolchains = true;
             } else {
                 // Workspace source files (Cargo.toml, src/, etc.)
-                entry.unpack_in(&effective_workspace).map_err(|e| {
+                entry.unpack_in(effective_workspace).map_err(|e| {
                     ImportError::ExtractionError(format!("Failed to unpack workspace file: {}", e))
                 })?;
             }
@@ -358,7 +425,7 @@ impl AirGapImporter {
         // Setup imported toolchain permissions, quarantine flags, and activator scripts
         if has_toolchains {
             if let Err(e) =
-                crate::toolchain::ToolchainPackager::setup_imported_toolchains(&effective_workspace)
+                crate::toolchain::ToolchainPackager::setup_imported_toolchains(effective_workspace)
             {
                 warn!(
                     "Failed to finalize imported toolchains configuration: {}",
@@ -373,7 +440,7 @@ impl AirGapImporter {
 
         // Run post-import ecosystem validation using the registry
         let registry = EcosystemRegistry::new();
-        match registry.process_workspace(&effective_workspace) {
+        match registry.process_workspace(effective_workspace) {
             Ok(stacks) => {
                 info!(active_stacks = ?stacks, "Post-import ecosystem discovery complete");
             }
@@ -394,12 +461,98 @@ impl AirGapImporter {
         Ok(ImportResult {
             imported_packages: imported_count,
             closure_signature,
-            store_path: effective_store,
-            workspace_path: effective_workspace,
+            store_path: effective_store.to_path_buf(),
+            workspace_path: effective_workspace.to_path_buf(),
             is_delta,
             has_git_history,
             has_toolchains,
             vcs: vcs_provenance,
         })
+    }
+
+    fn create_backup_snapshot(workspace: &Path) -> Result<Option<PathBuf>, ImportError> {
+        if !workspace.exists() {
+            return Ok(None);
+        }
+        let entries = match fs::read_dir(workspace) {
+            Ok(e) => e,
+            Err(_) => return Ok(None),
+        };
+
+        let mut has_files = false;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str != ".dmz"
+                && name_str != "target"
+                && name_str != "dist"
+                && name_str != "node_modules"
+            {
+                has_files = true;
+                break;
+            }
+        }
+
+        if !has_files {
+            return Ok(None);
+        }
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let backup_dir = workspace
+            .join(".dmz/backups")
+            .join(format!("snapshot-{}", timestamp));
+        fs::create_dir_all(&backup_dir).map_err(|e| {
+            ImportError::IoError(format!(
+                "Failed to create backup snapshot dir {:?}: {}",
+                backup_dir, e
+            ))
+        })?;
+
+        Self::copy_dir_contents(workspace, &backup_dir, true)?;
+        info!(backup = ?backup_dir, "Created pre-import workspace backup snapshot");
+        Ok(Some(backup_dir))
+    }
+
+    fn restore_backup_snapshot(workspace: &Path, backup_dir: &Path) -> Result<(), ImportError> {
+        info!(
+            backup = ?backup_dir,
+            workspace = ?workspace,
+            "Restoring workspace from backup snapshot following import failure"
+        );
+        Self::copy_dir_contents(backup_dir, workspace, false)?;
+        Ok(())
+    }
+
+    fn copy_dir_contents(src: &Path, dst: &Path, skip_ignored: bool) -> Result<(), ImportError> {
+        let entries = fs::read_dir(src).map_err(|e| ImportError::IoError(e.to_string()))?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+
+            if skip_ignored
+                && (name_str == ".dmz"
+                    || name_str == "target"
+                    || name_str == "dist"
+                    || name_str == "node_modules")
+            {
+                continue;
+            }
+
+            let target = dst.join(&name);
+            if path.is_dir() {
+                fs::create_dir_all(&target).map_err(|e| ImportError::IoError(e.to_string()))?;
+                Self::copy_dir_contents(&path, &target, false)?;
+            } else if path.is_file() {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent).map_err(|e| ImportError::IoError(e.to_string()))?;
+                }
+                fs::copy(&path, &target).map_err(|e| ImportError::IoError(e.to_string()))?;
+            }
+        }
+        Ok(())
     }
 }

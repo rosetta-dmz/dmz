@@ -9,8 +9,32 @@ permissions:
   contents: write
 
 jobs:
+  validate-tag:
+    name: Validate Git Tag vs Cargo.toml
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify Tag Matches Cargo.toml
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "Verifying release tag ($TAG_VERSION)..."
+          CARGO_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "dmz-cli") | .version')
+          echo "Cargo workspace package version: $CARGO_VERSION"
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Release Git Tag ($TAG_VERSION) does not match Cargo.toml workspace version ($CARGO_VERSION)!"
+            echo "::error::Please bump [workspace.package].version in Cargo.toml to match the release tag before pushing."
+            exit 1
+          fi
+          echo "Git Tag and Cargo.toml versions are synchronized ($TAG_VERSION)."
+
   build-cli:
     name: Build CLI (${{ matrix.target }})
+    needs: [validate-tag]
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -59,6 +83,7 @@ jobs:
 
   build-gui:
     name: Build GUI (${{ matrix.os }})
+    needs: [validate-tag]
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -91,7 +116,7 @@ jobs:
           sips -z 16 16     assets/dmz-icon.png --out icon.iconset/icon_16x16.png || true
           sips -z 32 32     assets/dmz-icon.png --out icon.iconset/icon_32x32.png || true
           sips -z 128 128   assets/dmz-icon.png --out icon.iconset/icon_128x128.png || true
-          sips -z 256 256   assets/dmz-icon.png --out icon.iconset/icon_128x128.png || true
+          sips -z 256 256   assets/dmz-icon.png --out icon.iconset/icon_256x256.png || true
           sips -z 512 512   assets/dmz-icon.png --out icon.iconset/icon_512x512.png || true
           iconutil -c icns icon.iconset -o DMZ.app/Contents/Resources/AppIcon.icns || true
           rm -rf icon.iconset

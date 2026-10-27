@@ -2,295 +2,166 @@ use super::types::ToolchainEcosystem;
 use std::collections::HashSet;
 use std::path::Path;
 
-/// High-precision filesystem scanner and dependency inspector for detecting workspace toolchains.
+/// Manifest-driven workspace ecosystem and toolchain detector.
+///
+/// Adheres strictly to the First Principles / Root Manifest Dominance pattern:
+/// A workspace's toolchain requirements are determined strictly by what the target workspace
+/// actually declares and has at its root, never by heuristic crawling of arbitrary nested directories
+/// or inspecting transitive package names in dependency lockfiles.
 pub struct ToolchainDetector;
 
 impl ToolchainDetector {
-    /// Recursively scans workspace directories up to `max_depth` to discover ecosystem-defining manifests.
-    pub fn scan_dir_for_ecosystems(
-        dir: &Path,
-        depth: usize,
-        max_depth: usize,
-        ecosystems: &mut HashSet<ToolchainEcosystem>,
-    ) {
-        if depth > max_depth || !dir.exists() || !dir.is_dir() {
-            return;
-        }
-
-        // Standard primary language ecosystems
-        if dir.join("Cargo.toml").is_file() {
-            ecosystems.insert(ToolchainEcosystem::Rust);
-        }
-        if dir.join("package.json").is_file() {
-            ecosystems.insert(ToolchainEcosystem::Node);
-            if let Ok(content) = std::fs::read_to_string(dir.join("package.json")) {
-                if content.contains("cmake-js") {
-                    ecosystems.insert(ToolchainEcosystem::CMake);
-                }
-            }
-        }
-        if dir.join("go.mod").is_file() {
-            ecosystems.insert(ToolchainEcosystem::Go);
-        }
-        if dir.join("composer.json").is_file() {
-            ecosystems.insert(ToolchainEcosystem::Php);
-        }
-        if dir.join("Gemfile").is_file() {
-            ecosystems.insert(ToolchainEcosystem::Ruby);
-        }
-        if dir.join("requirements.txt").is_file()
-            || dir.join("pyproject.toml").is_file()
-            || dir.join("Pipfile").is_file()
-            || dir.join("setup.py").is_file()
-        {
-            ecosystems.insert(ToolchainEcosystem::Python);
-            if let Ok(content) = std::fs::read_to_string(dir.join("pyproject.toml")) {
-                if content.contains("cmake") || content.contains("scikit-build") {
-                    ecosystems.insert(ToolchainEcosystem::CMake);
-                }
-                if content.contains("ninja") {
-                    ecosystems.insert(ToolchainEcosystem::Ninja);
-                }
-            }
-        }
-
-        // Auxiliary native build files
-        if dir.join("CMakeLists.txt").is_file() {
-            ecosystems.insert(ToolchainEcosystem::CMake);
-            ecosystems.insert(ToolchainEcosystem::Cc);
-        }
-        if dir.join("build.ninja").is_file() {
-            ecosystems.insert(ToolchainEcosystem::Ninja);
-            ecosystems.insert(ToolchainEcosystem::Cc);
-        }
-        if dir.join("Makefile").is_file()
-            || dir.join("GNUmakefile").is_file()
-            || dir.join("makefile").is_file()
-        {
-            ecosystems.insert(ToolchainEcosystem::Make);
-            ecosystems.insert(ToolchainEcosystem::Cc);
-        }
-
-        // Android build manifests (surgical: only pull NDK and CMake if native code is declared)
-        if dir.join("Android.mk").is_file() || dir.join("Application.mk").is_file() {
-            ecosystems.insert(ToolchainEcosystem::AndroidNdk);
-            ecosystems.insert(ToolchainEcosystem::CMake);
-        }
-        for gradle_name in &["build.gradle", "build.gradle.kts"] {
-            let p = dir.join(gradle_name);
-            if p.is_file() {
-                if let Ok(content) = std::fs::read_to_string(&p) {
-                    if content.contains("ndkVersion")
-                        || content.contains("ndk {")
-                        || content.contains("externalNativeBuild")
-                        || (content.contains("cmake") && content.contains("path"))
-                    {
-                        ecosystems.insert(ToolchainEcosystem::AndroidNdk);
-                        ecosystems.insert(ToolchainEcosystem::CMake);
-                    }
-                }
-            }
-        }
-
-        // Apple project manifests
-        if dir.join("Package.swift").is_file()
-            || dir.join("Podfile").is_file()
-            || dir.join("Cartfile").is_file()
-        {
-            ecosystems.insert(ToolchainEcosystem::AppleSdk);
-            ecosystems.insert(ToolchainEcosystem::Cc);
-        }
-
-        if depth < max_depth {
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        let name = entry.file_name();
-                        let name_str = name.to_string_lossy();
-                        if name_str.starts_with('.')
-                            || name_str == "target"
-                            || name_str == "node_modules"
-                            || name_str == "dist"
-                            || name_str == "build"
-                            || name_str == "venv"
-                            || name_str == ".venv"
-                            || name_str == "vendor"
-                        {
-                            continue;
-                        }
-                        if name_str.ends_with(".xcodeproj") || name_str.ends_with(".xcworkspace") {
-                            ecosystems.insert(ToolchainEcosystem::AppleSdk);
-                            ecosystems.insert(ToolchainEcosystem::Cc);
-                        }
-                        if name_str == "modules" && path.join("juce_core").exists() {
-                            ecosystems.insert(ToolchainEcosystem::Juce);
-                            ecosystems.insert(ToolchainEcosystem::Cc);
-                        }
-                        Self::scan_dir_for_ecosystems(&path, depth + 1, max_depth, ecosystems);
-                    } else if path.is_file() {
-                        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                        if ext == "jucer" {
-                            ecosystems.insert(ToolchainEcosystem::Juce);
-                            ecosystems.insert(ToolchainEcosystem::Cc);
-                        } else if ext == "pc" {
-                            ecosystems.insert(ToolchainEcosystem::PkgConfig);
-                        } else if matches!(ext, "c" | "cpp" | "cc" | "cxx" | "h" | "hpp") {
-                            ecosystems.insert(ToolchainEcosystem::Cc);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Discovers active workspace ecosystems based on workspace manifests, dependency trees, and closure lockfile.
-    ///
-    /// Adheres strictly to production-grade domain modeling: dependencies are inspected strictly within
-    /// their declared ecosystem boundaries, preventing cross-ecosystem naming collisions.
+    /// Detects active workspace ecosystems strictly from declared workspace root manifests.
     pub fn detect_workspace_ecosystems(
         workspace_root: &Path,
         lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
     ) -> HashSet<ToolchainEcosystem> {
         let mut ecosystems = HashSet::new();
 
-        // 1. Filesystem manifest scan (root + nested up to depth 3)
-        Self::scan_dir_for_ecosystems(workspace_root, 0, 3, &mut ecosystems);
+        if !workspace_root.exists() || !workspace_root.is_dir() {
+            return ecosystems;
+        }
 
-        // 2. Lockfile inspection (strongly-typed, scoped strictly per ecosystem)
-        let inspect_locked_package =
-            |pkg: &crate::resolver::lockfile::LockedPackage,
-             ecosystems: &mut HashSet<ToolchainEcosystem>| {
-                if let Some(eco) = ToolchainEcosystem::from_resolver_ecosystem(&pkg.ecosystem) {
-                    ecosystems.insert(eco);
+        // 1. Primary language ecosystems declared at workspace root
+        if workspace_root.join("Cargo.toml").is_file() {
+            ecosystems.insert(ToolchainEcosystem::Rust);
+            Self::check_cargo_workspace_members(workspace_root, &mut ecosystems);
+        }
+        if workspace_root.join("package.json").is_file()
+            || workspace_root.join("pnpm-workspace.yaml").is_file()
+            || workspace_root.join("pnpm-lock.yaml").is_file()
+            || workspace_root.join("yarn.lock").is_file()
+            || workspace_root.join("package-lock.json").is_file()
+            || workspace_root.join("bun.lockb").is_file()
+            || workspace_root.join("bunfig.toml").is_file()
+        {
+            ecosystems.insert(ToolchainEcosystem::Node);
+            Self::check_node_workspace_members(workspace_root, &mut ecosystems);
+        }
+        if workspace_root.join("go.mod").is_file() || workspace_root.join("go.work").is_file() {
+            ecosystems.insert(ToolchainEcosystem::Go);
+        }
+        if workspace_root.join("composer.json").is_file()
+            || workspace_root.join("composer.lock").is_file()
+        {
+            ecosystems.insert(ToolchainEcosystem::Php);
+        }
+        if workspace_root.join("Gemfile").is_file() || workspace_root.join("Gemfile.lock").is_file()
+        {
+            ecosystems.insert(ToolchainEcosystem::Ruby);
+        }
+        if workspace_root.join("requirements.txt").is_file()
+            || workspace_root.join("pyproject.toml").is_file()
+            || workspace_root.join("Pipfile").is_file()
+            || workspace_root.join("Pipfile.lock").is_file()
+            || workspace_root.join("setup.py").is_file()
+            || workspace_root.join("setup.cfg").is_file()
+            || workspace_root.join("poetry.lock").is_file()
+            || workspace_root.join("uv.lock").is_file()
+        {
+            ecosystems.insert(ToolchainEcosystem::Python);
+        }
+
+        // 2. Native project manifests declared at workspace root
+        if workspace_root.join("CMakeLists.txt").is_file() {
+            ecosystems.insert(ToolchainEcosystem::CMake);
+            ecosystems.insert(ToolchainEcosystem::Cc);
+            ecosystems.insert(ToolchainEcosystem::Ninja);
+        }
+        if workspace_root.join("build.ninja").is_file() {
+            ecosystems.insert(ToolchainEcosystem::Ninja);
+            ecosystems.insert(ToolchainEcosystem::Cc);
+        }
+        if workspace_root.join("Makefile").is_file()
+            || workspace_root.join("GNUmakefile").is_file()
+            || workspace_root.join("makefile").is_file()
+        {
+            ecosystems.insert(ToolchainEcosystem::Make);
+            ecosystems.insert(ToolchainEcosystem::Cc);
+        }
+
+        // 3. Platform SDK project manifests declared at workspace root
+        if workspace_root.join("Package.swift").is_file()
+            || workspace_root.join("Podfile").is_file()
+            || workspace_root.join("Cartfile").is_file()
+        {
+            ecosystems.insert(ToolchainEcosystem::AppleSdk);
+            ecosystems.insert(ToolchainEcosystem::Cc);
+        }
+
+        // Android build manifests (declared at root or standard app module)
+        if workspace_root.join("Android.mk").is_file()
+            || workspace_root.join("Application.mk").is_file()
+            || workspace_root.join("app/src/main/jni/Android.mk").is_file()
+        {
+            ecosystems.insert(ToolchainEcosystem::AndroidNdk);
+            ecosystems.insert(ToolchainEcosystem::CMake);
+            ecosystems.insert(ToolchainEcosystem::Cc);
+        }
+        for gradle_name in &[
+            "build.gradle",
+            "build.gradle.kts",
+            "app/build.gradle",
+            "app/build.gradle.kts",
+        ] {
+            let p = workspace_root.join(gradle_name);
+            if p.is_file() {
+                if let Ok(content) = std::fs::read_to_string(&p) {
+                    if content.contains("ndkVersion")
+                        || content.contains("ndk {")
+                        || content.contains("externalNativeBuild")
+                    {
+                        ecosystems.insert(ToolchainEcosystem::AndroidNdk);
+                        ecosystems.insert(ToolchainEcosystem::CMake);
+                        ecosystems.insert(ToolchainEcosystem::Cc);
+                    }
                 }
+            }
+        }
 
-                match &pkg.ecosystem {
-                    crate::resolver::manifest::Ecosystem::Cargo => match pkg.name.as_str() {
-                        "cc" | "cc-rs" => {
-                            ecosystems.insert(ToolchainEcosystem::Cc);
-                        }
-                        "cmake" => {
-                            ecosystems.insert(ToolchainEcosystem::CMake);
-                        }
-                        "ninja" => {
-                            ecosystems.insert(ToolchainEcosystem::Ninja);
-                        }
-                        "pkg-config" => {
-                            ecosystems.insert(ToolchainEcosystem::PkgConfig);
-                        }
-                        "ndk-sys" | "cargo-ndk" => {
-                            ecosystems.insert(ToolchainEcosystem::AndroidNdk);
-                        }
-                        "swift-rs" | "swift-bridge" => {
-                            ecosystems.insert(ToolchainEcosystem::AppleSdk);
-                        }
-                        _ => {}
-                    },
-                    crate::resolver::manifest::Ecosystem::Npm => {
-                        if pkg.name == "cmake-js" {
-                            ecosystems.insert(ToolchainEcosystem::CMake);
-                        }
+        // Check root directory entries for root project bundles (*.xcodeproj, *.xcworkspace, *.jucer)
+        if let Ok(entries) = std::fs::read_dir(workspace_root) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.ends_with(".xcodeproj") || name_str.ends_with(".xcworkspace") {
+                    ecosystems.insert(ToolchainEcosystem::AppleSdk);
+                    ecosystems.insert(ToolchainEcosystem::Cc);
+                } else if name_str.ends_with(".jucer") {
+                    ecosystems.insert(ToolchainEcosystem::Juce);
+                    ecosystems.insert(ToolchainEcosystem::Cc);
+                    ecosystems.insert(ToolchainEcosystem::CMake);
+                }
+            }
+        }
+
+        // 4. Map resolver lockfile ecosystems (strictly mapping package ecosystem to its language compiler)
+        let map_lockfile =
+            |lf: &crate::resolver::lockfile::DmzLockfile,
+             ecosystems: &mut HashSet<ToolchainEcosystem>| {
+                for pkg in lf.packages.values() {
+                    if let Some(eco) = ToolchainEcosystem::from_resolver_ecosystem(&pkg.ecosystem) {
+                        ecosystems.insert(eco);
                     }
-                    crate::resolver::manifest::Ecosystem::PyPI => {
-                        if pkg.name == "cmake" || pkg.name == "scikit-build" {
-                            ecosystems.insert(ToolchainEcosystem::CMake);
-                        } else if pkg.name == "ninja" {
-                            ecosystems.insert(ToolchainEcosystem::Ninja);
-                        }
-                    }
-                    _ => {}
                 }
             };
 
         if let Some(lf) = lockfile {
-            for pkg in lf.packages.values() {
-                inspect_locked_package(pkg, &mut ecosystems);
-            }
+            map_lockfile(lf, &mut ecosystems);
         } else {
             let default_lockfile = workspace_root.join("dmz.lock");
             if default_lockfile.exists() {
                 if let Ok(lf) =
                     crate::resolver::lockfile::DmzLockfile::load_and_verify(&default_lockfile)
                 {
-                    for pkg in lf.packages.values() {
-                        inspect_locked_package(pkg, &mut ecosystems);
-                    }
+                    map_lockfile(&lf, &mut ecosystems);
                 }
             }
         }
 
-        // 3. Inspect Cargo.lock (if present) for Cargo native build dependencies
-        let cargo_lock = workspace_root.join("Cargo.lock");
-        if cargo_lock.exists() {
-            if let Ok(content) = std::fs::read_to_string(&cargo_lock) {
-                if content.contains("name = \"cmake\"") {
-                    ecosystems.insert(ToolchainEcosystem::CMake);
-                }
-                if content.contains("name = \"ninja\"") {
-                    ecosystems.insert(ToolchainEcosystem::Ninja);
-                }
-                if content.contains("name = \"pkg-config\"") {
-                    ecosystems.insert(ToolchainEcosystem::PkgConfig);
-                }
-                if content.contains("name = \"cc\"") {
-                    ecosystems.insert(ToolchainEcosystem::Cc);
-                }
-                if content.contains("name = \"ndk-sys\"")
-                    || content.contains("name = \"cargo-ndk\"")
-                {
-                    ecosystems.insert(ToolchainEcosystem::AndroidNdk);
-                }
-                if content.contains("name = \"swift-rs\"")
-                    || content.contains("name = \"swift-bridge\"")
-                {
-                    ecosystems.insert(ToolchainEcosystem::AppleSdk);
-                }
-            }
-        }
-
-        // 4. Inspect vendored packages in .cargo/vendor/ (Cargo crates)
-        let cargo_vendor = workspace_root.join(".cargo/vendor");
-        if cargo_vendor.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(cargo_vendor) {
-                for entry in entries.flatten() {
-                    let fname = entry.file_name();
-                    let s = fname.to_string_lossy();
-                    let is_versioned_crate = |prefix: &str| {
-                        s == prefix
-                            || s.strip_prefix(&format!("{}-", prefix)).is_some_and(|rest| {
-                                rest.chars().next().is_some_and(|c| c.is_ascii_digit())
-                            })
-                    };
-
-                    if is_versioned_crate("cc") || is_versioned_crate("cc-rs") {
-                        ecosystems.insert(ToolchainEcosystem::Cc);
-                    }
-                    if is_versioned_crate("cmake") {
-                        ecosystems.insert(ToolchainEcosystem::CMake);
-                    }
-                    if is_versioned_crate("ninja") {
-                        ecosystems.insert(ToolchainEcosystem::Ninja);
-                    }
-                    if is_versioned_crate("pkg-config") {
-                        ecosystems.insert(ToolchainEcosystem::PkgConfig);
-                    }
-                    if is_versioned_crate("ndk-sys") || is_versioned_crate("cargo-ndk") {
-                        ecosystems.insert(ToolchainEcosystem::AndroidNdk);
-                    }
-                    if is_versioned_crate("swift-rs") || is_versioned_crate("swift-bridge") {
-                        ecosystems.insert(ToolchainEcosystem::AppleSdk);
-                    }
-                }
-            }
-        }
-
-        // 5. Companion toolchain inference & propagation
+        // 5. Minimal companion propagation for native tools
         if ecosystems.contains(&ToolchainEcosystem::CMake) {
             ecosystems.insert(ToolchainEcosystem::Cc);
-            if !ecosystems.contains(&ToolchainEcosystem::Make) {
-                ecosystems.insert(ToolchainEcosystem::Ninja);
-            }
         }
         if ecosystems.contains(&ToolchainEcosystem::Make)
             || ecosystems.contains(&ToolchainEcosystem::Ninja)
@@ -303,13 +174,80 @@ impl ToolchainDetector {
         }
         if ecosystems.contains(&ToolchainEcosystem::AndroidNdk) {
             ecosystems.insert(ToolchainEcosystem::CMake);
-            ecosystems.insert(ToolchainEcosystem::Ninja);
+            ecosystems.insert(ToolchainEcosystem::Cc);
         }
         if ecosystems.contains(&ToolchainEcosystem::AppleSdk) {
             ecosystems.insert(ToolchainEcosystem::Cc);
         }
 
         ecosystems
+    }
+
+    /// Checks declared Cargo workspace members for explicit native build manifests.
+    fn check_cargo_workspace_members(
+        workspace_root: &Path,
+        ecosystems: &mut HashSet<ToolchainEcosystem>,
+    ) {
+        let cargo_toml = workspace_root.join("Cargo.toml");
+        if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
+            if let Ok(val) = content.parse::<toml::Value>() {
+                if let Some(workspace) = val.get("workspace") {
+                    if let Some(members) = workspace.get("members").and_then(|m| m.as_array()) {
+                        for m in members {
+                            if let Some(member_str) = m.as_str() {
+                                let member_dir = workspace_root.join(member_str);
+                                if member_dir.join("CMakeLists.txt").is_file() {
+                                    ecosystems.insert(ToolchainEcosystem::CMake);
+                                    ecosystems.insert(ToolchainEcosystem::Cc);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Checks declared Node/pnpm/yarn workspace packages for explicit native build manifests.
+    fn check_node_workspace_members(
+        workspace_root: &Path,
+        ecosystems: &mut HashSet<ToolchainEcosystem>,
+    ) {
+        let pkg_json = workspace_root.join("package.json");
+        if let Ok(content) = std::fs::read_to_string(&pkg_json) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                let pkgs_opt = val.get("workspaces").and_then(|w| {
+                    w.as_array()
+                        .cloned()
+                        .or_else(|| w.get("packages").and_then(|p| p.as_array()).cloned())
+                });
+
+                if let Some(pkgs) = pkgs_opt {
+                    for pkg in pkgs {
+                        if let Some(pattern) = pkg.as_str() {
+                            let clean = pattern.trim_end_matches("/*").trim_end_matches('*');
+                            let candidate_dir = workspace_root.join(clean);
+                            if candidate_dir.join("CMakeLists.txt").is_file() {
+                                ecosystems.insert(ToolchainEcosystem::CMake);
+                                ecosystems.insert(ToolchainEcosystem::Cc);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Backward-compatibility delegate.
+    #[deprecated(note = "Use detect_workspace_ecosystems for manifest-driven detection")]
+    pub fn scan_dir_for_ecosystems(
+        dir: &Path,
+        _depth: usize,
+        _max_depth: usize,
+        ecosystems: &mut HashSet<ToolchainEcosystem>,
+    ) {
+        let detected = Self::detect_workspace_ecosystems(dir, None);
+        ecosystems.extend(detected);
     }
 }
 
@@ -440,21 +378,49 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_detect_native_build_tools_from_vendor_and_lockfile() {
+    fn test_pure_rust_workspace_does_not_pull_cmake_or_cc_or_apple() {
         let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"pure-rust-app\"\n",
+        )
+        .unwrap();
+
+        // Even if vendored crates exist or Cargo.lock mentions cmake/cc/swift, pure Rust workspace only has Rust
         let vendor_dir = dir.path().join(".cargo/vendor/cmake-0.1.50");
         fs::create_dir_all(&vendor_dir).unwrap();
+        let vendor_cc = dir.path().join(".cargo/vendor/cc-1.0.83");
+        fs::create_dir_all(&vendor_cc).unwrap();
 
-        let detected = ToolchainDetector::detect_workspace_ecosystems(dir.path(), None);
-        assert!(
-            detected.contains(&ToolchainEcosystem::CMake),
-            "Vendored cmake crate must trigger CMake toolchain requirement"
-        );
+        let lf = make_test_lockfile(vec![
+            ("serde", "1.0", crate::resolver::manifest::Ecosystem::Cargo),
+            ("libc", "0.2", crate::resolver::manifest::Ecosystem::Cargo),
+            (
+                "cmake",
+                "0.1.50",
+                crate::resolver::manifest::Ecosystem::Cargo,
+            ),
+            ("cc", "1.0.83", crate::resolver::manifest::Ecosystem::Cargo),
+            (
+                "swift-bridge",
+                "0.1.0",
+                crate::resolver::manifest::Ecosystem::Cargo,
+            ),
+        ]);
+
+        let detected = ToolchainDetector::detect_workspace_ecosystems(dir.path(), Some(&lf));
+        assert_eq!(detected.len(), 1, "Only Rust toolchain must be detected");
+        assert!(detected.contains(&ToolchainEcosystem::Rust));
+        assert!(!detected.contains(&ToolchainEcosystem::CMake));
+        assert!(!detected.contains(&ToolchainEcosystem::Cc));
+        assert!(!detected.contains(&ToolchainEcosystem::AppleSdk));
+        assert!(!detected.contains(&ToolchainEcosystem::AndroidNdk));
     }
 
     #[test]
     fn test_ecosystem_isolation_npm_packages_do_not_leak_native_toolchains() {
         let dir = tempdir().unwrap();
+        fs::write(dir.path().join("package.json"), "{\"name\": \"app\"}").unwrap();
         let lf = make_test_lockfile(vec![
             (
                 "make-dir",
@@ -560,24 +526,28 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_detect_android_and_apple_from_lockfile() {
+    fn test_nested_apple_manifest_in_subfolder_does_not_leak_applesdk() {
         let dir = tempdir().unwrap();
-        let lf = make_test_lockfile(vec![
-            (
-                "ndk-sys",
-                "0.5.0",
-                crate::resolver::manifest::Ecosystem::Cargo,
-            ),
-            (
-                "swift-bridge",
-                "0.1.0",
-                crate::resolver::manifest::Ecosystem::Cargo,
-            ),
-        ]);
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"rust-app\"\n",
+        )
+        .unwrap();
 
-        let detected = ToolchainDetector::detect_workspace_ecosystems(dir.path(), Some(&lf));
-        assert!(detected.contains(&ToolchainEcosystem::AndroidNdk));
-        assert!(detected.contains(&ToolchainEcosystem::AppleSdk));
+        // Nested test fixture or documentation example
+        let nested = dir.path().join("tests/fixtures/demo.xcodeproj");
+        fs::create_dir_all(&nested).unwrap();
+        let nested_swift = dir.path().join("docs/Package.swift");
+        fs::create_dir_all(nested_swift.parent().unwrap()).unwrap();
+        fs::write(&nested_swift, "// demo").unwrap();
+
+        let detected = ToolchainDetector::detect_workspace_ecosystems(dir.path(), None);
+        assert_eq!(detected.len(), 1);
+        assert!(detected.contains(&ToolchainEcosystem::Rust));
+        assert!(
+            !detected.contains(&ToolchainEcosystem::AppleSdk),
+            "Nested Apple manifests in tests/docs must NOT trigger Apple SDK bundling"
+        );
     }
 
     #[test]
@@ -612,7 +582,7 @@ pub(crate) mod tests {
         let detected = ToolchainDetector::detect_workspace_ecosystems(dir.path(), None);
         assert!(
             detected.contains(&ToolchainEcosystem::AppleSdk),
-            "Package.swift must detect AppleSdk"
+            "Package.swift at root must detect AppleSdk"
         );
         assert!(
             detected.contains(&ToolchainEcosystem::Cc),

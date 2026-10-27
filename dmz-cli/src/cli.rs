@@ -197,6 +197,10 @@ pub enum Commands {
         /// Skip automatic ecosystem verification check
         #[arg(long, default_value_t = false)]
         skip_ecosystem_verify: bool,
+
+        /// Run verification without sandbox isolation (NOT recommended)
+        #[arg(long, default_value_t = false)]
+        no_sandbox: bool,
     },
 
     /// Open an interactive shell inside the workspace (sandboxed by default)
@@ -261,6 +265,10 @@ pub enum EcosystemAction {
         /// Path to workspace root directory
         #[arg(short, long, default_value = ".")]
         workspace: PathBuf,
+
+        /// Run verification without sandbox isolation (NOT recommended)
+        #[arg(long, default_value_t = false)]
+        no_sandbox: bool,
     },
 }
 
@@ -427,5 +435,9 @@ pub enum AirgapCommands {
         /// Skip automatic ecosystem verification check
         #[arg(long, default_value_t = false)]
         skip_ecosystem_verify: bool,
+
+        /// Run verification without sandbox isolation (NOT recommended)
+        #[arg(long, default_value_t = false)]
+        no_sandbox: bool,
     },
 }

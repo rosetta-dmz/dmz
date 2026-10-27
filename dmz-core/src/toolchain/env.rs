@@ -100,6 +100,35 @@ impl ToolchainEnv {
             );
         }
 
+        if toolchains_dir.join("node").exists() {
+            let node_modules = toolchains_dir.join("node/lib/node_modules");
+            if node_modules.is_dir() {
+                let existing = env_map.get("NODE_PATH").cloned().unwrap_or_default();
+                let separator = if cfg!(windows) { ";" } else { ":" };
+                let nm_str = node_modules.to_string_lossy().to_string();
+                let new_val = if existing.is_empty() {
+                    nm_str
+                } else {
+                    format!("{}{}{}", nm_str, separator, existing)
+                };
+                env_map.insert("NODE_PATH".into(), new_val);
+            }
+        }
+
+        if toolchains_dir.join("php").exists() {
+            env_map.insert(
+                "PHPRC".into(),
+                toolchains_dir.join("php").to_string_lossy().to_string(),
+            );
+        }
+
+        if toolchains_dir.join("ruby").exists() {
+            env_map.insert(
+                "GEM_HOME".into(),
+                toolchains_dir.join("ruby").to_string_lossy().to_string(),
+            );
+        }
+
         if toolchains_dir.join("cc").exists() {
             let cc_dir = toolchains_dir.join("cc");
             let cc_bin = cc_dir.join("bin/clang");
@@ -166,8 +195,7 @@ impl ToolchainEnv {
         let has_dmz_toolchain = dmz_toolchain_cmake.exists();
         if has_dmz_toolchain
             && (toolchains_dir.join("cmake").exists()
-                || workspace_root.join("CMakeLists.txt").exists()
-                || which::which("cmake").is_ok())
+                || workspace_root.join("CMakeLists.txt").exists())
         {
             let tc_str = dmz_toolchain_cmake.to_string_lossy().to_string();
             env_map.insert("CMAKE_TOOLCHAIN_FILE".into(), tc_str.clone());
