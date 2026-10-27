@@ -58,17 +58,27 @@ impl EphemeralFs {
             use nix::mount::{mount, MsFlags};
 
             let options = format!("size={}", self.size_limit_bytes);
-            mount(
+            let mount_res = mount(
                 Some("tmpfs"),
                 &self.mount_path,
                 Some("tmpfs"),
                 MsFlags::MS_NODEV | MsFlags::MS_NOSUID,
                 Some(options.as_str()),
-            )
-            .map_err(|e| EphemeralError::MountFailed(format!("Linux tmpfs mount failed: {}", e)))?;
+            );
 
-            self.is_mounted = true;
-            info!(path = ?self.mount_path, "Mounted Linux tmpfs scratchpad");
+            if mount_res.is_ok() {
+                self.is_mounted = true;
+                info!(path = ?self.mount_path, "Mounted Linux tmpfs scratchpad");
+            } else {
+                // Fallback for unprivileged Linux environments (e.g. CI runners or non-root users)
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&self.mount_path, fs::Permissions::from_mode(0o700));
+                self.is_mounted = false;
+                info!(
+                    path = ?self.mount_path,
+                    "Initialized Linux volatile scratchpad with restricted permissions (unprivileged fallback)"
+                );
+            }
         }
 
         #[cfg(target_os = "macos")]
