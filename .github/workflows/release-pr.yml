@@ -47,28 +47,46 @@ jobs:
           echo "Running release preparation with bump mode: ${BUMP_MODE}..."
           python3 scripts/prepare-release.py --bump "${BUMP_MODE}"
 
-      - name: Create or Update Release Pull Request
+      - name: Push Release Branch & Create PR
         if: steps.bump.outputs.has_changes == 'true'
-        uses: peter-evans/create-pull-request@v7
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          branch: release/next
-          title: "chore(release): DMZ v${{ steps.bump.outputs.new_version }}"
-          commit-message: "chore(release): bump workspace version to ${{ steps.bump.outputs.new_version }}"
-          body: |
-            ## DMZ Platform Release Preparation: v${{ steps.bump.outputs.new_version }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-            This automated pull request updates workspace manifests and changelogs for release **v${{ steps.bump.outputs.new_version }}**.
+          echo "[+] Staging synchronized manifests for v${NEW_VERSION}..."
+          git checkout -B release/next
+          git add Cargo.toml Cargo.lock dmz-core/workspace/airgap_manifest.json CHANGELOG.md
+          git commit -m "chore(release): bump workspace version to ${NEW_VERSION}"
 
-            ### Automated Manifest Updates:
-            - **Cargo.toml**: Workspace version updated to `${{ steps.bump.outputs.new_version }}`
-            - **Cargo.lock**: Lockfile synchronized via `cargo check --workspace`
-            - **dmz-core/workspace/airgap_manifest.json**: Offline toolchain version updated to `${{ steps.bump.outputs.new_version }}`
-            - **CHANGELOG.md**: Categorized release notes generated from Conventional Commits
+          echo "[+] Pushing release/next branch to origin..."
+          git push -f origin release/next
 
-            ### How to Publish:
-            When ready to publish this release, simply **merge this Pull Request into main**.
-            Upon merge, GitHub Actions will automatically tag `v${{ steps.bump.outputs.new_version }}` and trigger the multi-platform binary compilation and release publishing.
-          labels: |
-            release
-            automated
+          echo "[+] Attempting to create or update Pull Request..."
+          PR_EXISTS=$(gh pr list --head release/next --base main --state open --json number -q '.[0].number' 2>/dev/null || true)
+          if [ -n "${PR_EXISTS}" ]; then
+            echo "Pull Request #${PR_EXISTS} is already open for branch release/next."
+          else
+            gh pr create \
+              --base main \
+              --head release/next \
+              --title "chore(release): DMZ v${NEW_VERSION}" \
+              --body "## DMZ Platform Release Preparation: v${NEW_VERSION}
+
+          This automated pull request updates workspace manifests and changelogs for release **v${NEW_VERSION}**.
+
+          ### Automated Manifest Updates:
+          - **Cargo.toml**: Workspace version updated to \`${NEW_VERSION}\`
+          - **Cargo.lock**: Lockfile synchronized via \`cargo check --workspace\`
+          - **dmz-core/workspace/airgap_manifest.json**: Offline toolchain version updated to \`${NEW_VERSION}\`
+          - **CHANGELOG.md**: Categorized release notes generated from Conventional Commits
+
+          ### How to Publish:
+          Merge this Pull Request into \`main\` to automatically tag and publish **v${NEW_VERSION}**." \
+              --label "release,automated" || {
+                echo "::warning::GitHub Actions is not permitted to create pull requests directly via REST API in this repository."
+                echo "::notice::Branch 'release/next' was pushed successfully. You can open the PR at https://github.com/${{ github.repository }}/pull/new/release/next or enable 'Allow GitHub Actions to create and approve pull requests' in repository Settings > Actions > General > Workflow permissions."
+              }
+          fi
