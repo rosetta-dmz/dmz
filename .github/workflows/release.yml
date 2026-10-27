@@ -2,15 +2,80 @@ name: Release DMZ Platform
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag to release (e.g. v1.2.4)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
 
 jobs:
+  tag-release:
+    name: Check or Cut Release Tag
+    runs-on: ubuntu-24.04
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      release_tag: ${{ steps.check.outputs.release_tag }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Evaluate Release Tag
+        id: check
+        run: |
+          # 1. Direct Tag Push
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG_NAME="${GITHUB_REF_NAME}"
+            echo "Triggered directly via git tag: ${TAG_NAME}"
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "release_tag=${TAG_NAME}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # 2. Workflow Dispatch
+          if [ -n "${{ github.event.inputs.tag_name }}" ]; then
+            TAG_NAME="${{ github.event.inputs.tag_name }}"
+            echo "Triggered via workflow dispatch: ${TAG_NAME}"
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "release_tag=${TAG_NAME}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # 3. Push to main: Check if workspace version was bumped and lacks a tag
+          CARGO_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "dmz-cli") | .version')
+          TARGET_TAG="v${CARGO_VERSION}"
+          echo "Cargo workspace version: ${CARGO_VERSION} (Target tag: ${TARGET_TAG})"
+
+          if git rev-parse "${TARGET_TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TARGET_TAG} already exists on remote. No new release needed."
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          else
+            echo "[+] New release version detected! Creating and pushing tag ${TARGET_TAG}..."
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "${TARGET_TAG}" -m "DMZ ${TARGET_TAG}: Automated DMZ Platform Release"
+            git push origin "${TARGET_TAG}"
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "release_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
+          fi
+
   validate-tag:
     name: Validate Git Tag vs Cargo.toml
+    needs: [tag-release]
+    if: needs.tag-release.outputs.should_release == 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout Repository
@@ -21,7 +86,8 @@ jobs:
 
       - name: Verify Tag Matches Cargo.toml
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          TARGET_TAG="${{ needs.tag-release.outputs.release_tag }}"
+          TAG_VERSION="${TARGET_TAG#v}"
           echo "Verifying release tag ($TAG_VERSION)..."
           CARGO_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "dmz-cli") | .version')
           echo "Cargo workspace package version: $CARGO_VERSION"
@@ -34,7 +100,8 @@ jobs:
 
   build-cli:
     name: Build CLI (${{ matrix.target }})
-    needs: [validate-tag]
+    needs: [tag-release, validate-tag]
+    if: needs.tag-release.outputs.should_release == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -83,7 +150,8 @@ jobs:
 
   build-gui:
     name: Build GUI (${{ matrix.os }})
-    needs: [validate-tag]
+    needs: [tag-release, validate-tag]
+    if: needs.tag-release.outputs.should_release == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -139,7 +207,7 @@ jobs:
               <key>CFBundleIdentifier</key>
               <string>com.dmz.sandbox</string>
               <key>CFBundleVersion</key>
-              <string>${{ github.ref_name }}</string>
+              <string>${{ needs.tag-release.outputs.release_tag }}</string>
               <key>CFBundlePackageType</key>
               <string>APPL</string>
               <key>CFBundleExecutable</key>
@@ -183,7 +251,8 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [build-cli, build-gui]
+    needs: [tag-release, build-cli, build-gui]
+    if: needs.tag-release.outputs.should_release == 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout Repository
@@ -198,6 +267,7 @@ jobs:
       - name: Publish Release & Upload Assets
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ needs.tag-release.outputs.release_tag }}
           files: final-release-assets/*
           generate_release_notes: true
         env:
