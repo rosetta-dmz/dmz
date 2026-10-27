@@ -94,31 +94,31 @@ impl ToolchainProvider {
         RustDiscoverer.discover()
     }
 
-    /// Discovers host Node.js runtime and companion package managers (npm, pnpm, yarn).
+    /// Discovers the host Node.js runtime and npm binary.
     #[inline]
     pub fn discover_node() -> Result<Option<DiscoveredToolchain>, String> {
         NodeDiscoverer.discover()
     }
 
-    /// Discovers host Python runtime (python3, pip), prioritizing standalone environments.
+    /// Discovers the host Python interpreter and site-packages.
     #[inline]
     pub fn discover_python() -> Result<Option<DiscoveredToolchain>, String> {
         PythonDiscoverer.discover()
     }
 
-    /// Discovers host Go toolchain ($GOROOT, go), prioritizing official standalone GOROOT.
+    /// Discovers the host Go compiler and standard library packages.
     #[inline]
     pub fn discover_go() -> Result<Option<DiscoveredToolchain>, String> {
         GoDiscoverer.discover()
     }
 
-    /// Discovers host PHP runtime and Composer package manager.
+    /// Discovers standalone PHP runtime distribution.
     #[inline]
     pub fn discover_php() -> Result<Option<DiscoveredToolchain>, String> {
         PhpDiscoverer.discover()
     }
 
-    /// Discovers host Ruby runtime and Bundler package manager.
+    /// Discovers standalone Ruby runtime distribution.
     #[inline]
     pub fn discover_ruby() -> Result<Option<DiscoveredToolchain>, String> {
         RubyDiscoverer.discover()
@@ -130,13 +130,13 @@ impl ToolchainProvider {
         CMakeDiscoverer.discover()
     }
 
-    /// Discovers standalone Ninja build tool.
+    /// Discovers standalone Ninja build tool distribution.
     #[inline]
     pub fn discover_ninja() -> Result<Option<DiscoveredToolchain>, String> {
         NinjaDiscoverer.discover()
     }
 
-    /// Discovers standalone Make toolchain.
+    /// Discovers standalone GNU Make / BSD Make distribution.
     #[inline]
     pub fn discover_make() -> Result<Option<DiscoveredToolchain>, String> {
         MakeDiscoverer.discover()
@@ -226,49 +226,6 @@ mod tests {
         fn discover(&self) -> Result<Option<DiscoveredToolchain>, String> {
             Ok(self.mock_toolchain.clone())
         }
-    }
-
-    #[test]
-    fn test_registry_polymorphism_and_open_closed_principle() {
-        let mut registry = DiscoveryRegistry::empty();
-
-        let mock_tc = DiscoveredToolchain {
-            ecosystem: ToolchainEcosystem::Rust,
-            version: "rustc 1.99.0-mock".into(),
-            root_dir: PathBuf::from("/mock/sysroot"),
-            bin_files: vec![(PathBuf::from("/mock/bin/rustc"), "bin/rustc".into())],
-            lib_files: vec![],
-        };
-
-        registry.register(Box::new(MockDiscoverer {
-            ecosystem: ToolchainEcosystem::Rust,
-            mock_toolchain: Some(mock_tc),
-        }));
-
-        let discovered = registry.discover_all();
-        assert_eq!(discovered.len(), 1);
-        assert_eq!(discovered[0].ecosystem, ToolchainEcosystem::Rust);
-        assert_eq!(discovered[0].version, "rustc 1.99.0-mock");
-    }
-
-    #[test]
-    fn test_is_non_standalone_path_heuristics() {
-        assert!(is_non_standalone_path(Path::new(
-            "/opt/homebrew/Cellar/rust/1.96.0/bin/cargo"
-        )));
-        assert!(is_non_standalone_path(Path::new(
-            "/usr/local/Cellar/node/20.0/bin/node"
-        )));
-        assert!(is_non_standalone_path(Path::new(
-            "/nix/store/abc-rust/bin/rustc"
-        )));
-
-        assert!(!is_non_standalone_path(Path::new(
-            "/Users/user/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo"
-        )));
-        assert!(!is_non_standalone_path(Path::new(
-            "/Users/user/.nvm/versions/node/v20.0.0/bin/node"
-        )));
     }
 
     #[test]

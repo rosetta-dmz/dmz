@@ -268,6 +268,14 @@ if [ -d "$DMZ_WS/.dmz/toolchains/applesdk" ]; then
             done
         fi
     done
+    if [ -z "$SDKROOT" ]; then
+        if command -v xcrun >/dev/null 2>&1; then
+            _host_sdk="$(xcrun --show-sdk-path 2>/dev/null)"
+            if [ -n "$_host_sdk" ] && [ -d "$_host_sdk" ]; then
+                export SDKROOT="$_host_sdk"
+            fi
+        fi
+    fi
 fi
 
 if [ -d "$DMZ_WS/.dmz/toolchains/pkgconfig" ]; then
