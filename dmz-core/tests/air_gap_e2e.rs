@@ -231,12 +231,10 @@ fn test_native_build_tool_cmake_detection_and_packaging() -> anyhow::Result<()> 
         "[package]\nname = \"native-test\"\nversion = \"0.1.0\"\n[dependencies]\ncmake = \"0.1\"",
     )?;
 
-    // Simulate vendored cmake-rs crate
-    let vendor_cmake = workspace_path.join(".cargo/vendor/cmake-0.1.50");
-    fs::create_dir_all(&vendor_cmake)?;
+    // Manifest-driven native build: workspace declares CMakeLists.txt
     fs::write(
-        vendor_cmake.join("Cargo.toml"),
-        "[package]\nname = \"cmake\"\nversion = \"0.1.50\"",
+        workspace_path.join("CMakeLists.txt"),
+        "cmake_minimum_required(VERSION 3.10)\nproject(native_test)\n",
     )?;
 
     // Verify requirement detection detects Rust, CMake, and companion toolchains (Cc and Ninja)
@@ -248,7 +246,7 @@ fn test_native_build_tool_cmake_detection_and_packaging() -> anyhow::Result<()> 
     );
     assert!(
         detected.contains(&dmz_core::toolchain::ToolchainEcosystem::CMake),
-        "Must detect CMake when cmake crate is vendored"
+        "Must detect CMake when CMakeLists.txt is present"
     );
     assert!(
         detected.contains(&dmz_core::toolchain::ToolchainEcosystem::Cc),
