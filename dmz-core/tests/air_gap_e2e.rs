@@ -212,7 +212,10 @@ fn test_toolchain_packaging_and_import_roundtrip() -> anyhow::Result<()> {
         dmz_core::toolchain::ToolchainPackager::inject_toolchain_paths(&import_target, &mut envs);
         assert!(envs.contains_key("PATH"), "PATH should be injected");
         assert!(
-            envs.get("PATH").unwrap().contains(".dmz/toolchains"),
+            envs.get("PATH")
+                .unwrap()
+                .replace('\\', "/")
+                .contains(".dmz/toolchains"),
             "PATH should contain .dmz/toolchains"
         );
     }
@@ -353,14 +356,13 @@ fn test_native_build_tool_cmake_detection_and_packaging() -> anyhow::Result<()> 
         "PKG_CONFIG_PATH must be injected"
     );
     assert!(envs.contains_key("PATH"), "PATH must be injected");
+    let path_str = envs.get("PATH").unwrap().replace('\\', "/");
     assert!(
-        envs.get("PATH")
-            .unwrap()
-            .contains(".dmz/toolchains/cmake/bin"),
+        path_str.contains(".dmz/toolchains/cmake/bin"),
         "PATH must contain cmake bin"
     );
     assert!(
-        envs.get("PATH").unwrap().contains(".dmz/toolchains/cc/bin"),
+        path_str.contains(".dmz/toolchains/cc/bin"),
         "PATH must contain cc bin"
     );
 
@@ -440,6 +442,7 @@ fn test_android_ndk_and_apple_sdk_e2e_setup_and_environment() -> anyhow::Result<
     assert!(
         envs.get("ANDROID_NDK_HOME")
             .unwrap()
+            .replace('\\', "/")
             .ends_with(".dmz/toolchains/androidndk"),
         "ANDROID_NDK_HOME must point to bundled androidndk"
     );
@@ -451,13 +454,17 @@ fn test_android_ndk_and_apple_sdk_e2e_setup_and_environment() -> anyhow::Result<
     assert!(
         envs.get("DEVELOPER_DIR")
             .unwrap()
+            .replace('\\', "/")
             .ends_with(".dmz/toolchains/applesdk"),
         "DEVELOPER_DIR must point to bundled applesdk"
     );
 
     assert!(envs.contains_key("SDKROOT"), "SDKROOT must be injected");
     assert!(
-        envs.get("SDKROOT").unwrap().contains("MacOSX14.0.sdk"),
+        envs.get("SDKROOT")
+            .unwrap()
+            .replace('\\', "/")
+            .contains("MacOSX14.0.sdk"),
         "SDKROOT must resolve to the bundled Apple SDK directory"
     );
 
@@ -465,6 +472,7 @@ fn test_android_ndk_and_apple_sdk_e2e_setup_and_environment() -> anyhow::Result<
     assert!(
         envs.get("PATH")
             .unwrap()
+            .replace('\\', "/")
             .contains(".dmz/toolchains/applesdk/bin"),
         "PATH must contain applesdk bin"
     );

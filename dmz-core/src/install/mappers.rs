@@ -183,12 +183,14 @@ impl PnpmMapper {
         #[cfg(windows)]
         {
             use std::os::windows::fs::symlink_dir;
-            symlink_dir(&virtual_store_dir, &root_link_dir).map_err(|e| {
-                super::InstallError::MapperError(format!(
-                    "Failed to create pnpm symlink for {}: {}",
-                    pkg.name, e
-                ))
-            })?;
+            if symlink_dir(&virtual_store_dir, &root_link_dir).is_err() {
+                copy_dir_all(&virtual_store_dir, &root_link_dir).map_err(|e| {
+                    super::InstallError::MapperError(format!(
+                        "Failed to create pnpm directory link for {}: {}",
+                        pkg.name, e
+                    ))
+                })?;
+            }
         }
 
         Ok(())
@@ -524,4 +526,19 @@ impl MavenMapper {
         .map_err(|e| super::InstallError::IoError(format!("Failed to copy jar: {}", e)))?;
         Ok(())
     }
+}
+
+#[allow(dead_code)]
+fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            copy_dir_all(&entry.path(), &dst.join(entry.file_name()))?;
+        } else {
+            fs::copy(entry.path(), dst.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
 }

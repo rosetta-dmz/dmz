@@ -230,7 +230,7 @@ version = "1.0.0"
     assert!(env_map.contains_key("CARGO_HOME"));
     let path = env_map.get("PATH").unwrap();
     assert!(
-        path.contains(".dmz/toolchains/rust/bin"),
+        path.replace('\\', "/").contains(".dmz/toolchains/rust/bin"),
         "PATH must prepend bundled rust bin"
     );
 }
@@ -602,7 +602,7 @@ fn test_pure_node_pnpm_workspace_never_hallucinates_foreign_toolchains() {
     ToolchainPackager::inject_toolchain_paths(target_ws, &mut env_map);
     assert!(env_map.contains_key("NODE_PATH"));
     let path = env_map.get("PATH").unwrap();
-    assert!(path.contains(".dmz/toolchains/node/bin"));
+    assert!(path.replace('\\', "/").contains(".dmz/toolchains/node/bin"));
     assert!(!env_map.contains_key("CC"));
     assert!(!env_map.contains_key("DEVELOPER_DIR"));
     assert!(!env_map.contains_key("CMAKE_TOOLCHAIN_FILE"));

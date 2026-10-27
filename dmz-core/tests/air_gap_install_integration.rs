@@ -457,10 +457,17 @@ fn test_airgap_offline_install_npm_bin_links() -> Result<(), Box<dyn std::error:
     let installed_count = InstallerEngine::install(&config)?;
     assert_eq!(installed_count, 1);
 
-    let bin_link = workspace_path
-        .join("node_modules")
-        .join(".bin")
-        .join("eslint");
+    let bin_link = if cfg!(windows) {
+        workspace_path
+            .join("node_modules")
+            .join(".bin")
+            .join("eslint.cmd")
+    } else {
+        workspace_path
+            .join("node_modules")
+            .join(".bin")
+            .join("eslint")
+    };
     assert!(
         bin_link.exists(),
         "eslint executable should exist in node_modules/.bin"
