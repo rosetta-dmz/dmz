@@ -92,12 +92,17 @@ def detect_bump_type(commits: list[str]) -> str:
     has_breaking = False
     has_feat = False
 
+    NON_FEATURE_SCOPES = {"ci", "build", "chore", "docs", "test", "infra"}
+
     for commit in commits:
         if "BREAKING CHANGE:" in commit or re.match(r"^[a-zA-Z]+(\([^\)]+\))?!:", commit):
             has_breaking = True
             break
-        if re.match(r"^feat(\([^\)]+\))?:", commit):
-            has_feat = True
+        m = re.match(r"^feat(?:\(([^)]+)\))?:", commit)
+        if m:
+            scope = m.group(1).lower() if m.group(1) else ""
+            if scope not in NON_FEATURE_SCOPES:
+                has_feat = True
 
     if has_breaking:
         return "major"

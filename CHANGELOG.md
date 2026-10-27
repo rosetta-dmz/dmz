@@ -1,0 +1,9 @@
+# Changelog
+
+All notable changes to the DMZ Platform are documented here.
+
+## [v1.2.4] - 2026-10-27
+
+### 🔧 Maintenance & CI
+- feat(ci): automate version bumping, changelogs, and release PR workflow
+- fix(ci): replace third-party PR action with native git/gh cli and graceful permission fallback
