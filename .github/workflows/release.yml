@@ -41,7 +41,7 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-musl
-          - os: macos-15
+          - os: macos-latest
             target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -90,7 +90,7 @@ jobs:
         include:
           - os: ubuntu-24.04
             artifact_name: DMZ-GUI-Linux.tar.gz
-          - os: macos-15
+          - os: macos-latest
             artifact_name: DMZ-GUI-macOS.zip
           - os: windows-latest
             artifact_name: DMZ-GUI-Windows.zip

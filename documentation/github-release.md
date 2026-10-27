@@ -32,7 +32,7 @@ git tag -a v* -m "DMZ v*: DMZ Platform Release"
 git push origin v*
 ```
 
-**Note**: Pushing the tag (`git push origin v*`) triggers the release workflow ([`.github/workflows/release.yml`](../.github/workflows/release.yml)). The workflow's `validate-tag` gate automatically verifies that the tag matches `Cargo.toml` before provisioning multi-platform runners (`ubuntu-24.04`, `macos-15`, `windows-latest`) to compile CLI/GUI binaries, generate release notes, and publish the release.
+**Note**: Pushing the tag (`git push origin v*`) triggers the release workflow ([`.github/workflows/release.yml`](../.github/workflows/release.yml)). The workflow's `validate-tag` gate automatically verifies that the tag matches `Cargo.toml` before provisioning multi-platform runners (`ubuntu-24.04`, `macos-latest`, `windows-latest`) to compile CLI/GUI binaries, generate release notes, and publish the release.
 
 ```bash
 # (Optional) Monitor workflow progress in real-time
