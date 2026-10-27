@@ -164,7 +164,11 @@ impl ToolchainEnv {
 
         let dmz_toolchain_cmake = toolchains_dir.join("dmz.toolchain.cmake");
         let has_dmz_toolchain = dmz_toolchain_cmake.exists();
-        if has_dmz_toolchain {
+        if has_dmz_toolchain
+            && (toolchains_dir.join("cmake").exists()
+                || workspace_root.join("CMakeLists.txt").exists()
+                || which::which("cmake").is_ok())
+        {
             let tc_str = dmz_toolchain_cmake.to_string_lossy().to_string();
             env_map.insert("CMAKE_TOOLCHAIN_FILE".into(), tc_str.clone());
             env_map.insert("HOST_CMAKE_TOOLCHAIN_FILE".into(), tc_str.clone());
