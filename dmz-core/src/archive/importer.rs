@@ -422,6 +422,28 @@ impl AirGapImporter {
             }
         }
 
+        // Root Manifest Dominance: Clean up or ignore orphaned / unrequested toolchain stubs
+        // (e.g. applesdk) that may have been bundled inadvertently or left over from previous imports.
+        let declared_ecosystems = crate::toolchain::ToolchainProvider::detect_workspace_ecosystems(
+            effective_workspace,
+            None,
+        );
+        if !declared_ecosystems.contains(&crate::toolchain::ToolchainEcosystem::AppleSdk) {
+            let stray_apple = effective_workspace.join(".dmz/toolchains/applesdk");
+            if stray_apple.exists() {
+                if let Err(e) = fs::remove_dir_all(&stray_apple) {
+                    warn!(
+                        "Failed to purge unrequested applesdk toolchain directory: {}",
+                        e
+                    );
+                } else {
+                    info!(
+                        "Purged unrequested applesdk toolchain directory to preserve host system linker integrity"
+                    );
+                }
+            }
+        }
+
         // Setup imported toolchain permissions, quarantine flags, and activator scripts
         if has_toolchains {
             if let Err(e) =

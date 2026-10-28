@@ -16,6 +16,10 @@ impl ToolchainEnv {
         let mut bin_paths = Vec::new();
         if let Ok(entries) = fs::read_dir(&toolchains_dir) {
             for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name == "applesdk" && !Self::is_genuine_apple_developer_dir(&entry.path()) {
+                    continue;
+                }
                 let bin = entry.path().join("bin");
                 if bin.exists() {
                     bin_paths.push(bin.to_string_lossy().to_string());
@@ -87,17 +91,23 @@ impl ToolchainEnv {
         }
 
         if toolchains_dir.join("go").exists() {
-            env_map.insert(
-                "GOROOT".into(),
-                toolchains_dir.join("go").to_string_lossy().to_string(),
-            );
+            let go_dir = toolchains_dir.join("go");
+            let has_go_bin = go_dir.join("bin/go").exists() || go_dir.join("bin/go.exe").exists();
+            let has_go_pkg_or_src = go_dir.join("pkg").is_dir() || go_dir.join("src").is_dir();
+            if has_go_bin || has_go_pkg_or_src {
+                env_map.insert("GOROOT".into(), go_dir.to_string_lossy().to_string());
+            }
         }
 
         if toolchains_dir.join("python").exists() {
-            env_map.insert(
-                "PYTHONHOME".into(),
-                toolchains_dir.join("python").to_string_lossy().to_string(),
-            );
+            let py_dir = toolchains_dir.join("python");
+            let has_py_bin = py_dir.join("bin/python3").exists()
+                || py_dir.join("bin/python").exists()
+                || py_dir.join("bin/pip").exists()
+                || py_dir.join("python.exe").exists();
+            if has_py_bin {
+                env_map.insert("PYTHONHOME".into(), py_dir.to_string_lossy().to_string());
+            }
         }
 
         if toolchains_dir.join("node").exists() {
@@ -131,47 +141,44 @@ impl ToolchainEnv {
 
         if toolchains_dir.join("cc").exists() {
             let cc_dir = toolchains_dir.join("cc");
-            let cc_bin = cc_dir.join("bin/clang");
-            let gcc_bin = cc_dir.join("bin/gcc");
-            let generic_cc = cc_dir.join("bin/cc");
+            let cc_bin = Self::find_binary(&cc_dir, "bin/clang");
+            let gcc_bin = Self::find_binary(&cc_dir, "bin/gcc");
+            let generic_cc = Self::find_binary(&cc_dir, "bin/cc");
 
-            if cc_bin.exists() {
-                env_map.insert("CC".into(), cc_bin.to_string_lossy().to_string());
-                let cxx = cc_dir.join("bin/clang++");
-                if cxx.exists() {
+            if let Some(bin) = cc_bin {
+                env_map.insert("CC".into(), bin.to_string_lossy().to_string());
+                if let Some(cxx) = Self::find_binary(&cc_dir, "bin/clang++") {
                     env_map.insert("CXX".into(), cxx.to_string_lossy().to_string());
                 }
-            } else if gcc_bin.exists() {
-                env_map.insert("CC".into(), gcc_bin.to_string_lossy().to_string());
-                let gxx = cc_dir.join("bin/g++");
-                if gxx.exists() {
+            } else if let Some(bin) = gcc_bin {
+                env_map.insert("CC".into(), bin.to_string_lossy().to_string());
+                if let Some(gxx) = Self::find_binary(&cc_dir, "bin/g++") {
                     env_map.insert("CXX".into(), gxx.to_string_lossy().to_string());
                 }
-            } else if generic_cc.exists() {
-                env_map.insert("CC".into(), generic_cc.to_string_lossy().to_string());
+            } else if let Some(bin) = generic_cc {
+                env_map.insert("CC".into(), bin.to_string_lossy().to_string());
             }
 
-            let llvm_ar = cc_dir.join("bin/llvm-ar");
-            let ar_bin = cc_dir.join("bin/ar");
-            if llvm_ar.exists() {
-                env_map.insert("AR".into(), llvm_ar.to_string_lossy().to_string());
-            } else if ar_bin.exists() {
-                env_map.insert("AR".into(), ar_bin.to_string_lossy().to_string());
+            let llvm_ar = Self::find_binary(&cc_dir, "bin/llvm-ar");
+            let ar_bin = Self::find_binary(&cc_dir, "bin/ar");
+            if let Some(bin) = llvm_ar {
+                env_map.insert("AR".into(), bin.to_string_lossy().to_string());
+            } else if let Some(bin) = ar_bin {
+                env_map.insert("AR".into(), bin.to_string_lossy().to_string());
             }
 
-            let llvm_ranlib = cc_dir.join("bin/llvm-ranlib");
-            let ranlib_bin = cc_dir.join("bin/ranlib");
-            if llvm_ranlib.exists() {
-                env_map.insert("RANLIB".into(), llvm_ranlib.to_string_lossy().to_string());
-            } else if ranlib_bin.exists() {
-                env_map.insert("RANLIB".into(), ranlib_bin.to_string_lossy().to_string());
+            let llvm_ranlib = Self::find_binary(&cc_dir, "bin/llvm-ranlib");
+            let ranlib_bin = Self::find_binary(&cc_dir, "bin/ranlib");
+            if let Some(bin) = llvm_ranlib {
+                env_map.insert("RANLIB".into(), bin.to_string_lossy().to_string());
+            } else if let Some(bin) = ranlib_bin {
+                env_map.insert("RANLIB".into(), bin.to_string_lossy().to_string());
             }
         }
 
         if toolchains_dir.join("cmake").exists() {
             let cmake_dir = toolchains_dir.join("cmake");
-            let cmake_bin = cmake_dir.join("bin/cmake");
-            if cmake_bin.exists() {
+            if let Some(cmake_bin) = Self::find_binary(&cmake_dir, "bin/cmake") {
                 env_map.insert("CMAKE".into(), cmake_bin.to_string_lossy().to_string());
             }
             let share_dir = cmake_dir.join("share");
@@ -204,17 +211,19 @@ impl ToolchainEnv {
         }
 
         if toolchains_dir.join("ninja").exists() {
-            let ninja_bin = toolchains_dir.join("ninja/bin/ninja");
-            if ninja_bin.exists() {
+            let ninja_dir = toolchains_dir.join("ninja");
+            if let Some(ninja_bin) = Self::find_binary(&ninja_dir, "bin/ninja") {
                 env_map.insert("NINJA".into(), ninja_bin.to_string_lossy().to_string());
                 env_map.insert("CMAKE_GENERATOR".into(), "Ninja".into());
             }
         }
 
         if toolchains_dir.join("make").exists() {
-            let make_bin = toolchains_dir.join("make/bin/make");
-            if make_bin.exists() {
-                env_map.insert("MAKE".into(), make_bin.to_string_lossy().to_string());
+            let make_dir = toolchains_dir.join("make");
+            let make_bin = Self::find_binary(&make_dir, "bin/make")
+                .or_else(|| Self::find_binary(&make_dir, "bin/mingw32-make"));
+            if let Some(bin) = make_bin {
+                env_map.insert("MAKE".into(), bin.to_string_lossy().to_string());
             }
         }
 
@@ -241,38 +250,29 @@ impl ToolchainEnv {
 
         if toolchains_dir.join("applesdk").exists() {
             let apple_dir = toolchains_dir.join("applesdk");
-            let apple_str = apple_dir.to_string_lossy().to_string();
-            env_map.insert("DEVELOPER_DIR".into(), apple_str.clone());
 
-            let mut found_sdk = false;
-            let sdk_candidates = [
-                apple_dir.join("Platforms/MacOSX.platform/Developer/SDKs"),
-                apple_dir.join("SDKs"),
-            ];
-            for parent in &sdk_candidates {
-                if let Ok(entries) = fs::read_dir(parent) {
-                    for entry in entries.flatten() {
-                        let p = entry.path();
-                        if p.is_dir() && p.extension().is_some_and(|ext| ext == "sdk") {
-                            env_map.insert("SDKROOT".into(), p.to_string_lossy().to_string());
-                            found_sdk = true;
-                            break;
-                        }
-                    }
-                }
-                if found_sdk {
-                    break;
-                }
+            // Only export DEVELOPER_DIR if it is a genuine, verified Xcode or Command Line Tools installation.
+            // Per Apple toolchain specifications (man 1 xcrun), pointing DEVELOPER_DIR to an arbitrary directory
+            // containing only loose binaries breaks xcrun and causes /usr/bin/cc to exit with status 1.
+            if Self::is_genuine_apple_developer_dir(&apple_dir) {
+                env_map.insert(
+                    "DEVELOPER_DIR".into(),
+                    apple_dir.to_string_lossy().to_string(),
+                );
             }
-            if !found_sdk {
-                env_map.insert("SDKROOT".into(), apple_str);
+
+            // Only export SDKROOT if an authentic .sdk directory is located; never point to a bare non-SDK directory.
+            if let Some(sdk_path) = Self::find_apple_sdk_root(&apple_dir) {
+                env_map.insert("SDKROOT".into(), sdk_path.to_string_lossy().to_string());
             }
         }
 
         if toolchains_dir.join("pkgconfig").exists() {
-            let pkg_bin = toolchains_dir.join("pkgconfig/bin/pkg-config");
-            if pkg_bin.exists() {
-                env_map.insert("PKG_CONFIG".into(), pkg_bin.to_string_lossy().to_string());
+            let pkg_dir = toolchains_dir.join("pkgconfig");
+            let pkg_bin = Self::find_binary(&pkg_dir, "bin/pkg-config")
+                .or_else(|| Self::find_binary(&pkg_dir, "bin/pkgconf"));
+            if let Some(bin) = pkg_bin {
+                env_map.insert("PKG_CONFIG".into(), bin.to_string_lossy().to_string());
             }
 
             let pc_lib = toolchains_dir.join("pkgconfig/lib/pkgconfig");
@@ -295,5 +295,52 @@ impl ToolchainEnv {
                 env_map.insert("PKG_CONFIG_PATH".into(), new_val);
             }
         }
+    }
+
+    /// Locates an executable binary within a toolchain directory, checking both extensionless (Unix)
+    /// and `.exe` (Windows) paths.
+    pub fn find_binary(dir: &Path, rel_path: &str) -> Option<std::path::PathBuf> {
+        let p = dir.join(rel_path);
+        if p.exists() {
+            return Some(p);
+        }
+        let exe = dir.join(format!("{}.exe", rel_path));
+        if exe.exists() {
+            return Some(exe);
+        }
+        None
+    }
+
+    /// Checks whether the directory is a genuine, authentic Apple Xcode or Command Line Tools root.
+    ///
+    /// Per Apple toolchain specifications (`man 1 xcrun`), DEVELOPER_DIR must point to a directory
+    /// containing developer tools (such as `usr/bin/xcrun` or `bin/xcrun`) and platform SDKs (`SDKs` or `Platforms`).
+    pub fn is_genuine_apple_developer_dir(apple_dir: &Path) -> bool {
+        let has_xcrun =
+            apple_dir.join("usr/bin/xcrun").exists() || apple_dir.join("bin/xcrun").exists();
+        let has_sdk_structure = apple_dir.join("Platforms").is_dir()
+            || apple_dir.join("SDKs").is_dir()
+            || apple_dir.join("Toolchains").is_dir();
+
+        has_xcrun && has_sdk_structure && Self::find_apple_sdk_root(apple_dir).is_some()
+    }
+
+    /// Searches for an authentic Apple SDK directory (*.sdk) within candidate subpaths.
+    pub fn find_apple_sdk_root(apple_dir: &Path) -> Option<std::path::PathBuf> {
+        let sdk_candidates = [
+            apple_dir.join("Platforms/MacOSX.platform/Developer/SDKs"),
+            apple_dir.join("SDKs"),
+        ];
+        for parent in &sdk_candidates {
+            if let Ok(entries) = fs::read_dir(parent) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_dir() && p.extension().is_some_and(|ext| ext == "sdk") {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+        None
     }
 }

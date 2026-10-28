@@ -62,90 +62,29 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     // inside the workspace (.dmz/cache), which is automatically writable under workspace permissions.
     let sandbox_cache_dir = resolved_config.workspace_path.join(".dmz").join("cache");
     let _ = std::fs::create_dir_all(&sandbox_cache_dir);
-    let cache_str = sandbox_cache_dir.to_string_lossy();
 
     let mut env_map: HashMap<String, String> = resolved_config.envs.into_iter().collect();
 
-    // Augment PATH to ensure user toolchain binaries are discoverable in non-login environments
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut current_path = env_map.get("PATH").cloned().unwrap_or_else(|| {
-        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".to_string())
-    });
+    // 1. Delegate bundled toolchain environment configuration to single source of truth in dmz-core
+    dmz_core::toolchain::ToolchainEnv::inject_toolchain_paths(
+        &resolved_config.workspace_path,
+        &mut env_map,
+    );
 
-    // Prepend bundled DMZ toolchains (<workspace>/.dmz/toolchains/*/bin) if present
-    let bundled_toolchains_dir = resolved_config.workspace_path.join(".dmz/toolchains");
-    if bundled_toolchains_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&bundled_toolchains_dir) {
-            for entry in entries.flatten() {
-                let bin = entry.path().join("bin");
-                if bin.exists() {
-                    current_path = format!("{}:{}", bin.display(), current_path);
-                }
-            }
-        }
-        if bundled_toolchains_dir.join("rust").exists() {
-            env_map.insert(
-                "RUSTUP_HOME".into(),
-                bundled_toolchains_dir
-                    .join("rust")
-                    .to_string_lossy()
-                    .to_string(),
-            );
-            if !env_map.contains_key("CARGO_HOME") {
-                env_map.insert(
-                    "CARGO_HOME".into(),
-                    resolved_config
-                        .workspace_path
-                        .join(".cargo")
-                        .to_string_lossy()
-                        .to_string(),
-                );
-            }
-            let rust_lib = bundled_toolchains_dir
-                .join("rust/lib")
-                .to_string_lossy()
-                .to_string();
-            let existing_dyld = env_map
-                .get("DYLD_LIBRARY_PATH")
-                .cloned()
-                .unwrap_or_default();
-            env_map.insert(
-                "DYLD_LIBRARY_PATH".into(),
-                if existing_dyld.is_empty() {
-                    rust_lib.clone()
-                } else {
-                    format!("{}:{}", rust_lib, existing_dyld)
-                },
-            );
-            let existing_ld = env_map.get("LD_LIBRARY_PATH").cloned().unwrap_or_default();
-            env_map.insert(
-                "LD_LIBRARY_PATH".into(),
-                if existing_ld.is_empty() {
-                    rust_lib
-                } else {
-                    format!("{}:{}", rust_lib, existing_ld)
-                },
-            );
-        }
-        if bundled_toolchains_dir.join("go").exists() {
-            env_map.insert(
-                "GOROOT".into(),
-                bundled_toolchains_dir
-                    .join("go")
-                    .to_string_lossy()
-                    .to_string(),
-            );
-        }
-        if bundled_toolchains_dir.join("python").exists() {
-            env_map.insert(
-                "PYTHONHOME".into(),
-                bundled_toolchains_dir
-                    .join("python")
-                    .to_string_lossy()
-                    .to_string(),
-            );
-        }
-    }
+    // 2. Augment PATH with host fallback and user toolchain directories
+    let separator = if cfg!(windows) { ";" } else { ":" };
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    let default_path = if cfg!(windows) {
+        "C:\\Windows\\System32;C:\\Windows".to_string()
+    } else {
+        "/usr/bin:/bin:/usr/sbin:/sbin".to_string()
+    };
+    let mut current_path = env_map
+        .get("PATH")
+        .cloned()
+        .unwrap_or_else(|| std::env::var("PATH").unwrap_or(default_path));
 
     let toolchain_bins = [
         format!("{}/.cargo/bin", home),
@@ -158,7 +97,7 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     ];
     for bin in &toolchain_bins {
         if PathBuf::from(bin).exists() && !current_path.contains(bin) {
-            current_path = format!("{}:{}", bin, current_path);
+            current_path = format!("{}{}{}", bin, separator, current_path);
         }
     }
 
@@ -168,7 +107,7 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
         .join("node_modules")
         .join(".bin");
     if node_bin.exists() {
-        current_path = format!("{}:{}", node_bin.display(), current_path);
+        current_path = format!("{}{}{}", node_bin.display(), separator, current_path);
     }
     env_map.insert("PATH".into(), current_path);
 
@@ -201,11 +140,33 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
         );
     }
 
-    env_map.insert("CARGO_HOME".into(), format!("{}/cargo", cache_str));
-    env_map.insert("npm_config_cache".into(), format!("{}/npm", cache_str));
-    env_map.insert("PIP_CACHE_DIR".into(), format!("{}/pip", cache_str));
-    env_map.insert("GOCACHE".into(), format!("{}/go", cache_str));
-    env_map.insert("GOPATH".into(), format!("{}/gopath", cache_str));
+    // Universal Ecosystem Cache Redirection
+    env_map.insert(
+        "CARGO_HOME".into(),
+        sandbox_cache_dir
+            .join("cargo")
+            .to_string_lossy()
+            .to_string(),
+    );
+    env_map.insert(
+        "npm_config_cache".into(),
+        sandbox_cache_dir.join("npm").to_string_lossy().to_string(),
+    );
+    env_map.insert(
+        "PIP_CACHE_DIR".into(),
+        sandbox_cache_dir.join("pip").to_string_lossy().to_string(),
+    );
+    env_map.insert(
+        "GOCACHE".into(),
+        sandbox_cache_dir.join("go").to_string_lossy().to_string(),
+    );
+    env_map.insert(
+        "GOPATH".into(),
+        sandbox_cache_dir
+            .join("gopath")
+            .to_string_lossy()
+            .to_string(),
+    );
 
     if !resolved_config.allow_network {
         env_map.insert("CARGO_NET_OFFLINE".into(), "true".into());
