@@ -6,12 +6,13 @@ on:
       - main
       - master
   pull_request:
+    types: [opened, synchronize, reopened, closed]
     branches:
       - main
       - master
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.number || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
@@ -20,6 +21,7 @@ permissions:
 jobs:
   changes:
     name: Detect Changed Files
+    if: github.event.action != 'closed'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -106,7 +108,7 @@ jobs:
   ci-gate:
     name: Continuous Integration
     needs: [changes, lint-and-format, test]
-    if: always()
+    if: always() && github.event.action != 'closed'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
