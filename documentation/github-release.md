@@ -19,7 +19,7 @@ Use this path when you want GitHub Actions to automatically compute the next Sem
    - Updates [`Cargo.lock`](../Cargo.lock) (synchronized via `cargo check --workspace`).
    - Updates [`dmz-core/workspace/airgap_manifest.json`](../dmz-core/workspace/airgap_manifest.json) (`dmz_version`).
    - Prepend categorized notes to [`CHANGELOG.md`](../CHANGELOG.md).
-   - Opens or updates a proposal Pull Request titled `chore(release): DMZ vX.Y.Z` on branch `release/next`.
+   - Opens or updates a proposal Pull Request titled `chore(release): DMZ v*` on branch `release/next`.
 
 #### Mandatory Manual Review & Approval
 1. Open the pending `release/next` Pull Request on GitHub.
@@ -32,8 +32,8 @@ Once merged into `main`:
 ```bash
 git checkout main
 git pull origin main
-git tag -a v1.2.6 -m "DMZ v1.2.6: DMZ Platform Release"
-git push origin v1.2.6
+git tag -a v* -m "DMZ v*: DMZ Platform Release"
+git push origin v*
 ```
 
 ---
@@ -45,6 +45,6 @@ git push origin v1.2.6
 ```bash
 git checkout main
 git pull origin main
-git tag -a v1.2.6 -m "DMZ v1.2.6: DMZ Platform Release"
-git push origin v1.2.6
+git tag -a v* -m "DMZ v*: DMZ Platform Release"
+git push origin v*
 ```
