@@ -1,15 +1,6 @@
-name: Automated Release PR
+name: Automated Release PR & Tagging
 
 on:
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - 'documentation/**'
-      - '.github/workflows/**'
-      - 'README.md'
-      - 'ROADMAP.md'
-      - 'CONTRIBUTING.md'
   workflow_dispatch:
     inputs:
       bump:
@@ -21,6 +12,10 @@ on:
           - minor
           - major
         default: 'auto'
+
+concurrency:
+  group: release-pr
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -40,14 +35,14 @@ jobs:
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Determine Next Version & Update Manifests
+      - name: Calculate Next Version & Update Manifests
         id: bump
         run: |
           BUMP_MODE="${{ github.event.inputs.bump || 'auto' }}"
           echo "Running release preparation with bump mode: ${BUMP_MODE}..."
           python3 scripts/prepare-release.py --bump "${BUMP_MODE}"
 
-      - name: Push Release Branch & Create PR
+      - name: Push Release Branch & Create/Update PR
         if: steps.bump.outputs.has_changes == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -64,16 +59,12 @@ jobs:
           echo "[+] Pushing release/next branch to origin..."
           git push -f origin release/next
 
-          echo "[+] Attempting to create or update Pull Request..."
-          PR_EXISTS=$(gh pr list --head release/next --base main --state open --json number -q '.[0].number' 2>/dev/null || true)
-          if [ -n "${PR_EXISTS}" ]; then
-            echo "Pull Request #${PR_EXISTS} is already open for branch release/next."
-          else
-            gh pr create \
-              --base main \
-              --head release/next \
-              --title "chore(release): DMZ v${NEW_VERSION}" \
-              --body "## DMZ Platform Release Preparation: v${NEW_VERSION}
+          echo "[+] Checking for existing Pull Request..."
+          PR_NUMBER=$(gh pr list --head release/next --base main --state open --json number -q '.[0].number' 2>/dev/null || true)
+          PR_TITLE="chore(release): DMZ v${NEW_VERSION}"
+
+          cat << EOF | sed 's/^[ ]*//' > pr_description.md
+          ## DMZ Platform Release Preparation: v${NEW_VERSION}
 
           This automated pull request updates workspace manifests and changelogs for release **v${NEW_VERSION}**.
 
@@ -84,7 +75,27 @@ jobs:
           - **CHANGELOG.md**: Categorized release notes generated from Conventional Commits
 
           ### How to Publish:
-          Merge this Pull Request into \`main\` to automatically tag and publish **v${NEW_VERSION}**." \
+          1. Review and approve this Pull Request.
+          2. Merge this Pull Request into \`main\`.
+          3. Tag and push the release:
+             \`\`\`bash
+             git checkout main && git pull origin main
+             git tag -a v${NEW_VERSION} -m "DMZ v${NEW_VERSION}: DMZ Platform Release"
+             git push origin v${NEW_VERSION}
+             \`\`\`
+             *(Or dispatch **Actions ➔ Release DMZ Platform ➔ Run workflow**).*
+          EOF
+
+          if [ -n "${PR_NUMBER}" ]; then
+            echo "Updating existing Pull Request #${PR_NUMBER}..."
+            gh pr edit "${PR_NUMBER}" --title "${PR_TITLE}" --body-file pr_description.md
+          else
+            echo "Creating new Pull Request..."
+            gh pr create \
+              --base main \
+              --head release/next \
+              --title "${PR_TITLE}" \
+              --body-file pr_description.md \
               --label "release,automated" || {
                 echo "::warning::GitHub Actions is not permitted to create pull requests directly via REST API in this repository."
                 echo "::notice::Branch 'release/next' was pushed successfully. You can open the PR at https://github.com/${{ github.repository }}/pull/new/release/next or enable 'Allow GitHub Actions to create and approve pull requests' in repository Settings > Actions > General > Workflow permissions."

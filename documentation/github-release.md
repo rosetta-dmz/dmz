@@ -1,66 +1,104 @@
 # DMZ Platform Release & Versioning Guide
 
-Starting with **v1.2.4 and beyond**, version bumping, manifest synchronization, changelog generation, git tagging, and release publishing are **completely automated by GitHub Actions**. Developers no longer need to manually modify `Cargo.toml`, `Cargo.lock`, or `airgap_manifest.json`.
+Starting with **v1.2.6 and beyond**, version bumping, manifest synchronization, changelog generation, git tagging, and release publishing are **strictly maintainer-initiated**. Routine development commits never trigger automated PR drafting or build jobs, and no release or code is ever published without mandatory manual human review and approval on GitHub. This guide is intended for project maintainers.
 
 ---
 
-## 🚀 Fully Automated Release Process (Default)
+## 🚀 Maintainer-Initiated Release Options
 
-### 1. Write Conventional Commits
-All standard development merges into `main` through Pull Requests. Use [Conventional Commits](https://www.conventionalcommits.org/) to allow CI to determine the next Semantic Version:
-- `feat:` or `feat(...):` ➔ Triggers a **minor** release (e.g., `1.2.3` ➔ `1.3.0`)
-- `fix:` or `fix(...):` ➔ Triggers a **patch** release (e.g., `1.2.3` ➔ `1.2.4`)
-- `BREAKING CHANGE:` or `feat!: ...` ➔ Triggers a **major** release (e.g., `1.2.3` ➔ `2.0.0`)
-- `chore:`, `perf:`, `docs:`, `refactor:` ➔ Categorized in changelogs; triggers patch release if needed.
+Maintainers can publish releases using either of two fully supported approaches:
 
-### 2. Automated Release PR (`release/next`)
-Whenever commits land on `main`, the [`.github/workflows/release-pr.yml`](../.github/workflows/release-pr.yml) workflow runs:
-1. It analyzes commits since the last release tag.
-2. It automatically updates:
-   - Root [`Cargo.toml`](../Cargo.toml) (`[workspace.package].version`)
-   - [`Cargo.lock`](../Cargo.lock) (synchronized via `cargo check --workspace`)
-   - [`dmz-core/workspace/airgap_manifest.json`](../dmz-core/workspace/airgap_manifest.json) (`dmz_version`)
-   - [`CHANGELOG.md`](../CHANGELOG.md) (categorized by Features, Bug Fixes, and Maintenance)
-3. It opens or updates a Pull Request titled `chore(release): DMZ vX.Y.Z` on branch `release/next`.
+### Path 1: Semi-Automated Release via Pull Request (Recommended)
+Use this path when you want GitHub Actions to automatically compute the next Semantic Version, synchronize workspace manifests, and generate categorized release notes from Conventional Commits before you review and approve.
 
-### 3. One-Click Publishing (Merge the Release PR)
-When you are ready to ship the release:
-1. Review the open `release/next` Pull Request.
-2. Click **Merge pull request** into `main`.
-3. The [`.github/workflows/release.yml`](../.github/workflows/release.yml) workflow immediately:
-   - Detects the new version in `Cargo.toml`.
-   - Automatically cuts and pushes git tag `vX.Y.Z`.
-   - Spawns multi-platform matrix runners (`ubuntu-24.04`, `macos-latest`, `windows-latest`).
-   - Compiles CLI and GUI binaries (including macOS `.app` bundle, Windows `.zip`, Linux `.tar.gz`).
-   - Publishes the GitHub Release with all platform artifacts and generated release notes!
-
----
-
-## 🛠 Manual & Emergency Release Options
-
-### Option A: GitHub Actions UI (One-Click Dispatch)
-If you ever want to force a specific release without waiting for automated commit triggers:
-1. Navigate to **Actions** ➔ **Release DMZ Platform** (or **Prepare Release PR**).
+#### 1. Trigger Release Preparation
+1. Navigate to GitHub: **Actions** ➔ **Automated Release PR & Tagging**.
 2. Click **Run workflow**.
-3. Select the desired bump level (`auto`, `patch`, `minor`, `major`) or specify a target tag.
+3. Select the version bump level (`auto`, `patch`, `minor`, or `major`).
+4. The workflow:
+   - Analyzes Conventional Commits since the last release tag.
+   - Updates [`Cargo.toml`](../Cargo.toml) (`[workspace.package].version`).
+   - Updates [`Cargo.lock`](../Cargo.lock) (synchronized via `cargo check --workspace`).
+   - Updates [`dmz-core/workspace/airgap_manifest.json`](../dmz-core/workspace/airgap_manifest.json) (`dmz_version`).
+   - Prepend categorized notes to [`CHANGELOG.md`](../CHANGELOG.md).
+   - Opens or updates a proposal Pull Request titled `chore(release): DMZ vX.Y.Z` on branch `release/next`.
 
-### Option B: Manual Tag Push (Backwards Compatible)
-Manual tagging remains fully supported:
+> [!IMPORTANT]
+> The workflow **only creates and updates the PR description**. It **never** approves, merges, or publishes code. The PR remains open in GitHub until maintainers manually inspect and approve it.
+
+#### 2. Mandatory Manual Review & Approval
+1. Open the pending `release/next` Pull Request on GitHub.
+2. Review the manifest diffs and generated release notes in `CHANGELOG.md`.
+3. Submit a manual review and **Approve** the Pull Request.
+4. Click **Merge pull request** into `main`.
+
+#### 3. Publish the Release
+Once merged into `main`, publish the release by pushing the tag or triggering the release workflow:
 ```bash
 git checkout main
 git pull origin main
-git tag -a v1.2.4 -m "DMZ v1.2.4: DMZ Platform Release"
-git push origin v1.2.4
+git tag -a v1.2.6 -m "DMZ v1.2.6: DMZ Platform Release"
+git push origin v1.2.6
 ```
-The `validate-tag` check in `release.yml` ensures `[workspace.package].version` in `Cargo.toml` matches the tag before provisioning compilation runners.
+*(Alternatively, navigate to **Actions** ➔ **Release DMZ Platform** ➔ **Run workflow**).*
 
 ---
 
-## ⚙️ Required GitHub Repository Settings
+### Path 2: Direct On-Demand Tag Release (Bypassing PR)
+If you want to cut a release directly without going through the release PR workflow:
 
-To ensure GitHub Actions can open the automated Release Pull Request:
+1. Ensure the workspace version in root [`Cargo.toml`](../Cargo.toml) matches your intended release tag.
+2. Tag and push directly from your terminal:
+```bash
+git checkout main
+git pull origin main
+git tag -a v1.2.6 -m "DMZ v1.2.6: DMZ Platform Release"
+git push origin v1.2.6
+```
+
+---
+
+## 📦 What the Release Pipeline Executes
+
+Whenever a release tag (`v*`) is pushed or manually dispatched, [`.github/workflows/release.yml`](../.github/workflows/release.yml) runs:
+
+1. **Tag Validation:** Verifies that the git tag (`vX.Y.Z`) matches `[workspace.package].version` in `Cargo.toml`.
+2. **Multi-Platform CLI Build:** Provisions matrix runners (`ubuntu-24.04`, `macos-latest`, `windows-latest`) to compile:
+   - Linux: `x86_64-unknown-linux-musl`
+   - macOS: `aarch64-apple-darwin`
+   - Windows: `x86_64-pc-windows-msvc`
+3. **Multi-Platform GUI Packaging:**
+   - Linux: `DMZ-GUI-Linux.tar.gz`
+   - macOS: `DMZ-GUI-macOS.zip` (standalone `.app` bundle, AppIcon, Info.plist, codesigned)
+   - Windows: `DMZ-GUI-Windows.zip`
+4. **Publishing:** Publishes the official GitHub Release with all 6 platform assets attached and auto-generated release notes.
+
+---
+
+## 🛡 Mandatory Branch Protection & Approval Rules
+
+To enforce that **no code or release can ever be merged without human review**, configure GitHub Branch Protection on `main`:
+
+1. Open repository **Settings** ➔ **Branches** (or **Rulesets**).
+2. Under **Branch protection rules**, add or edit a rule for `main`:
+   - ✅ **Require a pull request before merging**
+   - ✅ **Require approvals** (set required approvals to at least `1`)
+   - ✅ **Dismiss stale pull request approvals when new commits are pushed**
+   - ✅ **Require status checks to pass before merging** (e.g. `Continuous Integration`)
+   - ✅ **Do not allow bypassing the above settings**
+3. Save changes. This guarantees that every PR—including the automated `release/next` PR—must be explicitly reviewed and approved by an authorized human maintainer before GitHub permits merging.
+
+---
+
+## ⚙️ Required GitHub Actions Permissions
+
+To allow GitHub Actions to open the proposed Release Pull Request when manually dispatched:
 1. Open the repository on GitHub: **Settings** ➔ **Actions** ➔ **General**.
 2. Scroll to **Workflow permissions**.
 3. Verify that:
    - **Read and write permissions** is selected.
    - The checkbox **"Allow GitHub Actions to create and approve pull requests"** is checked.
+
+> [!NOTE]
+> **Why is GitHub's setting labeled "create and approve"?**  
+> GitHub bundles REST API permissions for PR creation and PR review into a single permission toggle. Enabling this checkbox is required so the bot can call `gh pr create` when you click **Run workflow**. The DMZ release workflow **never executes approval commands** (`gh pr review --approve`), and GitHub branch protection rules strictly prevent workflows from bypassing required human reviews.

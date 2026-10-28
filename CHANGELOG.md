@@ -1,5 +1,10 @@
 # Changelog
 
+## [v1.2.6] - 2026-10-28
+
+### 🐛 Bug Fixes
+- fix(toolchain): gate DEVELOPER_DIR injection and harden cross-platform toolchains
+
 ## [v1.2.5] - 2026-10-27
 
 ### 🚀 Features
