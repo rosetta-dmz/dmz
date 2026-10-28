@@ -13,7 +13,7 @@ on:
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -22,6 +22,7 @@ jobs:
   resolve-tag:
     name: Resolve Release Tag
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     outputs:
       release_tag: ${{ steps.resolve.outputs.release_tag }}
     steps:
@@ -51,6 +52,7 @@ jobs:
     name: Validate Git Tag vs Cargo.toml
     needs: [resolve-tag]
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v5
@@ -72,20 +74,21 @@ jobs:
           fi
           echo "Git Tag and Cargo.toml versions are synchronized ($TAG_VERSION)."
 
-  build-cli:
-    name: Build CLI (${{ matrix.target }})
+  build-platform:
+    name: Build & Package (${{ matrix.os }})
     needs: [resolve-tag, validate-tag]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 35
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
+            cli_target: x86_64-unknown-linux-musl
           - os: macos-15
-            target: aarch64-apple-darwin
+            cli_target: aarch64-apple-darwin
           - os: windows-latest
-            target: x86_64-pc-windows-msvc
+            cli_target: x86_64-pc-windows-msvc
 
     steps:
       - name: Checkout Repository
@@ -94,70 +97,55 @@ jobs:
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.cli_target }}
 
-      - name: Install Linux Musl Tools
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-${{ matrix.cli_target }}
+
+      - name: Install Linux Build Dependencies
         if: contains(matrix.os, 'ubuntu')
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools
+          sudo apt-get install -y musl-tools libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libgtk-3-dev
 
-      - name: Build Release Binary
-        run: cargo build --release --package dmz-cli --target ${{ matrix.target }}
+      - name: Build Release Binaries
+        run: |
+          cargo build --release --package dmz-cli --target ${{ matrix.cli_target }}
+          cargo build --release --package dmz-gui
 
-      - name: Package CLI Artifact
+      - name: Package Linux Artifacts
+        if: contains(matrix.os, 'ubuntu')
         shell: bash
         run: |
-          mkdir -p dist
-          if [ "${{ matrix.os }}" == "windows-latest" ]; then
-            cp target/${{ matrix.target }}/release/dmz.exe dist/dmz-${{ matrix.target }}.exe
-          else
-            cp target/${{ matrix.target }}/release/dmz dist/dmz-${{ matrix.target }}
-            chmod +x dist/dmz-${{ matrix.target }}
-          fi
+          mkdir -p staging
+          cp target/${{ matrix.cli_target }}/release/dmz staging/dmz-${{ matrix.cli_target }}
+          chmod +x staging/dmz-${{ matrix.cli_target }}
 
-      - name: Upload CLI Artifact
-        uses: actions/upload-artifact@v5
-        with:
-          name: cli-${{ matrix.target }}
-          path: dist/*
+          mkdir -p dist-gui
+          cp target/release/dmz-gui dist-gui/dmz-gui
+          chmod +x dist-gui/dmz-gui
+          tar -czvf staging/DMZ-GUI-Linux.tar.gz -C dist-gui dmz-gui
 
-  build-gui:
-    name: Build GUI (${{ matrix.os }})
-    needs: [resolve-tag, validate-tag]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            artifact_name: DMZ-GUI-Linux.tar.gz
-          - os: macos-15
-            artifact_name: DMZ-GUI-macOS.zip
-          - os: windows-latest
-            artifact_name: DMZ-GUI-Windows.zip
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v5
-
-      - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Linux GUI Dependencies
-        if: contains(matrix.os, 'ubuntu')
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libgtk-3-dev
-
-      - name: Build GUI Binary
-        run: cargo build --release --package dmz-gui
-
-      - name: Package macOS App Bundle
+      - name: Package macOS Artifacts
         if: contains(matrix.os, 'macos')
+        shell: bash
         run: |
+          mkdir -p staging
+          if [ -f "target/${{ matrix.cli_target }}/release/dmz" ]; then
+            cp "target/${{ matrix.cli_target }}/release/dmz" staging/dmz-${{ matrix.cli_target }}
+          else
+            cp target/release/dmz staging/dmz-${{ matrix.cli_target }}
+          fi
+          chmod +x staging/dmz-${{ matrix.cli_target }}
+
           mkdir -p DMZ.app/Contents/MacOS DMZ.app/Contents/Resources
-          cp target/release/dmz-gui DMZ.app/Contents/MacOS/dmz-gui
+          if [ -f "target/${{ matrix.cli_target }}/release/dmz-gui" ]; then
+            cp "target/${{ matrix.cli_target }}/release/dmz-gui" DMZ.app/Contents/MacOS/dmz-gui
+          else
+            cp target/release/dmz-gui DMZ.app/Contents/MacOS/dmz-gui
+          fi
           chmod +x DMZ.app/Contents/MacOS/dmz-gui
 
           mkdir -p icon.iconset
@@ -197,36 +185,38 @@ jobs:
           EOF
 
           codesign --force --deep -s - DMZ.app
+          zip -r staging/DMZ-GUI-macOS.zip DMZ.app
 
-          zip -r DMZ-GUI-macOS.zip DMZ.app
-
-      - name: Package Windows GUI
+      - name: Package Windows Artifacts
         if: contains(matrix.os, 'windows')
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force -Path staging
+          if (Test-Path "target/${{ matrix.cli_target }}/release/dmz.exe") {
+            Copy-Item "target/${{ matrix.cli_target }}/release/dmz.exe" staging/dmz-${{ matrix.cli_target }}.exe
+          } else {
+            Copy-Item "target/release/dmz.exe" staging/dmz-${{ matrix.cli_target }}.exe
+          }
+
           New-Item -ItemType Directory -Force -Path dist-gui
-          Copy-Item target/release/dmz-gui.exe dist-gui/dmz-gui.exe
-          Compress-Archive -Path dist-gui/dmz-gui.exe -DestinationPath DMZ-GUI-Windows.zip -Force
+          if (Test-Path "target/${{ matrix.cli_target }}/release/dmz-gui.exe") {
+            Copy-Item "target/${{ matrix.cli_target }}/release/dmz-gui.exe" dist-gui/dmz-gui.exe
+          } else {
+            Copy-Item "target/release/dmz-gui.exe" dist-gui/dmz-gui.exe
+          }
+          Compress-Archive -Path dist-gui/dmz-gui.exe -DestinationPath staging/DMZ-GUI-Windows.zip -Force
 
-      - name: Package Linux GUI
-        if: contains(matrix.os, 'ubuntu')
-        shell: bash
-        run: |
-          mkdir -p dist-gui
-          cp target/release/dmz-gui dist-gui/dmz-gui
-          chmod +x dist-gui/dmz-gui
-          tar -czvf DMZ-GUI-Linux.tar.gz -C dist-gui dmz-gui
-
-      - name: Upload GUI Artifact
+      - name: Upload Platform Artifacts
         uses: actions/upload-artifact@v5
         with:
-          name: gui-${{ matrix.os }}
-          path: ${{ matrix.artifact_name }}
+          name: release-${{ matrix.os }}
+          path: staging/*
 
   release:
     name: Publish GitHub Release
-    needs: [resolve-tag, build-cli, build-gui]
+    needs: [resolve-tag, build-platform]
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v5
