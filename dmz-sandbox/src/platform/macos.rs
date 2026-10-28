@@ -71,6 +71,7 @@ fn generate_seatbelt_profile(config: &SandboxConfig) -> String {
     (subpath "/usr")
     (subpath "/System")
     (subpath "/Library")
+    (subpath "/Applications")
     (subpath "/opt/homebrew")
     (subpath "/usr/local")
     (subpath "/private/var/db/dyld")

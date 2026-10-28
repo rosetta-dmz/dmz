@@ -69,8 +69,7 @@ impl ToolchainSetup {
 
         let has_cmake_or_cross_toolchain = toolchains_dir.join("cmake").exists()
             || workspace_root.join("CMakeLists.txt").exists()
-            || toolchains_dir.join("androidndk").exists()
-            || toolchains_dir.join("applesdk").exists();
+            || toolchains_dir.join("androidndk").exists();
 
         if !has_cmake_or_cross_toolchain {
             let stale_cmake = toolchains_dir.join("dmz.toolchain.cmake");
@@ -93,31 +92,53 @@ set(DMZ_TOOLCHAINS_DIR "${CMAKE_CURRENT_LIST_DIR}")
 if(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/clang")
     set(CMAKE_C_COMPILER "${DMZ_TOOLCHAINS_DIR}/cc/bin/clang" CACHE FILEPATH "C Compiler" FORCE)
     set(CMAKE_CXX_COMPILER "${DMZ_TOOLCHAINS_DIR}/cc/bin/clang++" CACHE FILEPATH "C++ Compiler" FORCE)
+elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/clang.exe")
+    set(CMAKE_C_COMPILER "${DMZ_TOOLCHAINS_DIR}/cc/bin/clang.exe" CACHE FILEPATH "C Compiler" FORCE)
+    set(CMAKE_CXX_COMPILER "${DMZ_TOOLCHAINS_DIR}/cc/bin/clang++.exe" CACHE FILEPATH "C++ Compiler" FORCE)
 elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/gcc")
     set(CMAKE_C_COMPILER "${DMZ_TOOLCHAINS_DIR}/cc/bin/gcc" CACHE FILEPATH "C Compiler" FORCE)
     set(CMAKE_CXX_COMPILER "${DMZ_TOOLCHAINS_DIR}/cc/bin/g++" CACHE FILEPATH "C++ Compiler" FORCE)
+elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/gcc.exe")
+    set(CMAKE_C_COMPILER "${DMZ_TOOLCHAINS_DIR}/cc/bin/gcc.exe" CACHE FILEPATH "C Compiler" FORCE)
+    set(CMAKE_CXX_COMPILER "${DMZ_TOOLCHAINS_DIR}/cc/bin/g++.exe" CACHE FILEPATH "C++ Compiler" FORCE)
 elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/cc")
     set(CMAKE_C_COMPILER "${DMZ_TOOLCHAINS_DIR}/cc/bin/cc" CACHE FILEPATH "C Compiler" FORCE)
+elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/cc.exe")
+    set(CMAKE_C_COMPILER "${DMZ_TOOLCHAINS_DIR}/cc/bin/cc.exe" CACHE FILEPATH "C Compiler" FORCE)
 endif()
 
 # 2. Configure Archiver and Ranlib
 if(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/llvm-ar")
     set(CMAKE_AR "${DMZ_TOOLCHAINS_DIR}/cc/bin/llvm-ar" CACHE FILEPATH "Archiver" FORCE)
+elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/llvm-ar.exe")
+    set(CMAKE_AR "${DMZ_TOOLCHAINS_DIR}/cc/bin/llvm-ar.exe" CACHE FILEPATH "Archiver" FORCE)
 elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/ar")
     set(CMAKE_AR "${DMZ_TOOLCHAINS_DIR}/cc/bin/ar" CACHE FILEPATH "Archiver" FORCE)
+elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/ar.exe")
+    set(CMAKE_AR "${DMZ_TOOLCHAINS_DIR}/cc/bin/ar.exe" CACHE FILEPATH "Archiver" FORCE)
 endif()
 
 if(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/llvm-ranlib")
     set(CMAKE_RANLIB "${DMZ_TOOLCHAINS_DIR}/cc/bin/llvm-ranlib" CACHE FILEPATH "Ranlib" FORCE)
+elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/llvm-ranlib.exe")
+    set(CMAKE_RANLIB "${DMZ_TOOLCHAINS_DIR}/cc/bin/llvm-ranlib.exe" CACHE FILEPATH "Ranlib" FORCE)
 elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/ranlib")
     set(CMAKE_RANLIB "${DMZ_TOOLCHAINS_DIR}/cc/bin/ranlib" CACHE FILEPATH "Ranlib" FORCE)
+elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/ranlib.exe")
+    set(CMAKE_RANLIB "${DMZ_TOOLCHAINS_DIR}/cc/bin/ranlib.exe" CACHE FILEPATH "Ranlib" FORCE)
 endif()
 
 # 3. Configure Build Generator (Ninja if bundled)
 if(EXISTS "${DMZ_TOOLCHAINS_DIR}/ninja/bin/ninja")
     set(CMAKE_MAKE_PROGRAM "${DMZ_TOOLCHAINS_DIR}/ninja/bin/ninja" CACHE FILEPATH "Ninja" FORCE)
+elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/ninja/bin/ninja.exe")
+    set(CMAKE_MAKE_PROGRAM "${DMZ_TOOLCHAINS_DIR}/ninja/bin/ninja.exe" CACHE FILEPATH "Ninja" FORCE)
 elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/make/bin/make")
     set(CMAKE_MAKE_PROGRAM "${DMZ_TOOLCHAINS_DIR}/make/bin/make" CACHE FILEPATH "Make" FORCE)
+elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/make/bin/make.exe")
+    set(CMAKE_MAKE_PROGRAM "${DMZ_TOOLCHAINS_DIR}/make/bin/make.exe" CACHE FILEPATH "Make" FORCE)
+elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/make/bin/mingw32-make.exe")
+    set(CMAKE_MAKE_PROGRAM "${DMZ_TOOLCHAINS_DIR}/make/bin/mingw32-make.exe" CACHE FILEPATH "Make" FORCE)
 endif()
 
 # 4. Scope CMake search roots strictly to DMZ bundled toolchain assets
@@ -193,6 +214,13 @@ export DMZ_WORKSPACE="$DMZ_WS"
 if [ -d "$DMZ_WS/.dmz/toolchains" ]; then
     for tc_bin in "$DMZ_WS"/.dmz/toolchains/*/bin; do
         if [ -d "$tc_bin" ]; then
+            case "$tc_bin" in
+                *"/applesdk/bin")
+                    if [ ! -d "$DMZ_WS/.dmz/toolchains/applesdk/SDKs" ] && [ ! -d "$DMZ_WS/.dmz/toolchains/applesdk/Platforms" ]; then
+                        continue
+                    fi
+                    ;;
+            esac
             export PATH="$tc_bin:$PATH"
         fi
     done
@@ -206,11 +234,11 @@ if [ -d "$DMZ_WS/.dmz/toolchains/rust" ]; then
     export LD_LIBRARY_PATH="$DMZ_WS/.dmz/toolchains/rust/lib:$LD_LIBRARY_PATH"
 fi
 
-if [ -d "$DMZ_WS/.dmz/toolchains/go" ]; then
+if [ -d "$DMZ_WS/.dmz/toolchains/go" ] && ([ -f "$DMZ_WS/.dmz/toolchains/go/bin/go" ] || [ -f "$DMZ_WS/.dmz/toolchains/go/bin/go.exe" ]); then
     export GOROOT="$DMZ_WS/.dmz/toolchains/go"
 fi
 
-if [ -d "$DMZ_WS/.dmz/toolchains/python" ]; then
+if [ -d "$DMZ_WS/.dmz/toolchains/python" ] && ([ -f "$DMZ_WS/.dmz/toolchains/python/bin/python3" ] || [ -f "$DMZ_WS/.dmz/toolchains/python/bin/python" ] || [ -f "$DMZ_WS/.dmz/toolchains/python/bin/pip" ] || [ -f "$DMZ_WS/.dmz/toolchains/python/python.exe" ] || [ -d "$DMZ_WS/.dmz/toolchains/python/lib" ] || [ -d "$DMZ_WS/.dmz/toolchains/python/Lib" ]); then
     export PYTHONHOME="$DMZ_WS/.dmz/toolchains/python"
 fi
 
@@ -294,7 +322,6 @@ if [ -d "$DMZ_WS/.dmz/toolchains/androidndk" ]; then
 fi
 
 if [ -d "$DMZ_WS/.dmz/toolchains/applesdk" ]; then
-    export DEVELOPER_DIR="$DMZ_WS/.dmz/toolchains/applesdk"
     for sdk_parent in "$DMZ_WS/.dmz/toolchains/applesdk/Platforms/MacOSX.platform/Developer/SDKs" "$DMZ_WS/.dmz/toolchains/applesdk/SDKs"; do
         if [ -d "$sdk_parent" ]; then
             for sdk_path in "$sdk_parent"/MacOSX*.sdk; do
@@ -305,13 +332,8 @@ if [ -d "$DMZ_WS/.dmz/toolchains/applesdk" ]; then
             done
         fi
     done
-    if [ -z "$SDKROOT" ]; then
-        if command -v xcrun >/dev/null 2>&1; then
-            _host_sdk="$(xcrun --show-sdk-path 2>/dev/null)"
-            if [ -n "$_host_sdk" ] && [ -d "$_host_sdk" ]; then
-                export SDKROOT="$_host_sdk"
-            fi
-        fi
+    if [ -n "$SDKROOT" ] && ([ -x "$DMZ_WS/.dmz/toolchains/applesdk/usr/bin/xcrun" ] || [ -x "$DMZ_WS/.dmz/toolchains/applesdk/bin/xcrun" ]); then
+        export DEVELOPER_DIR="$DMZ_WS/.dmz/toolchains/applesdk"
     fi
 fi
 

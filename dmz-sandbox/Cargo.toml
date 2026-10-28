@@ -15,4 +15,4 @@ windows-sys.workspace = true
 nix.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.52", features = ["Win32_System_JobObjects", "Win32_Security"] }
+windows-sys = { version = "0.52", features = ["Win32_System_JobObjects", "Win32_Security", "Win32_Foundation"] }

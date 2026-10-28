@@ -839,3 +839,218 @@ fn test_pre_import_backup_snapshot_and_rollback_on_failure() {
         "CRITICAL DATA DO NOT LOSE"
     );
 }
+
+#[test]
+fn test_imported_bundle_with_stray_applesdk_is_purged_and_never_poisons_developer_dir() {
+    use dmz_core::archive::{AirGapExporter, AirGapImporter, ExportConfig, ImportConfig};
+    use dmz_core::resolver::lockfile::DmzLockfile;
+
+    let temp = tempdir().unwrap();
+    let src_ws = temp.path().join("src");
+    fs::create_dir_all(&src_ws).unwrap();
+
+    // 1. Create a pure Rust project
+    fs::write(
+        src_ws.join("Cargo.toml"),
+        "[package]\nname = \"pure-rust-service\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(src_ws.join("src")).unwrap();
+    fs::write(src_ws.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    let lockfile = DmzLockfile::new(Vec::new());
+    lockfile.save(&src_ws.join("dmz.lock")).unwrap();
+
+    let store_dir = src_ws.join(".dmz/store");
+    fs::create_dir_all(&store_dir).unwrap();
+
+    let output_archive = temp.path().join("dist/bundle.tar.zst");
+    let export_cfg = ExportConfig {
+        workspace_path: src_ws.clone(),
+        lockfile_path: src_ws.join("dmz.lock"),
+        store_dir: store_dir.clone(),
+        output_path: output_archive.clone(),
+        ..Default::default()
+    };
+    AirGapExporter::export(&export_cfg).expect("Export should succeed");
+
+    // 2. Prepare target workspace that previously had a stray/corrupted applesdk stub directory
+    let target_ws = temp.path().join("target_ws");
+    let stray_applesdk_bin = target_ws.join(".dmz/toolchains/applesdk/bin");
+    fs::create_dir_all(&stray_applesdk_bin).unwrap();
+    fs::write(stray_applesdk_bin.join("xcrun"), "#!/bin/sh\nexit 1\n").unwrap();
+    fs::write(stray_applesdk_bin.join("clang"), "#!/bin/sh\nexit 1\n").unwrap();
+
+    // 3. Import the bundle into the target workspace
+    let import_cfg = ImportConfig {
+        archive_path: output_archive,
+        target_store_dir: target_ws.join(".dmz/store"),
+        target_workspace_dir: target_ws.clone(),
+        verify_closure_hash: true,
+    };
+    AirGapImporter::import(&import_cfg).expect("Import must succeed");
+
+    // 4. Verify stray applesdk stub was purged by Root Manifest Dominance
+    assert!(
+        !target_ws.join(".dmz/toolchains/applesdk").exists(),
+        "Stray applesdk stub must be purged upon importing a pure Rust workspace"
+    );
+
+    // 5. Verify environment injection never poisons DEVELOPER_DIR or PATH
+    let mut env_map = HashMap::new();
+    ToolchainPackager::inject_toolchain_paths(&target_ws, &mut env_map);
+
+    assert!(
+        !env_map.contains_key("DEVELOPER_DIR"),
+        "DEVELOPER_DIR must NEVER be injected for non-Apple workspace"
+    );
+    assert!(
+        !env_map.contains_key("SDKROOT"),
+        "SDKROOT must NOT be injected"
+    );
+    if let Some(path) = env_map.get("PATH") {
+        assert!(
+            !path.contains("applesdk/bin"),
+            "PATH must not contain stub applesdk/bin"
+        );
+    }
+
+    // 6. Verify .dmz/env.sh does not export DEVELOPER_DIR
+    let env_sh = target_ws.join(".dmz/env.sh");
+    if env_sh.exists() {
+        let content = fs::read_to_string(&env_sh).unwrap();
+        assert!(
+            !content.contains("export DEVELOPER_DIR="),
+            "env.sh must NOT contain export DEVELOPER_DIR="
+        );
+        #[cfg(unix)]
+        {
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!(
+                    "cd \"{}\" && . .dmz/env.sh && env",
+                    target_ws.display()
+                ))
+                .output()
+                .unwrap();
+            let env_out = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                !env_out.lines().any(|l| l.starts_with("DEVELOPER_DIR=")),
+                "DEVELOPER_DIR must NOT be exported in shell environment"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_cross_platform_windows_binary_resolution_in_toolchain_env() {
+    let temp = tempfile::tempdir().unwrap();
+    let ws = temp.path();
+
+    // 1. Mock Windows-style toolchain layout with .exe extensions
+    let toolchains_dir = ws.join(".dmz/toolchains");
+    fs::create_dir_all(toolchains_dir.join("cc/bin")).unwrap();
+    fs::create_dir_all(toolchains_dir.join("cmake/bin")).unwrap();
+    fs::create_dir_all(toolchains_dir.join("cmake/share/cmake-3.28")).unwrap();
+    fs::create_dir_all(toolchains_dir.join("ninja/bin")).unwrap();
+    fs::create_dir_all(toolchains_dir.join("make/bin")).unwrap();
+    fs::create_dir_all(toolchains_dir.join("pkgconfig/bin")).unwrap();
+    fs::create_dir_all(toolchains_dir.join("pkgconfig/lib/pkgconfig")).unwrap();
+    fs::create_dir_all(toolchains_dir.join("go/bin")).unwrap();
+
+    fs::write(toolchains_dir.join("cc/bin/clang.exe"), "mock clang").unwrap();
+    fs::write(toolchains_dir.join("cc/bin/clang++.exe"), "mock clang++").unwrap();
+    fs::write(toolchains_dir.join("cc/bin/llvm-ar.exe"), "mock ar").unwrap();
+    fs::write(toolchains_dir.join("cc/bin/llvm-ranlib.exe"), "mock ranlib").unwrap();
+    fs::write(toolchains_dir.join("cmake/bin/cmake.exe"), "mock cmake").unwrap();
+    fs::write(toolchains_dir.join("ninja/bin/ninja.exe"), "mock ninja").unwrap();
+    fs::write(
+        toolchains_dir.join("make/bin/mingw32-make.exe"),
+        "mock make",
+    )
+    .unwrap();
+    fs::write(
+        toolchains_dir.join("pkgconfig/bin/pkg-config.exe"),
+        "mock pkg-config",
+    )
+    .unwrap();
+    fs::write(toolchains_dir.join("go/bin/go.exe"), "mock go").unwrap();
+
+    // 2. Inject toolchain paths
+    let mut env_map = HashMap::new();
+    ToolchainPackager::inject_toolchain_paths(ws, &mut env_map);
+
+    // 3. Verify that .exe binaries are correctly resolved across all native toolchains
+    assert!(
+        env_map.get("CC").is_some_and(|v| v.ends_with("clang.exe")),
+        "CC must resolve clang.exe, got: {:?}",
+        env_map.get("CC")
+    );
+    assert!(
+        env_map
+            .get("CXX")
+            .is_some_and(|v| v.ends_with("clang++.exe")),
+        "CXX must resolve clang++.exe, got: {:?}",
+        env_map.get("CXX")
+    );
+    assert!(
+        env_map
+            .get("AR")
+            .is_some_and(|v| v.ends_with("llvm-ar.exe")),
+        "AR must resolve llvm-ar.exe, got: {:?}",
+        env_map.get("AR")
+    );
+    assert!(
+        env_map
+            .get("RANLIB")
+            .is_some_and(|v| v.ends_with("llvm-ranlib.exe")),
+        "RANLIB must resolve llvm-ranlib.exe, got: {:?}",
+        env_map.get("RANLIB")
+    );
+    assert!(
+        env_map
+            .get("CMAKE")
+            .is_some_and(|v| v.ends_with("cmake.exe")),
+        "CMAKE must resolve cmake.exe, got: {:?}",
+        env_map.get("CMAKE")
+    );
+    assert!(
+        env_map
+            .get("NINJA")
+            .is_some_and(|v| v.ends_with("ninja.exe")),
+        "NINJA must resolve ninja.exe, got: {:?}",
+        env_map.get("NINJA")
+    );
+    assert!(
+        env_map
+            .get("MAKE")
+            .is_some_and(|v| v.ends_with("mingw32-make.exe")),
+        "MAKE must resolve mingw32-make.exe, got: {:?}",
+        env_map.get("MAKE")
+    );
+    assert!(
+        env_map
+            .get("PKG_CONFIG")
+            .is_some_and(|v| v.ends_with("pkg-config.exe")),
+        "PKG_CONFIG must resolve pkg-config.exe, got: {:?}",
+        env_map.get("PKG_CONFIG")
+    );
+    assert!(
+        env_map.contains_key("PKG_CONFIG_PATH"),
+        "PKG_CONFIG_PATH must be set"
+    );
+    assert!(
+        env_map.contains_key("GOROOT"),
+        "GOROOT must be set for go.exe"
+    );
+
+    // 4. Verify dmz.toolchain.cmake contains .exe checks
+    dmz_core::toolchain::ToolchainSetup::generate_cmake_toolchain(ws).unwrap();
+    let cmake_tc = toolchains_dir.join("dmz.toolchain.cmake");
+    assert!(cmake_tc.exists(), "dmz.toolchain.cmake must be generated");
+    let cmake_content = fs::read_to_string(&cmake_tc).unwrap();
+    assert!(cmake_content.contains("clang.exe"));
+    assert!(cmake_content.contains("llvm-ar.exe"));
+    assert!(cmake_content.contains("ninja.exe"));
+    assert!(cmake_content.contains("mingw32-make.exe"));
+}

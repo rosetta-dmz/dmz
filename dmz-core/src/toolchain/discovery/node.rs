@@ -112,8 +112,22 @@ impl ToolchainDiscoverer for NodeDiscoverer {
                     continue;
                 }
             }
+            if cfg!(windows) {
+                let cmd_companion = node_bin.parent().map(|p| p.join(format!("{}.cmd", mgr)));
+                if let Some(cp) = cmd_companion {
+                    if cp.exists() {
+                        bin_files.push((cp, format!("bin/{}.cmd", mgr)));
+                        continue;
+                    }
+                }
+            }
             if let Ok(found) = which::which(mgr) {
-                bin_files.push((found, format!("bin/{}", mgr)));
+                let name = found
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(mgr)
+                    .to_string();
+                bin_files.push((found, format!("bin/{}", name)));
             }
         }
 
