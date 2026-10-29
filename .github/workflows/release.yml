@@ -18,65 +18,12 @@ concurrency:
 permissions:
   contents: write
 
+env:
+  RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+
 jobs:
-  resolve-tag:
-    name: Resolve Release Tag
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      release_tag: ${{ steps.resolve.outputs.release_tag }}
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Resolve Tag
-        id: resolve
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            TAG_NAME="${GITHUB_REF_NAME}"
-          elif [ -n "${{ github.event.inputs.tag_name }}" ]; then
-            TAG_NAME="${{ github.event.inputs.tag_name }}"
-          else
-            CARGO_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "dmz-cli") | .version')
-            TAG_NAME="v${CARGO_VERSION}"
-          fi
-          echo "Resolved release tag: ${TAG_NAME}"
-          echo "release_tag=${TAG_NAME}" >> $GITHUB_OUTPUT
-
-  validate-tag:
-    name: Validate Git Tag vs Cargo.toml
-    needs: [resolve-tag]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v5
-
-      - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Verify Tag Matches Cargo.toml
-        run: |
-          TARGET_TAG="${{ needs.resolve-tag.outputs.release_tag }}"
-          TAG_VERSION="${TARGET_TAG#v}"
-          echo "Verifying release tag ($TAG_VERSION)..."
-          CARGO_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "dmz-cli") | .version')
-          echo "Cargo workspace package version: $CARGO_VERSION"
-          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
-            echo "::error::Release Git Tag ($TAG_VERSION) does not match Cargo.toml workspace version ($CARGO_VERSION)!"
-            echo "::error::Please ensure [workspace.package].version in Cargo.toml matches the release tag before publishing."
-            exit 1
-          fi
-          echo "Git Tag and Cargo.toml versions are synchronized ($TAG_VERSION)."
-
   build-platform:
     name: Build & Package (${{ matrix.os }})
-    needs: [resolve-tag, validate-tag]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
     strategy:
@@ -169,7 +116,7 @@ jobs:
               <key>CFBundleIdentifier</key>
               <string>com.dmz.sandbox</string>
               <key>CFBundleVersion</key>
-              <string>${{ needs.resolve-tag.outputs.release_tag }}</string>
+              <string>${{ env.RELEASE_TAG }}</string>
               <key>CFBundlePackageType</key>
               <string>APPL</string>
               <key>CFBundleExecutable</key>
@@ -214,7 +161,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [resolve-tag, build-platform]
+    needs: build-platform
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -230,7 +177,7 @@ jobs:
       - name: Publish Release & Upload Assets
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ needs.resolve-tag.outputs.release_tag }}
+          tag_name: ${{ env.RELEASE_TAG }}
           files: final-release-assets/*
           generate_release_notes: true
         env:
