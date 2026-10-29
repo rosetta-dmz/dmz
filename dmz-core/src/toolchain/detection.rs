@@ -23,9 +23,12 @@ impl ToolchainDetector {
         }
 
         // 1. Primary language ecosystems declared at workspace root
-        if workspace_root.join("Cargo.toml").is_file() {
+        if workspace_root.join("Cargo.toml").is_file()
+            || workspace_root.join("Cargo.lock").is_file()
+        {
             ecosystems.insert(ToolchainEcosystem::Rust);
             Self::check_cargo_workspace_members(workspace_root, &mut ecosystems);
+            Self::check_cargo_build_tool_dependencies(workspace_root, &mut ecosystems);
         }
         if workspace_root.join("package.json").is_file()
             || workspace_root.join("pnpm-workspace.yaml").is_file()
@@ -135,13 +138,16 @@ impl ToolchainDetector {
             }
         }
 
-        // 4. Map resolver lockfile ecosystems (strictly mapping package ecosystem to its language compiler)
+        // 4. Map resolver lockfile ecosystems and explicit native build-tool dependencies
         let map_lockfile =
             |lf: &crate::resolver::lockfile::DmzLockfile,
              ecosystems: &mut HashSet<ToolchainEcosystem>| {
                 for pkg in lf.packages.values() {
                     if let Some(eco) = ToolchainEcosystem::from_resolver_ecosystem(&pkg.ecosystem) {
                         ecosystems.insert(eco);
+                    }
+                    if matches!(pkg.ecosystem, crate::resolver::manifest::Ecosystem::Cargo) {
+                        Self::map_cargo_build_tool_crate(&pkg.name, ecosystems);
                     }
                 }
             };
@@ -183,6 +189,150 @@ impl ToolchainDetector {
         ecosystems
     }
 
+    /// Checks a declared workspace member directory for explicit native build manifests.
+    fn check_member_native_manifests(
+        member_dir: &Path,
+        ecosystems: &mut HashSet<ToolchainEcosystem>,
+    ) {
+        if member_dir.join("CMakeLists.txt").is_file() {
+            ecosystems.insert(ToolchainEcosystem::CMake);
+            ecosystems.insert(ToolchainEcosystem::Cc);
+            ecosystems.insert(ToolchainEcosystem::Ninja);
+        }
+        if member_dir.join("build.ninja").is_file() {
+            ecosystems.insert(ToolchainEcosystem::Ninja);
+            ecosystems.insert(ToolchainEcosystem::Cc);
+        }
+        if member_dir.join("Makefile").is_file()
+            || member_dir.join("GNUmakefile").is_file()
+            || member_dir.join("makefile").is_file()
+        {
+            ecosystems.insert(ToolchainEcosystem::Make);
+            ecosystems.insert(ToolchainEcosystem::Cc);
+        }
+    }
+
+    /// Expands a workspace member pattern (supporting literal paths and `dir/*` globs) into directories.
+    fn expand_workspace_member_dirs(
+        workspace_root: &Path,
+        pattern: &str,
+    ) -> Vec<std::path::PathBuf> {
+        if let Some(prefix) = pattern
+            .strip_suffix("/*")
+            .or_else(|| pattern.strip_suffix('*'))
+        {
+            let parent = workspace_root.join(prefix.trim_end_matches('/'));
+            let mut dirs = Vec::new();
+            if parent.is_dir() {
+                dirs.push(parent.clone());
+                if let Ok(entries) = std::fs::read_dir(&parent) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.is_dir() {
+                            dirs.push(p);
+                        }
+                    }
+                }
+            }
+            dirs
+        } else {
+            vec![workspace_root.join(pattern)]
+        }
+    }
+
+    /// Maps Cargo build-script helper crates that execute external native build tools at compile time.
+    ///
+    /// Never maps FFI binding crates (`core-foundation`, `objc`, `swift-rs`, `swift-bridge`,
+    /// `android-tzdata`, `ndk-sys`, `libc`, `cc`) to foreign platform SDKs (`AppleSdk`, `AndroidNdk`),
+    /// preserving strict 1-to-1 workspace isolation while guaranteeing `cmake`, `ninja`, and
+    /// `pkg-config` binaries are bundled when required by the dependency closure.
+    fn map_cargo_build_tool_crate(crate_name: &str, ecosystems: &mut HashSet<ToolchainEcosystem>) {
+        match crate_name {
+            "cmake" => {
+                ecosystems.insert(ToolchainEcosystem::CMake);
+                ecosystems.insert(ToolchainEcosystem::Cc);
+                ecosystems.insert(ToolchainEcosystem::Ninja);
+            }
+            "ninja" | "ninja-build" => {
+                ecosystems.insert(ToolchainEcosystem::Ninja);
+                ecosystems.insert(ToolchainEcosystem::Cc);
+            }
+            "pkg-config" => {
+                ecosystems.insert(ToolchainEcosystem::PkgConfig);
+            }
+            _ => {}
+        }
+    }
+
+    /// Inspects a parsed `Cargo.toml` value for build-tool helper crates in dependency tables.
+    fn check_cargo_toml_build_tool_deps(
+        val: &toml::Value,
+        ecosystems: &mut HashSet<ToolchainEcosystem>,
+    ) {
+        for section in &["dependencies", "build-dependencies", "dev-dependencies"] {
+            if let Some(table) = val.get(*section).and_then(|v| v.as_table()) {
+                for key in table.keys() {
+                    Self::map_cargo_build_tool_crate(key, ecosystems);
+                }
+            }
+        }
+        if let Some(ws_deps) = val
+            .get("workspace")
+            .and_then(|w| w.get("dependencies"))
+            .and_then(|d| d.as_table())
+        {
+            for key in ws_deps.keys() {
+                Self::map_cargo_build_tool_crate(key, ecosystems);
+            }
+        }
+    }
+
+    /// Checks `Cargo.lock` and `Cargo.toml` (root and declared workspace members) for Cargo build-tool helper crates.
+    fn check_cargo_build_tool_dependencies(
+        workspace_root: &Path,
+        ecosystems: &mut HashSet<ToolchainEcosystem>,
+    ) {
+        let cargo_lock = workspace_root.join("Cargo.lock");
+        if let Ok(content) = std::fs::read_to_string(&cargo_lock) {
+            if let Ok(val) = content.parse::<toml::Value>() {
+                if let Some(pkgs) = val.get("package").and_then(|p| p.as_array()) {
+                    for pkg in pkgs {
+                        if let Some(name) = pkg.get("name").and_then(|n| n.as_str()) {
+                            Self::map_cargo_build_tool_crate(name, ecosystems);
+                        }
+                    }
+                }
+            }
+        }
+
+        let cargo_toml = workspace_root.join("Cargo.toml");
+        if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
+            if let Ok(val) = content.parse::<toml::Value>() {
+                Self::check_cargo_toml_build_tool_deps(&val, ecosystems);
+                if let Some(workspace) = val.get("workspace") {
+                    if let Some(members) = workspace.get("members").and_then(|m| m.as_array()) {
+                        for m in members {
+                            if let Some(member_str) = m.as_str() {
+                                for member_dir in
+                                    Self::expand_workspace_member_dirs(workspace_root, member_str)
+                                {
+                                    let member_toml = member_dir.join("Cargo.toml");
+                                    if let Ok(m_content) = std::fs::read_to_string(&member_toml) {
+                                        if let Ok(m_val) = m_content.parse::<toml::Value>() {
+                                            Self::check_cargo_toml_build_tool_deps(
+                                                &m_val, ecosystems,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Checks declared Cargo workspace members for explicit native build manifests.
     fn check_cargo_workspace_members(
         workspace_root: &Path,
@@ -195,10 +345,10 @@ impl ToolchainDetector {
                     if let Some(members) = workspace.get("members").and_then(|m| m.as_array()) {
                         for m in members {
                             if let Some(member_str) = m.as_str() {
-                                let member_dir = workspace_root.join(member_str);
-                                if member_dir.join("CMakeLists.txt").is_file() {
-                                    ecosystems.insert(ToolchainEcosystem::CMake);
-                                    ecosystems.insert(ToolchainEcosystem::Cc);
+                                for member_dir in
+                                    Self::expand_workspace_member_dirs(workspace_root, member_str)
+                                {
+                                    Self::check_member_native_manifests(&member_dir, ecosystems);
                                 }
                             }
                         }
@@ -225,11 +375,10 @@ impl ToolchainDetector {
                 if let Some(pkgs) = pkgs_opt {
                     for pkg in pkgs {
                         if let Some(pattern) = pkg.as_str() {
-                            let clean = pattern.trim_end_matches("/*").trim_end_matches('*');
-                            let candidate_dir = workspace_root.join(clean);
-                            if candidate_dir.join("CMakeLists.txt").is_file() {
-                                ecosystems.insert(ToolchainEcosystem::CMake);
-                                ecosystems.insert(ToolchainEcosystem::Cc);
+                            for candidate_dir in
+                                Self::expand_workspace_member_dirs(workspace_root, pattern)
+                            {
+                                Self::check_member_native_manifests(&candidate_dir, ecosystems);
                             }
                         }
                     }
@@ -386,7 +535,7 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        // Even if vendored crates exist or Cargo.lock mentions cmake/cc/swift, pure Rust workspace only has Rust
+        // Even if stray vendored folders exist or lockfile mentions libc/cc/swift-bridge, pure Rust workspace only has Rust
         let vendor_dir = dir.path().join(".cargo/vendor/cmake-0.1.50");
         fs::create_dir_all(&vendor_dir).unwrap();
         let vendor_cc = dir.path().join(".cargo/vendor/cc-1.0.83");
@@ -395,11 +544,6 @@ pub(crate) mod tests {
         let lf = make_test_lockfile(vec![
             ("serde", "1.0", crate::resolver::manifest::Ecosystem::Cargo),
             ("libc", "0.2", crate::resolver::manifest::Ecosystem::Cargo),
-            (
-                "cmake",
-                "0.1.50",
-                crate::resolver::manifest::Ecosystem::Cargo,
-            ),
             ("cc", "1.0.83", crate::resolver::manifest::Ecosystem::Cargo),
             (
                 "swift-bridge",
@@ -415,6 +559,62 @@ pub(crate) mod tests {
         assert!(!detected.contains(&ToolchainEcosystem::Cc));
         assert!(!detected.contains(&ToolchainEcosystem::AppleSdk));
         assert!(!detected.contains(&ToolchainEcosystem::AndroidNdk));
+    }
+
+    #[test]
+    fn test_rust_workspace_with_cmake_crate_detects_cmake_and_companions() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"zlib-ng-app\"\n",
+        )
+        .unwrap();
+
+        let lf = make_test_lockfile(vec![
+            ("flate2", "1.0", crate::resolver::manifest::Ecosystem::Cargo),
+            (
+                "libz-ng-sys",
+                "1.1",
+                crate::resolver::manifest::Ecosystem::Cargo,
+            ),
+            (
+                "cmake",
+                "0.1.50",
+                crate::resolver::manifest::Ecosystem::Cargo,
+            ),
+            (
+                "pkg-config",
+                "0.3.30",
+                crate::resolver::manifest::Ecosystem::Cargo,
+            ),
+        ]);
+
+        let detected = ToolchainDetector::detect_workspace_ecosystems(dir.path(), Some(&lf));
+        assert!(detected.contains(&ToolchainEcosystem::Rust));
+        assert!(
+            detected.contains(&ToolchainEcosystem::CMake),
+            "Rust workspace with cmake build crate must detect CMake"
+        );
+        assert!(
+            detected.contains(&ToolchainEcosystem::Cc),
+            "Rust workspace with cmake build crate must detect companion Cc"
+        );
+        assert!(
+            detected.contains(&ToolchainEcosystem::Ninja),
+            "Rust workspace with cmake build crate must detect companion Ninja"
+        );
+        assert!(
+            detected.contains(&ToolchainEcosystem::PkgConfig),
+            "Rust workspace with pkg-config crate must detect PkgConfig"
+        );
+        assert!(
+            !detected.contains(&ToolchainEcosystem::AppleSdk),
+            "Must never pull AppleSdk without Apple project manifest"
+        );
+        assert!(
+            !detected.contains(&ToolchainEcosystem::AndroidNdk),
+            "Must never pull AndroidNdk without Android project manifest"
+        );
     }
 
     #[test]

@@ -118,7 +118,7 @@ dmz ecosystem discover [OPTIONS]
 
 ### Native Engine Verification (`dmz ecosystem verify`)
 
-Validates the workspace offline using the engine rules associated with each detected language stack (e.g., `cargo check --offline`, `pnpm test --offline`, `npm test --no-audit`, `go build -mod=readonly`).
+Validates the workspace offline using the engine rules associated with each detected language stack (e.g., `cargo check --offline`, `pnpm ls --offline`, `yarn list --offline --depth=0`, `npm ls --offline`, `go build -mod=vendor ./...` / `go build -mod=readonly ./...`, `python3 -m compileall -q .`, `composer validate`, `bundle check`).
 
 ```bash
 dmz ecosystem verify [OPTIONS]
@@ -126,7 +126,21 @@ dmz ecosystem verify [OPTIONS]
 
 #### **Options**
 * `-w, --workspace <PATH>` — Path to project workspace root. *(Default: `.`)*
+* `--no-sandbox` — Run verification without sandbox isolation. *(Default: `false`)*
 * `-v, --verbose` — Enable verbose debug logging output.
+
+#### **Ecosystem Verification Commands**
+
+| Ecosystem | Offline Verification Command |
+| :--- | :--- |
+| **Rust (Cargo)** | `cargo check --offline` |
+| **pnpm** | `pnpm ls --offline` |
+| **Yarn** | `yarn list --offline --depth=0` |
+| **npm** | `npm ls --offline` |
+| **Go** | `go build -mod=vendor ./...` *(or `-mod=readonly ./...`)* |
+| **Python** | `python3 -m compileall -q .` |
+| **PHP (Composer)** | `composer validate` |
+| **Ruby (Bundler)** | `bundle check` |
 
 ---
 

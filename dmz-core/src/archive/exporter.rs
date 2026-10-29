@@ -301,7 +301,10 @@ impl AirGapExporter {
                     }
                     packed_count += 1;
                 } else {
-                    warn!(package = %pkg_info.name, "Store item missing during export package");
+                    return Err(ExportError::ArchiveError(format!(
+                        "Missing store artifact for locked package '{}@{}' at {:?}. Run 'dmz fetch' before exporting.",
+                        pkg_info.name, pkg_info.version, pkg_store_path
+                    )));
                 }
             }
         }
@@ -371,7 +374,10 @@ impl AirGapExporter {
                     toolchain_manifest_entries = entries;
                 }
                 Err(e) => {
-                    warn!("Toolchain packaging encountered error: {}", e);
+                    return Err(ExportError::ArchiveError(format!(
+                        "Toolchain packaging failed: {}",
+                        e
+                    )));
                 }
             }
         }

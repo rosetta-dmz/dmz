@@ -219,6 +219,8 @@ impl AirGapImporter {
         let mut has_git_history = false;
         let mut has_toolchains = false;
         let mut vcs_provenance = None;
+        let mut manifest_toolchains = Vec::new();
+        let mut parsed_lockfile: Option<DmzLockfile> = None;
 
         // Single-pass entry iteration, extraction, and verification
         let entries = archive.entries().map_err(|e| {
@@ -248,6 +250,7 @@ impl AirGapImporter {
                 is_delta = manifest.delta_base.is_some();
                 has_git_history = manifest.has_git_history;
                 vcs_provenance = manifest.vcs.clone();
+                manifest_toolchains = manifest.toolchains.clone();
 
                 info!(
                     closure = %closure_signature,
@@ -341,6 +344,7 @@ impl AirGapImporter {
                     fs::create_dir_all(parent).map_err(|e| ImportError::IoError(e.to_string()))?;
                 }
                 fs::write(&dest, content).map_err(|e| ImportError::IoError(e.to_string()))?;
+                parsed_lockfile = Some(lockfile);
             } else if path == Path::new("workspace.bundle") {
                 // Extract Git bundle into workspace and initialize / link repository
                 let bundle_dest = effective_workspace.join("workspace.bundle");
@@ -423,40 +427,100 @@ impl AirGapImporter {
         }
 
         // Root Manifest Dominance: Clean up or ignore orphaned / unrequested toolchain stubs
-        // (e.g. applesdk) that may have been bundled inadvertently or left over from previous imports.
-        let declared_ecosystems = crate::toolchain::ToolchainProvider::detect_workspace_ecosystems(
-            effective_workspace,
-            None,
-        );
-        if !declared_ecosystems.contains(&crate::toolchain::ToolchainEcosystem::AppleSdk) {
-            let stray_apple = effective_workspace.join(".dmz/toolchains/applesdk");
-            if stray_apple.exists() {
-                if let Err(e) = fs::remove_dir_all(&stray_apple) {
-                    warn!(
-                        "Failed to purge unrequested applesdk toolchain directory: {}",
-                        e
-                    );
-                } else {
-                    info!(
-                        "Purged unrequested applesdk toolchain directory to preserve host system linker integrity"
-                    );
+        // across all 14 ecosystems that may have been bundled inadvertently or left over from previous imports.
+        let mut declared_ecosystems =
+            crate::toolchain::ToolchainProvider::detect_workspace_ecosystems(
+                effective_workspace,
+                parsed_lockfile.as_ref(),
+            );
+        for tc_entry in &manifest_toolchains {
+            if tc_entry.ecosystem == crate::toolchain::ToolchainEcosystem::AppleSdk {
+                let apple_dir = effective_workspace.join(".dmz/toolchains/applesdk");
+                if !crate::toolchain::ToolchainEnv::is_genuine_apple_developer_dir(&apple_dir) {
+                    continue;
+                }
+            }
+            declared_ecosystems.insert(tc_entry.ecosystem);
+        }
+        for eco in crate::toolchain::ToolchainEcosystem::all() {
+            if !declared_ecosystems.contains(eco) {
+                let stray_tc = effective_workspace
+                    .join(".dmz/toolchains")
+                    .join(eco.as_str());
+                if stray_tc.exists() {
+                    if let Err(e) = fs::remove_dir_all(&stray_tc) {
+                        warn!(
+                            "Failed to purge unrequested {} toolchain directory: {}",
+                            eco.as_str(),
+                            e
+                        );
+                    } else {
+                        info!(
+                            "Purged unrequested {} toolchain directory to preserve 1-to-1 workspace isolation",
+                            eco.as_str()
+                        );
+                    }
                 }
             }
         }
 
-        // Setup imported toolchain permissions, quarantine flags, and activator scripts
-        if has_toolchains {
-            if let Err(e) =
-                crate::toolchain::ToolchainPackager::setup_imported_toolchains(effective_workspace)
-            {
-                warn!(
-                    "Failed to finalize imported toolchains configuration: {}",
-                    e
-                );
-            } else {
-                info!(
-                    "Successfully materialized and activated bundled toolchains in .dmz/toolchains"
-                );
+        let toolchains_dir = effective_workspace.join(".dmz/toolchains");
+        if toolchains_dir.exists()
+            && fs::read_dir(&toolchains_dir)
+                .map(|mut i| i.next().is_none())
+                .unwrap_or(false)
+        {
+            let _ = fs::remove_dir(&toolchains_dir);
+        }
+
+        // Setup imported toolchain permissions, quarantine flags, activator scripts, and IDE settings.
+        // Always invoked so `.vscode/settings.json` is generated even when `has_toolchains` is false.
+        if let Err(e) =
+            crate::toolchain::ToolchainPackager::setup_imported_toolchains(effective_workspace)
+        {
+            warn!(
+                "Failed to finalize imported toolchains configuration: {}",
+                e
+            );
+        } else if has_toolchains {
+            info!("Successfully materialized and activated bundled toolchains in .dmz/toolchains");
+        }
+
+        // Verify that every declared toolchain in airgap_manifest.json was extracted with valid binaries
+        if verify_closure_hash {
+            for tc_entry in &manifest_toolchains {
+                if declared_ecosystems.is_empty()
+                    || declared_ecosystems.contains(&tc_entry.ecosystem)
+                {
+                    let tc_root = effective_workspace
+                        .join(".dmz/toolchains")
+                        .join(tc_entry.ecosystem.as_str());
+                    if !tc_root.exists() {
+                        return Err(ImportError::VerificationFailed(format!(
+                            "Manifest declares bundled '{}' toolchain ({}), but {:?} was not extracted",
+                            tc_entry.ecosystem.as_str(),
+                            tc_entry.version,
+                            tc_root
+                        )));
+                    }
+                    for bin_name in &tc_entry.binaries {
+                        let in_bin = tc_root.join("bin").join(bin_name).is_file();
+                        let in_root = tc_root.join(bin_name).is_file();
+                        let via_finder = crate::toolchain::ToolchainEnv::find_binary(
+                            &tc_root,
+                            &format!("bin/{}", bin_name),
+                        )
+                        .is_some();
+                        if !in_bin && !in_root && !via_finder {
+                            return Err(ImportError::VerificationFailed(format!(
+                                "Bundled '{}' toolchain is missing declared binary '{}' in {:?}",
+                                tc_entry.ecosystem.as_str(),
+                                bin_name,
+                                tc_root
+                            )));
+                        }
+                    }
+                }
             }
         }
 

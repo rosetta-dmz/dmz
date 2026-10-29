@@ -1,7 +1,7 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
 use super::{
-    collect_files_recursive, emit_non_relocatable_notice, is_non_standalone_path, push_unique_path,
-    ToolchainDiscoverer,
+    collect_files_recursive, emit_non_relocatable_notice, is_non_standalone_path,
+    push_system_bin_candidates, push_unique_path, ToolchainDiscoverer,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,6 +39,10 @@ impl ToolchainDiscoverer for CMakeDiscoverer {
             );
             push_unique_path(&mut candidates, home_path.join(".local/bin/cmake"));
             push_unique_path(&mut candidates, home_path.join(".cmake/bin/cmake"));
+            push_unique_path(
+                &mut candidates,
+                home_path.join("Applications/CMake.app/Contents/bin/cmake"),
+            );
         }
 
         push_unique_path(&mut candidates, PathBuf::from("/opt/cmake/bin/cmake"));
@@ -51,10 +55,8 @@ impl ToolchainDiscoverer for CMakeDiscoverer {
             PathBuf::from("C:\\Program Files\\CMake\\bin\\cmake.exe"),
         );
 
-        // 3. System PATH fallback
-        if let Ok(p) = which::which("cmake") {
-            push_unique_path(&mut candidates, p);
-        }
+        // 3. System PATH and standard host bin fallback (supports both CLI and GUI launch environments)
+        push_system_bin_candidates(&mut candidates, "cmake");
 
         candidates.retain(|c| c.exists());
         if candidates.is_empty() {
@@ -102,8 +104,8 @@ impl ToolchainDiscoverer for CMakeDiscoverer {
         };
         let version = chosen_version.unwrap_or_else(|| "cmake".to_string());
 
-        // Canonicalize cmake_bin so symlinks (e.g. /opt/homebrew/bin/cmake -> ../Cellar/cmake/3.x.y/bin/cmake)
-        // resolve to the actual installation directory where share/cmake-*/Modules resides!
+        // Canonicalize cmake_bin so command-line symlinks (e.g. /usr/local/bin/cmake -> /Applications/CMake.app/Contents/bin/cmake)
+        // resolve to the actual standalone installation directory where share/cmake-*/Modules resides.
         let canonical_bin = fs::canonicalize(&cmake_bin).unwrap_or_else(|_| cmake_bin.clone());
         let bin_dir = canonical_bin.parent().unwrap_or(Path::new(""));
         let root_dir = bin_dir.parent().unwrap_or(bin_dir).to_path_buf();

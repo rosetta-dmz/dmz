@@ -1,6 +1,7 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
 use super::{
-    emit_non_relocatable_notice, is_non_standalone_path, push_unique_path, ToolchainDiscoverer,
+    emit_non_relocatable_notice, is_non_standalone_path, push_system_bin_candidates,
+    push_unique_path, ToolchainDiscoverer,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,12 +38,8 @@ impl ToolchainDiscoverer for PkgConfigDiscoverer {
             PathBuf::from("/opt/pkg-config/bin/pkg-config"),
         );
 
-        if let Ok(p) = which::which("pkgconf") {
-            push_unique_path(&mut candidates, p);
-        }
-        if let Ok(p) = which::which("pkg-config") {
-            push_unique_path(&mut candidates, p);
-        }
+        push_system_bin_candidates(&mut candidates, "pkgconf");
+        push_system_bin_candidates(&mut candidates, "pkg-config");
 
         candidates.retain(|c| c.exists());
         if candidates.is_empty() {

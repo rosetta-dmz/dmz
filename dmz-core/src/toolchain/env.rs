@@ -126,17 +126,21 @@ impl ToolchainEnv {
         }
 
         if toolchains_dir.join("php").exists() {
-            env_map.insert(
-                "PHPRC".into(),
-                toolchains_dir.join("php").to_string_lossy().to_string(),
-            );
+            let php_dir = toolchains_dir.join("php");
+            if Self::find_binary(&php_dir, "bin/php").is_some() || php_dir.join("php.ini").exists()
+            {
+                env_map.insert("PHPRC".into(), php_dir.to_string_lossy().to_string());
+            }
         }
 
         if toolchains_dir.join("ruby").exists() {
-            env_map.insert(
-                "GEM_HOME".into(),
-                toolchains_dir.join("ruby").to_string_lossy().to_string(),
-            );
+            let ruby_dir = toolchains_dir.join("ruby");
+            if Self::find_binary(&ruby_dir, "bin/ruby").is_some()
+                || Self::find_binary(&ruby_dir, "bin/bundle").is_some()
+                || ruby_dir.join("gems").is_dir()
+            {
+                env_map.insert("GEM_HOME".into(), ruby_dir.to_string_lossy().to_string());
+            }
         }
 
         if toolchains_dir.join("cc").exists() {

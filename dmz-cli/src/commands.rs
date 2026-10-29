@@ -72,6 +72,7 @@ pub fn dispatch(command: Commands) {
             with_git_history,
             since,
             with_toolchain,
+            no_toolchain,
         } => {
             run_bundle(BundleArgs {
                 target,
@@ -84,7 +85,7 @@ pub fn dispatch(command: Commands) {
                 refresh_lock,
                 with_git_history,
                 since,
-                with_toolchain,
+                with_toolchain: with_toolchain && !no_toolchain,
             });
         }
 
@@ -145,6 +146,7 @@ pub fn dispatch(command: Commands) {
                 with_git_history,
                 since,
                 with_toolchain,
+                no_toolchain,
             } => {
                 run_bundle(BundleArgs {
                     target,
@@ -157,7 +159,7 @@ pub fn dispatch(command: Commands) {
                     refresh_lock,
                     with_git_history,
                     since,
-                    with_toolchain,
+                    with_toolchain: with_toolchain && !no_toolchain,
                 });
             }
 
@@ -172,6 +174,7 @@ pub fn dispatch(command: Commands) {
                 with_git_history,
                 since,
                 with_toolchain,
+                no_toolchain,
             } => {
                 run_export(ExportArgs {
                     target,
@@ -183,7 +186,7 @@ pub fn dispatch(command: Commands) {
                     mode,
                     with_git_history,
                     since,
-                    with_toolchain,
+                    with_toolchain: with_toolchain && !no_toolchain,
                 });
             }
 

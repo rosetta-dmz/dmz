@@ -1,7 +1,7 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
 use super::{
-    collect_files_recursive, emit_non_relocatable_notice, is_non_standalone_path, push_unique_path,
-    ToolchainDiscoverer,
+    collect_files_recursive, emit_non_relocatable_notice, is_non_standalone_path,
+    push_system_bin_candidates, push_unique_path, ToolchainDiscoverer,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -54,10 +54,8 @@ impl ToolchainDiscoverer for GoDiscoverer {
             }
         }
 
-        // 4. Fallback to which go
-        if let Ok(p) = which::which("go") {
-            push_unique_path(&mut go_candidates, p);
-        }
+        // 4. Fallback to system PATH and standard host bin directories
+        push_system_bin_candidates(&mut go_candidates, "go");
 
         if go_candidates.is_empty() {
             return Ok(None);

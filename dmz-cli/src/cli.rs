@@ -163,8 +163,12 @@ pub enum Commands {
         since: Option<String>,
 
         /// Package active compiler toolchains (cargo, rustc, node, go, python, php, ruby) into bundle
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = true)]
         with_toolchain: bool,
+
+        /// Omit packaging compiler toolchains into the bundle
+        #[arg(long, default_value_t = false)]
+        no_toolchain: bool,
     },
 
     /// Unpack, verify, and restore an air-gap bundle into local store
@@ -358,8 +362,12 @@ pub enum AirgapCommands {
         since: Option<String>,
 
         /// Package active compiler toolchains (cargo, rustc, node, go, python, php, ruby) into bundle
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = true)]
         with_toolchain: bool,
+
+        /// Omit packaging compiler toolchains into the bundle
+        #[arg(long, default_value_t = false)]
+        no_toolchain: bool,
     },
 
     /// Bundle store items and dmz.lock into a portable air-gap archive (.tar.zst)
@@ -401,8 +409,12 @@ pub enum AirgapCommands {
         since: Option<String>,
 
         /// Package active compiler toolchains (cargo, rustc, node, go, python, php, ruby) into bundle
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = true)]
         with_toolchain: bool,
+
+        /// Omit packaging compiler toolchains into the bundle
+        #[arg(long, default_value_t = false)]
+        no_toolchain: bool,
     },
 
     /// Unpack and cryptographically verify an air-gap bundle into local store
