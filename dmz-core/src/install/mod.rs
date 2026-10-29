@@ -203,6 +203,10 @@ impl InstallerEngine {
             info!(name = %pkg.name, version = %pkg.version, "Successfully installed package offline");
         }
 
+        // Ensure IDE workspace settings (.vscode/settings.json) exclude vendored directories
+        // and suppress false-positive CMake/Makefile extension popups.
+        let _ = crate::toolchain::ToolchainSetup::generate_ide_settings(&config.workspace_path);
+
         info!(
             installed = installed_count,
             "DMZ offline installation completed successfully"

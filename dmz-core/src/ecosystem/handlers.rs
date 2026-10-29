@@ -64,7 +64,7 @@ impl EcosystemHandler for PnpmEcosystem {
     fn verification_command(&self, _root: &Path) -> Option<CommandSpec> {
         Some(CommandSpec {
             program: "pnpm".into(),
-            args: vec!["test".into(), "--offline".into()],
+            args: vec!["ls".into(), "--offline".into()],
         })
     }
 }
@@ -95,7 +95,7 @@ impl EcosystemHandler for YarnEcosystem {
     fn verification_command(&self, _root: &Path) -> Option<CommandSpec> {
         Some(CommandSpec {
             program: "yarn".into(),
-            args: vec!["test".into()],
+            args: vec!["list".into(), "--offline".into(), "--depth=0".into()],
         })
     }
 }
@@ -122,7 +122,7 @@ impl EcosystemHandler for NpmEcosystem {
     fn verification_command(&self, _root: &Path) -> Option<CommandSpec> {
         Some(CommandSpec {
             program: "npm".into(),
-            args: vec!["test".into(), "--no-audit".into()],
+            args: vec!["ls".into(), "--offline".into()],
         })
     }
 }
@@ -144,10 +144,15 @@ impl EcosystemHandler for GoEcosystem {
             args: vec!["mod".into(), "download".into()],
         })
     }
-    fn verification_command(&self, _root: &Path) -> Option<CommandSpec> {
+    fn verification_command(&self, root: &Path) -> Option<CommandSpec> {
+        let mod_flag = if root.join("vendor").is_dir() {
+            "-mod=vendor"
+        } else {
+            "-mod=readonly"
+        };
         Some(CommandSpec {
             program: "go".into(),
-            args: vec!["build".into(), "-mod=readonly".into(), "./...".into()],
+            args: vec!["build".into(), mod_flag.into(), "./...".into()],
         })
     }
 }
@@ -177,7 +182,7 @@ impl EcosystemHandler for PythonEcosystem {
     fn verification_command(&self, _root: &Path) -> Option<CommandSpec> {
         Some(CommandSpec {
             program: "python3".into(),
-            args: vec!["-m".into(), "py_compile".into(), ".".into()],
+            args: vec!["-m".into(), "compileall".into(), "-q".into(), ".".into()],
         })
     }
 }

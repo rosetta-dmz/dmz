@@ -34,11 +34,6 @@ pub use python::PythonDiscoverer;
 pub use ruby::RubyDiscoverer;
 pub use rust::RustDiscoverer;
 
-/// Core abstraction for discovering a standalone host toolchain for a specific language ecosystem.
-///
-/// Adhering to the Open/Closed Principle (OCP) and Dependency Inversion Principle (DIP),
-/// new language runtimes and toolchain detection strategies implement this trait
-/// without modifying closed provider orchestration logic.
 pub trait ToolchainDiscoverer: Send + Sync {
     /// Returns the target ecosystem managed by this discoverer.
     fn ecosystem(&self) -> ToolchainEcosystem;
@@ -124,12 +119,25 @@ impl DiscoveryRegistry {
 /// Detects whether a path is non-standalone / non-relocatable (e.g. managed by system package managers
 /// that dynamically link against machine-specific cellar/system libraries).
 pub fn is_non_standalone_path(path: &Path) -> bool {
-    let s = path.to_string_lossy();
-    s.contains("/opt/homebrew/")
-        || s.contains("/usr/local/Cellar/")
-        || s.contains("/usr/local/opt/")
-        || s.contains("/var/lib/snapd/")
-        || s.contains("/nix/store/")
+    let check = |p: &Path| {
+        let s = p.to_string_lossy();
+        s.contains("/opt/homebrew/")
+            || s.contains("/usr/local/Cellar/")
+            || s.contains("/usr/local/opt/")
+            || s.contains("/home/linuxbrew/")
+            || s.contains("/var/lib/snapd/")
+            || s.contains("/snap/")
+            || s.contains("/nix/store/")
+    };
+    if check(path) {
+        return true;
+    }
+    if let Ok(canonical) = fs::canonicalize(path) {
+        if check(&canonical) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Emits standard agnostic guidance when a non-relocatable toolchain is encountered.
@@ -144,6 +152,18 @@ pub fn emit_non_relocatable_notice(path: &Path) {
 pub fn push_unique_path(candidates: &mut Vec<PathBuf>, path: PathBuf) {
     if !candidates.contains(&path) {
         candidates.push(path);
+    }
+}
+
+pub fn push_system_bin_candidates(candidates: &mut Vec<PathBuf>, bin_name: &str) {
+    if let Ok(p) = which::which(bin_name) {
+        push_unique_path(candidates, p);
+    }
+    for dir in &["/usr/local/bin", "/usr/bin", "/bin"] {
+        let p = Path::new(dir).join(bin_name);
+        if p.exists() {
+            push_unique_path(candidates, p);
+        }
     }
 }
 

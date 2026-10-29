@@ -1,6 +1,7 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
 use super::{
-    emit_non_relocatable_notice, is_non_standalone_path, push_unique_path, ToolchainDiscoverer,
+    emit_non_relocatable_notice, is_non_standalone_path, push_system_bin_candidates,
+    push_unique_path, ToolchainDiscoverer,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -52,10 +53,8 @@ impl ToolchainDiscoverer for PythonDiscoverer {
             }
         }
 
-        // 4. Fallback to which python3
-        if let Ok(p) = which::which("python3") {
-            push_unique_path(&mut py_candidates, p);
-        }
+        // 4. Fallback to system PATH and standard host bin directories
+        push_system_bin_candidates(&mut py_candidates, "python3");
 
         if py_candidates.is_empty() {
             return Ok(None);

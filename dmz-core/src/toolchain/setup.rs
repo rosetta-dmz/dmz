@@ -10,7 +10,12 @@ impl ToolchainSetup {
     /// Sets up imported toolchain directory: execution permissions, quarantine clearance, and activator scripts.
     pub fn setup_imported_toolchains(workspace_root: &Path) -> Result<(), String> {
         let toolchains_dir = workspace_root.join(".dmz/toolchains");
-        if !toolchains_dir.exists() {
+        let has_toolchains = toolchains_dir.exists()
+            && fs::read_dir(&toolchains_dir)
+                .map(|mut i| i.next().is_some())
+                .unwrap_or(false);
+        if !has_toolchains {
+            Self::generate_ide_settings(workspace_root)?;
             return Ok(());
         }
 
@@ -67,9 +72,11 @@ impl ToolchainSetup {
             return Ok(());
         }
 
-        let has_cmake_or_cross_toolchain = toolchains_dir.join("cmake").exists()
-            || workspace_root.join("CMakeLists.txt").exists()
-            || toolchains_dir.join("androidndk").exists();
+        let has_cmake_or_cross_toolchain =
+            crate::toolchain::ToolchainEnv::find_binary(&toolchains_dir.join("cmake"), "bin/cmake")
+                .is_some()
+                || workspace_root.join("CMakeLists.txt").is_file()
+                || toolchains_dir.join("androidndk").exists();
 
         if !has_cmake_or_cross_toolchain {
             let stale_cmake = toolchains_dir.join("dmz.toolchain.cmake");
@@ -180,7 +187,7 @@ endif()
         let env_sh_path = workspace_root.join(".dmz/env.sh");
         let env_bat_path = workspace_root.join(".dmz/env.bat");
 
-        let env_sh_content = r#"#!/bin/sh
+        let mut env_sh_content = r#"#!/bin/sh
 # DMZ Toolchain Environment Activator
 # Source this script to activate bundled compilers and runtimes:
 #   source .dmz/env.sh
@@ -248,11 +255,11 @@ if [ -d "$DMZ_WS/.dmz/toolchains/node" ]; then
     fi
 fi
 
-if [ -d "$DMZ_WS/.dmz/toolchains/php" ]; then
+if [ -d "$DMZ_WS/.dmz/toolchains/php" ] && ([ -f "$DMZ_WS/.dmz/toolchains/php/bin/php" ] || [ -f "$DMZ_WS/.dmz/toolchains/php/php.ini" ]); then
     export PHPRC="$DMZ_WS/.dmz/toolchains/php"
 fi
 
-if [ -d "$DMZ_WS/.dmz/toolchains/ruby" ]; then
+if [ -d "$DMZ_WS/.dmz/toolchains/ruby" ] && ([ -f "$DMZ_WS/.dmz/toolchains/ruby/bin/ruby" ] || [ -f "$DMZ_WS/.dmz/toolchains/ruby/bin/bundle" ] || [ -d "$DMZ_WS/.dmz/toolchains/ruby/gems" ]); then
     export GEM_HOME="$DMZ_WS/.dmz/toolchains/ruby"
 fi
 
@@ -296,12 +303,12 @@ if [ -f "$DMZ_WS/.dmz/toolchains/dmz.toolchain.cmake" ] && ([ -d "$DMZ_WS/.dmz/t
     export TARGET_CMAKE_TOOLCHAIN_FILE="$DMZ_WS/.dmz/toolchains/dmz.toolchain.cmake"
 fi
 
-if [ -d "$DMZ_WS/.dmz/toolchains/ninja" ]; then
+if [ -f "$DMZ_WS/.dmz/toolchains/ninja/bin/ninja" ]; then
     export NINJA="$DMZ_WS/.dmz/toolchains/ninja/bin/ninja"
     export CMAKE_GENERATOR="Ninja"
 fi
 
-if [ -d "$DMZ_WS/.dmz/toolchains/make" ]; then
+if [ -f "$DMZ_WS/.dmz/toolchains/make/bin/make" ]; then
     export MAKE="$DMZ_WS/.dmz/toolchains/make/bin/make"
 fi
 
@@ -321,6 +328,24 @@ if [ -d "$DMZ_WS/.dmz/toolchains/androidndk" ]; then
     fi
 fi
 
+if [ -d "$DMZ_WS/.dmz/toolchains/pkgconfig" ]; then
+    if [ -f "$DMZ_WS/.dmz/toolchains/pkgconfig/bin/pkg-config" ]; then
+        export PKG_CONFIG="$DMZ_WS/.dmz/toolchains/pkgconfig/bin/pkg-config"
+    elif [ -f "$DMZ_WS/.dmz/toolchains/pkgconfig/bin/pkgconf" ]; then
+        export PKG_CONFIG="$DMZ_WS/.dmz/toolchains/pkgconfig/bin/pkgconf"
+    fi
+    if [ -d "$DMZ_WS/.dmz/toolchains/pkgconfig/lib/pkgconfig" ] || [ -d "$DMZ_WS/.dmz/toolchains/pkgconfig/share/pkgconfig" ]; then
+        export PKG_CONFIG_PATH="$DMZ_WS/.dmz/toolchains/pkgconfig/lib/pkgconfig:$DMZ_WS/.dmz/toolchains/pkgconfig/share/pkgconfig:$PKG_CONFIG_PATH"
+    fi
+fi
+"#
+        .to_string();
+
+        if crate::toolchain::ToolchainEnv::is_genuine_apple_developer_dir(
+            &workspace_root.join(".dmz/toolchains/applesdk"),
+        ) {
+            env_sh_content.push_str(
+                r#"
 if [ -d "$DMZ_WS/.dmz/toolchains/applesdk" ]; then
     for sdk_parent in "$DMZ_WS/.dmz/toolchains/applesdk/Platforms/MacOSX.platform/Developer/SDKs" "$DMZ_WS/.dmz/toolchains/applesdk/SDKs"; do
         if [ -d "$sdk_parent" ]; then
@@ -332,18 +357,17 @@ if [ -d "$DMZ_WS/.dmz/toolchains/applesdk" ]; then
             done
         fi
     done
-    if [ -n "$SDKROOT" ] && ([ -x "$DMZ_WS/.dmz/toolchains/applesdk/usr/bin/xcrun" ] || [ -x "$DMZ_WS/.dmz/toolchains/applesdk/bin/xcrun" ]); then
+    if [ -n "$SDKROOT" ]; then
         export DEVELOPER_DIR="$DMZ_WS/.dmz/toolchains/applesdk"
     fi
 fi
+"#,
+            );
+        }
 
-if [ -d "$DMZ_WS/.dmz/toolchains/pkgconfig" ]; then
-    export PKG_CONFIG="$DMZ_WS/.dmz/toolchains/pkgconfig/bin/pkg-config"
-    export PKG_CONFIG_PATH="$DMZ_WS/.dmz/toolchains/pkgconfig/lib/pkgconfig:$DMZ_WS/.dmz/toolchains/pkgconfig/share/pkgconfig:$PKG_CONFIG_PATH"
-fi
-
-echo "DMZ bundled toolchains activated. PATH and runtime variables configured."
-"#;
+        env_sh_content.push_str(
+            "\necho \"DMZ bundled toolchains activated. PATH and runtime variables configured.\"\n",
+        );
 
         let env_bat_content = r#"@echo off
 REM DMZ Toolchain Environment Activator (Windows)
@@ -360,11 +384,13 @@ if exist "%DMZ_WORKSPACE%\.dmz\toolchains\rust" (
     if not defined CARGO_HOME set "CARGO_HOME=%DMZ_WORKSPACE%\.cargo"
 )
 
-if exist "%DMZ_WORKSPACE%\.dmz\toolchains\go" (
+if exist "%DMZ_WORKSPACE%\.dmz\toolchains\go\bin\go.exe" (
     set "GOROOT=%DMZ_WORKSPACE%\.dmz\toolchains\go"
 )
 
-if exist "%DMZ_WORKSPACE%\.dmz\toolchains\python" (
+if exist "%DMZ_WORKSPACE%\.dmz\toolchains\python\python.exe" (
+    set "PYTHONHOME=%DMZ_WORKSPACE%\.dmz\toolchains\python"
+) else if exist "%DMZ_WORKSPACE%\.dmz\toolchains\python\bin\python.exe" (
     set "PYTHONHOME=%DMZ_WORKSPACE%\.dmz\toolchains\python"
 )
 
@@ -372,17 +398,32 @@ if exist "%DMZ_WORKSPACE%\.dmz\toolchains\node\lib\node_modules" (
     set "NODE_PATH=%DMZ_WORKSPACE%\.dmz\toolchains\node\lib\node_modules;%NODE_PATH%"
 )
 
-if exist "%DMZ_WORKSPACE%\.dmz\toolchains\php" (
+if exist "%DMZ_WORKSPACE%\.dmz\toolchains\php\bin\php.exe" (
     set "PHPRC=%DMZ_WORKSPACE%\.dmz\toolchains\php"
 )
 
-if exist "%DMZ_WORKSPACE%\.dmz\toolchains\ruby" (
+if exist "%DMZ_WORKSPACE%\.dmz\toolchains\ruby\bin\ruby.exe" (
     set "GEM_HOME=%DMZ_WORKSPACE%\.dmz\toolchains\ruby"
 )
 
 if exist "%DMZ_WORKSPACE%\.dmz\toolchains\cc\bin\clang.exe" (
     set "CC=%DMZ_WORKSPACE%\.dmz\toolchains\cc\bin\clang.exe"
     set "CXX=%DMZ_WORKSPACE%\.dmz\toolchains\cc\bin\clang++.exe"
+) else if exist "%DMZ_WORKSPACE%\.dmz\toolchains\cc\bin\gcc.exe" (
+    set "CC=%DMZ_WORKSPACE%\.dmz\toolchains\cc\bin\gcc.exe"
+    set "CXX=%DMZ_WORKSPACE%\.dmz\toolchains\cc\bin\g++.exe"
+) else if exist "%DMZ_WORKSPACE%\.dmz\toolchains\cc\bin\cc.exe" (
+    set "CC=%DMZ_WORKSPACE%\.dmz\toolchains\cc\bin\cc.exe"
+)
+if exist "%DMZ_WORKSPACE%\.dmz\toolchains\cc\bin\llvm-ar.exe" (
+    set "AR=%DMZ_WORKSPACE%\.dmz\toolchains\cc\bin\llvm-ar.exe"
+) else if exist "%DMZ_WORKSPACE%\.dmz\toolchains\cc\bin\ar.exe" (
+    set "AR=%DMZ_WORKSPACE%\.dmz\toolchains\cc\bin\ar.exe"
+)
+if exist "%DMZ_WORKSPACE%\.dmz\toolchains\cc\bin\llvm-ranlib.exe" (
+    set "RANLIB=%DMZ_WORKSPACE%\.dmz\toolchains\cc\bin\llvm-ranlib.exe"
+) else if exist "%DMZ_WORKSPACE%\.dmz\toolchains\cc\bin\ranlib.exe" (
+    set "RANLIB=%DMZ_WORKSPACE%\.dmz\toolchains\cc\bin\ranlib.exe"
 )
 
 if exist "%DMZ_WORKSPACE%\.dmz\toolchains\cmake\bin\cmake.exe" (
@@ -408,6 +449,8 @@ if exist "%DMZ_WORKSPACE%\.dmz\toolchains\ninja\bin\ninja.exe" (
 
 if exist "%DMZ_WORKSPACE%\.dmz\toolchains\make\bin\make.exe" (
     set "MAKE=%DMZ_WORKSPACE%\.dmz\toolchains\make\bin\make.exe"
+) else if exist "%DMZ_WORKSPACE%\.dmz\toolchains\make\bin\mingw32-make.exe" (
+    set "MAKE=%DMZ_WORKSPACE%\.dmz\toolchains\make\bin\mingw32-make.exe"
 )
 
 if exist "%DMZ_WORKSPACE%\.dmz\toolchains\juce" (
@@ -421,6 +464,11 @@ if exist "%DMZ_WORKSPACE%\.dmz\toolchains\androidndk" (
 
 if exist "%DMZ_WORKSPACE%\.dmz\toolchains\pkgconfig\bin\pkg-config.exe" (
     set "PKG_CONFIG=%DMZ_WORKSPACE%\.dmz\toolchains\pkgconfig\bin\pkg-config.exe"
+) else if exist "%DMZ_WORKSPACE%\.dmz\toolchains\pkgconfig\bin\pkgconf.exe" (
+    set "PKG_CONFIG=%DMZ_WORKSPACE%\.dmz\toolchains\pkgconfig\bin\pkgconf.exe"
+)
+if exist "%DMZ_WORKSPACE%\.dmz\toolchains\pkgconfig\lib\pkgconfig" (
+    set "PKG_CONFIG_PATH=%DMZ_WORKSPACE%\.dmz\toolchains\pkgconfig\lib\pkgconfig;%DMZ_WORKSPACE%\.dmz\toolchains\pkgconfig\share\pkgconfig;%PKG_CONFIG_PATH%"
 )
 
 echo DMZ bundled toolchains activated.
@@ -462,16 +510,21 @@ echo DMZ bundled toolchains activated.
         };
 
         let toolchains_dir = workspace_root.join(".dmz/toolchains");
+        let bundled_cmake_bin =
+            crate::toolchain::ToolchainEnv::find_binary(&toolchains_dir.join("cmake"), "bin/cmake");
         let has_cmake =
-            workspace_root.join("CMakeLists.txt").exists() || toolchains_dir.join("cmake").exists();
+            workspace_root.join("CMakeLists.txt").exists() || bundled_cmake_bin.is_some();
 
         if has_cmake {
-            if toolchains_dir.join("cmake/bin/cmake").exists() {
+            if let Some(ref bin) = bundled_cmake_bin {
+                let rel_bin = if bin.extension().is_some_and(|e| e == "exe") {
+                    "${workspaceFolder}/.dmz/toolchains/cmake/bin/cmake.exe"
+                } else {
+                    "${workspaceFolder}/.dmz/toolchains/cmake/bin/cmake"
+                };
                 settings.insert(
                     "cmake.cmakePath".into(),
-                    serde_json::Value::String(
-                        "${workspaceFolder}/.dmz/toolchains/cmake/bin/cmake".into(),
-                    ),
+                    serde_json::Value::String(rel_bin.into()),
                 );
             }
             if toolchains_dir.join("dmz.toolchain.cmake").exists() {
@@ -490,13 +543,23 @@ echo DMZ bundled toolchains activated.
                     serde_json::Value::Object(configure_settings),
                 );
             }
+            if crate::toolchain::ToolchainEnv::find_binary(
+                &toolchains_dir.join("ninja"),
+                "bin/ninja",
+            )
+            .is_some()
+            {
+                settings.insert(
+                    "cmake.generator".into(),
+                    serde_json::Value::String("Ninja".into()),
+                );
+            }
             settings.insert(
                 "cmake.configureOnOpen".into(),
                 serde_json::Value::Bool(true),
             );
         } else {
-            // Workspace does NOT use CMake. Explicitly disable CMake Tools auto-probing
-            // to eliminate IDE popups ("Bad CMake executable: ''").
+            // Workspace does NOT use CMake.
             settings.insert(
                 "cmake.configureOnOpen".into(),
                 serde_json::Value::Bool(false),
@@ -507,14 +570,42 @@ echo DMZ bundled toolchains activated.
             );
         }
 
+        let bundled_make_bin =
+            crate::toolchain::ToolchainEnv::find_binary(&toolchains_dir.join("make"), "bin/make")
+                .or_else(|| {
+                    crate::toolchain::ToolchainEnv::find_binary(
+                        &toolchains_dir.join("make"),
+                        "bin/mingw32-make",
+                    )
+                });
+        if let Some(ref bin) = bundled_make_bin {
+            if let Some(fname) = bin.file_name().and_then(|n| n.to_str()) {
+                settings.insert(
+                    "makefile.makePath".into(),
+                    serde_json::Value::String(format!(
+                        "${{workspaceFolder}}/.dmz/toolchains/make/bin/{}",
+                        fname
+                    )),
+                );
+            }
+        }
+
         // Configure terminal environment for bundled toolchains (e.g., Rust, Go, Python)
         if toolchains_dir.exists() {
             let mut bin_subpaths: Vec<String> = Vec::new();
             if let Ok(entries) = fs::read_dir(&toolchains_dir) {
                 for entry in entries.flatten() {
+                    let name_os = entry.file_name();
+                    if name_os == "applesdk"
+                        && !crate::toolchain::ToolchainEnv::is_genuine_apple_developer_dir(
+                            &entry.path(),
+                        )
+                    {
+                        continue;
+                    }
                     let bin = entry.path().join("bin");
                     if bin.exists() {
-                        let name = entry.file_name().to_string_lossy().to_string();
+                        let name = name_os.to_string_lossy().to_string();
                         bin_subpaths
                             .push(format!("${{workspaceFolder}}/.dmz/toolchains/{}/bin", name));
                     }
@@ -550,67 +641,176 @@ echo DMZ bundled toolchains activated.
 
             // Configure rust-analyzer if Rust is bundled
             if toolchains_dir.join("rust").exists() {
-                let ra_bin = toolchains_dir.join("rust/bin/rust-analyzer");
-                if ra_bin.exists() {
+                if let Some(ra_bin) = crate::toolchain::ToolchainEnv::find_binary(
+                    &toolchains_dir.join("rust"),
+                    "bin/rust-analyzer",
+                ) {
+                    let fname = ra_bin
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("rust-analyzer");
                     settings.insert(
                         "rust-analyzer.server.path".into(),
-                        serde_json::Value::String(
-                            "${workspaceFolder}/.dmz/toolchains/rust/bin/rust-analyzer".into(),
-                        ),
+                        serde_json::Value::String(format!(
+                            "${{workspaceFolder}}/.dmz/toolchains/rust/bin/{}",
+                            fname
+                        )),
                     );
                 }
 
-                let mut ra_extra_env = settings
-                    .get("rust-analyzer.runnables.extraEnv")
-                    .and_then(|v| v.as_object().cloned())
-                    .unwrap_or_default();
-                ra_extra_env.insert(
-                    "RUSTUP_HOME".into(),
-                    serde_json::Value::String("${workspaceFolder}/.dmz/toolchains/rust".into()),
-                );
-                ra_extra_env.insert(
-                    "CARGO_HOME".into(),
-                    serde_json::Value::String("${workspaceFolder}/.cargo".into()),
-                );
-                settings.insert(
-                    "rust-analyzer.runnables.extraEnv".into(),
-                    serde_json::Value::Object(ra_extra_env),
-                );
+                for env_setting_key in &[
+                    "rust-analyzer.runnables.extraEnv",
+                    "rust-analyzer.cargo.extraEnv",
+                ] {
+                    let mut ra_extra_env = settings
+                        .get(*env_setting_key)
+                        .and_then(|v| v.as_object().cloned())
+                        .unwrap_or_default();
+                    ra_extra_env.insert(
+                        "RUSTUP_HOME".into(),
+                        serde_json::Value::String("${workspaceFolder}/.dmz/toolchains/rust".into()),
+                    );
+                    ra_extra_env.insert(
+                        "CARGO_HOME".into(),
+                        serde_json::Value::String("${workspaceFolder}/.cargo".into()),
+                    );
+                    if let Some(ref bin) = bundled_cmake_bin {
+                        let fname = bin.file_name().and_then(|n| n.to_str()).unwrap_or("cmake");
+                        ra_extra_env.insert(
+                            "CMAKE".into(),
+                            serde_json::Value::String(format!(
+                                "${{workspaceFolder}}/.dmz/toolchains/cmake/bin/{}",
+                                fname
+                            )),
+                        );
+                    }
+                    if let Some(cc_bin) = crate::toolchain::ToolchainEnv::find_binary(
+                        &toolchains_dir.join("cc"),
+                        "bin/clang",
+                    )
+                    .or_else(|| {
+                        crate::toolchain::ToolchainEnv::find_binary(
+                            &toolchains_dir.join("cc"),
+                            "bin/gcc",
+                        )
+                    }) {
+                        let fname = cc_bin
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("clang");
+                        ra_extra_env.insert(
+                            "CC".into(),
+                            serde_json::Value::String(format!(
+                                "${{workspaceFolder}}/.dmz/toolchains/cc/bin/{}",
+                                fname
+                            )),
+                        );
+                    }
+                    if let Some(ninja_bin) = crate::toolchain::ToolchainEnv::find_binary(
+                        &toolchains_dir.join("ninja"),
+                        "bin/ninja",
+                    ) {
+                        let fname = ninja_bin
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("ninja");
+                        ra_extra_env.insert(
+                            "NINJA".into(),
+                            serde_json::Value::String(format!(
+                                "${{workspaceFolder}}/.dmz/toolchains/ninja/bin/{}",
+                                fname
+                            )),
+                        );
+                    }
+                    if let Some(ref make_bin) = bundled_make_bin {
+                        let fname = make_bin
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("make");
+                        ra_extra_env.insert(
+                            "MAKE".into(),
+                            serde_json::Value::String(format!(
+                                "${{workspaceFolder}}/.dmz/toolchains/make/bin/{}",
+                                fname
+                            )),
+                        );
+                    }
+                    if let Some(pkg_bin) = crate::toolchain::ToolchainEnv::find_binary(
+                        &toolchains_dir.join("pkgconfig"),
+                        "bin/pkg-config",
+                    )
+                    .or_else(|| {
+                        crate::toolchain::ToolchainEnv::find_binary(
+                            &toolchains_dir.join("pkgconfig"),
+                            "bin/pkgconf",
+                        )
+                    }) {
+                        let fname = pkg_bin
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("pkg-config");
+                        ra_extra_env.insert(
+                            "PKG_CONFIG".into(),
+                            serde_json::Value::String(format!(
+                                "${{workspaceFolder}}/.dmz/toolchains/pkgconfig/bin/{}",
+                                fname
+                            )),
+                        );
+                    }
+                    settings.insert(
+                        (*env_setting_key).into(),
+                        serde_json::Value::Object(ra_extra_env),
+                    );
+                }
             }
 
-            // Configure Python if Python is bundled
+            // Configure Python if Python is bundled with a verified interpreter binary
             if toolchains_dir.join("python").exists() {
-                let py_bin = if cfg!(windows) {
-                    "${workspaceFolder}/.dmz/toolchains/python/python.exe"
-                } else {
-                    "${workspaceFolder}/.dmz/toolchains/python/bin/python3"
-                };
-                settings.insert(
-                    "python.defaultInterpreterPath".into(),
-                    serde_json::Value::String(py_bin.into()),
-                );
+                let py_dir = toolchains_dir.join("python");
+                let has_py_bin = py_dir.join("bin/python3").exists()
+                    || py_dir.join("bin/python").exists()
+                    || py_dir.join("bin/pip").exists()
+                    || py_dir.join("python.exe").exists()
+                    || py_dir.join("bin/python.exe").exists();
+                if has_py_bin {
+                    let py_bin = if cfg!(windows) {
+                        "${workspaceFolder}/.dmz/toolchains/python/python.exe"
+                    } else {
+                        "${workspaceFolder}/.dmz/toolchains/python/bin/python3"
+                    };
+                    settings.insert(
+                        "python.defaultInterpreterPath".into(),
+                        serde_json::Value::String(py_bin.into()),
+                    );
+                }
             }
 
-            // Configure Go if Go is bundled
+            // Configure Go if Go is bundled with a verified go binary
             if toolchains_dir.join("go").exists() {
-                settings.insert(
-                    "go.goroot".into(),
-                    serde_json::Value::String("${workspaceFolder}/.dmz/toolchains/go".into()),
-                );
-                let mut alt_tools = settings
-                    .get("go.alternateTools")
-                    .and_then(|v| v.as_object().cloned())
-                    .unwrap_or_default();
-                alt_tools.insert(
-                    "go".into(),
-                    serde_json::Value::String(
-                        "${workspaceFolder}/.dmz/toolchains/go/bin/go".into(),
-                    ),
-                );
-                settings.insert(
-                    "go.alternateTools".into(),
-                    serde_json::Value::Object(alt_tools),
-                );
+                let go_dir = toolchains_dir.join("go");
+                if let Some(go_bin) = crate::toolchain::ToolchainEnv::find_binary(&go_dir, "bin/go")
+                {
+                    let fname = go_bin.file_name().and_then(|n| n.to_str()).unwrap_or("go");
+                    settings.insert(
+                        "go.goroot".into(),
+                        serde_json::Value::String("${workspaceFolder}/.dmz/toolchains/go".into()),
+                    );
+                    let mut alt_tools = settings
+                        .get("go.alternateTools")
+                        .and_then(|v| v.as_object().cloned())
+                        .unwrap_or_default();
+                    alt_tools.insert(
+                        "go".into(),
+                        serde_json::Value::String(format!(
+                            "${{workspaceFolder}}/.dmz/toolchains/go/bin/{}",
+                            fname
+                        )),
+                    );
+                    settings.insert(
+                        "go.alternateTools".into(),
+                        serde_json::Value::Object(alt_tools),
+                    );
+                }
             }
         }
 
@@ -682,5 +882,66 @@ mod tests {
             "${workspaceFolder}/.dmz/toolchains/cmake/bin/cmake"
         );
         assert!(ws.join(".dmz/toolchains/dmz.toolchain.cmake").exists());
+    }
+
+    #[test]
+    fn test_bundled_cmake_without_root_cmakelists_configures_cmake_path_and_toolchain() {
+        let temp = tempdir().unwrap();
+        let ws = temp.path();
+
+        // Rust workspace where CMake is bundled for a dependency (e.g. libz-ng-sys -> cmake) without a root CMakeLists.txt
+        fs::create_dir_all(ws.join(".dmz/toolchains/cmake/bin")).unwrap();
+        fs::write(ws.join(".dmz/toolchains/cmake/bin/cmake"), "cmake").unwrap();
+
+        ToolchainSetup::setup_imported_toolchains(ws).unwrap();
+
+        let settings_path = ws.join(".vscode/settings.json");
+        assert!(settings_path.exists());
+        let content = fs::read_to_string(&settings_path).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(
+            val["cmake.cmakePath"],
+            "${workspaceFolder}/.dmz/toolchains/cmake/bin/cmake"
+        );
+        assert_eq!(
+            val["cmake.configureSettings"]["CMAKE_TOOLCHAIN_FILE"],
+            "${workspaceFolder}/.dmz/toolchains/dmz.toolchain.cmake"
+        );
+        assert!(ws.join(".dmz/toolchains/dmz.toolchain.cmake").exists());
+    }
+
+    #[test]
+    fn test_rust_analyzer_cargo_extra_env_and_verified_toolchain_binaries() {
+        let temp = tempdir().unwrap();
+        let ws = temp.path();
+
+        fs::create_dir_all(ws.join(".dmz/toolchains/rust/bin")).unwrap();
+        fs::write(ws.join(".dmz/toolchains/rust/bin/cargo"), "cargo").unwrap();
+        fs::write(
+            ws.join(".dmz/toolchains/rust/bin/rust-analyzer"),
+            "rust-analyzer",
+        )
+        .unwrap();
+
+        // Empty python and go dirs without binaries must NOT write broken IDE paths
+        fs::create_dir_all(ws.join(".dmz/toolchains/python")).unwrap();
+        fs::create_dir_all(ws.join(".dmz/toolchains/go")).unwrap();
+
+        ToolchainSetup::setup_imported_toolchains(ws).unwrap();
+
+        let content = fs::read_to_string(ws.join(".vscode/settings.json")).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(
+            val["rust-analyzer.cargo.extraEnv"]["RUSTUP_HOME"],
+            "${workspaceFolder}/.dmz/toolchains/rust"
+        );
+        assert_eq!(
+            val["rust-analyzer.cargo.extraEnv"]["CARGO_HOME"],
+            "${workspaceFolder}/.cargo"
+        );
+        assert!(val.get("python.defaultInterpreterPath").is_none());
+        assert!(val.get("go.goroot").is_none());
     }
 }

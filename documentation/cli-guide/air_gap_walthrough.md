@@ -23,6 +23,6 @@ dmz airgap import --archive ../dist/workspace_closure.tar.zst --store ./offline_
 cd workspace
 dmz install --store ../offline_store --lockfile dmz.lock
 
-# Run native engine verification offline
+# Run native engine verification offline (cargo check --offline, npm/pnpm/yarn ls --offline, python3 -m compileall -q ., go build -mod=vendor ./...)
 dmz ecosystem verify
 ```

@@ -12,6 +12,9 @@ dmz bundle --target linux-x86_64 --output dist/app.tar.zst
 # Import and restore an air-gap bundle
 dmz import --archive dist/app.tar.zst --to /opt/deploy
 
+# Verify active ecosystems offline
+dmz ecosystem verify --workspace /opt/deploy
+
 # Run inside daemonless sandbox
 dmz shell
 ```
@@ -22,6 +25,7 @@ dmz shell
 | :--- | :--- | :--- |
 | `dmz bundle` | `dmz bundle [-t <target>] [-o <out>]` | One-shot resolution, fetching, and air-gap export (`.tar.zst`) |
 | `dmz import` | `dmz import -a <archive> [-t <to>]` | Unpacks, cryptographically verifies, and installs dependencies |
+| `dmz ecosystem` | `dmz ecosystem discover / verify` | Discovers active stacks and runs offline verification (`cargo check --offline`, `npm ls --offline`, `python3 -m compileall -q .`, `go build -mod=vendor ./...`) |
 | `dmz shell` | `dmz shell [-c <cmd>] [--no-sandbox] [--allow-network]` | Interactive terminal inside daemonless sandbox (sandboxed & offline by default) |
 | `dmz init` | `dmz init [-w <workspace>] [-t <target>]` | Scans workspace and initializes baseline `dmz.lock` |
 | `dmz resolve` | `dmz resolve [-t <target>]` | Manifest analysis and dependency graph closure generation |

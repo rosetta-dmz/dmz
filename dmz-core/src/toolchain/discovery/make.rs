@@ -1,6 +1,7 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
 use super::{
-    emit_non_relocatable_notice, is_non_standalone_path, push_unique_path, ToolchainDiscoverer,
+    emit_non_relocatable_notice, is_non_standalone_path, push_system_bin_candidates,
+    push_unique_path, ToolchainDiscoverer,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -35,12 +36,8 @@ impl ToolchainDiscoverer for MakeDiscoverer {
 
         push_unique_path(&mut candidates, PathBuf::from("/opt/make/bin/make"));
 
-        if let Ok(p) = which::which("gmake") {
-            push_unique_path(&mut candidates, p);
-        }
-        if let Ok(p) = which::which("make") {
-            push_unique_path(&mut candidates, p);
-        }
+        push_system_bin_candidates(&mut candidates, "gmake");
+        push_system_bin_candidates(&mut candidates, "make");
 
         candidates.retain(|c| c.exists());
         if candidates.is_empty() {
