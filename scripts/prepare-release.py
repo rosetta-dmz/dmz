@@ -172,17 +172,17 @@ def update_changelog(new_version: str, commits: list[str]) -> str:
 
     sections = [f"## [v{new_version}] - {today}\n"]
     if feats:
-        sections.append("### 🚀 Features")
+        sections.append("### Features")
         for f in feats:
             sections.append(f"- {f}")
         sections.append("")
     if fixes:
-        sections.append("### 🐛 Bug Fixes")
+        sections.append("### Bug Fixes")
         for f in fixes:
             sections.append(f"- {f}")
         sections.append("")
     if others:
-        sections.append("### 🔧 Maintenance & Chores")
+        sections.append("### Maintenance & Chores")
         for o in others:
             sections.append(f"- {o}")
         sections.append("")
