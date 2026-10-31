@@ -584,7 +584,7 @@ fi
 "#
         .to_string();
 
-        if crate::toolchain::ToolchainEnv::find_apple_sdk_root(
+        if crate::toolchain::ToolchainEnv::is_genuine_apple_developer_dir(
             &workspace_root.join(".dmz/toolchains/applesdk"),
         ) || crate::toolchain::ToolchainEnv::find_apple_sdk_root(
             &workspace_root.join(".dmz/toolchains/applesdk"),
