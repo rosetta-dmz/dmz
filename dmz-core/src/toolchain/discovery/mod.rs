@@ -181,9 +181,9 @@ pub fn collect_files_recursive(
                 collect_files_recursive(&p, base, acc, target_prefix);
             } else if p.is_file() {
                 if let Ok(rel) = p.strip_prefix(base) {
-                    let rel_str = rel.to_string_lossy();
+                    let rel_str = rel.to_string_lossy().replace('\\', "/");
                     let target_path = if target_prefix.is_empty() {
-                        rel_str.to_string()
+                        rel_str
                     } else if target_prefix.ends_with('/') {
                         format!("{}{}", target_prefix, rel_str)
                     } else {

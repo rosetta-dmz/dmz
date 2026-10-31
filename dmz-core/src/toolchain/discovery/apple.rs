@@ -275,7 +275,9 @@ fn collect_sdk_lib_recursive(
                 let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
                 if ext == "tbd" || ext == "o" || ext == "dylib" || ext == "a" {
                     if let Ok(rel) = p.strip_prefix(sdk_base) {
-                        let target_path = format!("{}/{}", target_prefix, rel.to_string_lossy());
+                        let rel_str = rel.to_string_lossy().replace('\\', "/");
+                        let target_path =
+                            format!("{}/{}", target_prefix.trim_end_matches('/'), rel_str);
                         acc.push((p, target_path));
                     }
                 }
@@ -311,7 +313,9 @@ fn collect_frameworks_recursive(
                     || ext == "modulemap"
                 {
                     if let Ok(rel) = p.strip_prefix(sdk_base) {
-                        let target_path = format!("{}/{}", target_prefix, rel.to_string_lossy());
+                        let rel_str = rel.to_string_lossy().replace('\\', "/");
+                        let target_path =
+                            format!("{}/{}", target_prefix.trim_end_matches('/'), rel_str);
                         acc.push((p, target_path));
                     }
                 }
