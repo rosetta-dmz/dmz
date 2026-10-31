@@ -2180,12 +2180,40 @@ fn test_definitive_multi_ecosystem_compilation_proof() {
     }
 
     // 2. Definitively verify Python execution via bundled python / python3 binary with stdlib
-    if let Ok(py_bin) = which::which("python3") {
+    let py_candidates = ["python3", "python"];
+    let py_bin_opt = py_candidates
+        .iter()
+        .find_map(|name| which::which(name).ok());
+
+    if let Some(py_bin) = py_bin_opt {
         let py_target_dir = target_ws.join(".dmz/toolchains/python");
         let py_bin_dir = py_target_dir.join("bin");
         fs::create_dir_all(&py_bin_dir).unwrap();
         let _ = fs::copy(&py_bin, py_bin_dir.join("python3"));
         let _ = fs::copy(&py_bin, py_bin_dir.join("python"));
+
+        if cfg!(windows) {
+            let _ = fs::copy(&py_bin, py_bin_dir.join("python.exe"));
+            let _ = fs::copy(&py_bin, py_bin_dir.join("python3.exe"));
+            let _ = fs::copy(&py_bin, py_target_dir.join("python.exe"));
+
+            if let Some(parent) = py_bin.parent() {
+                if let Ok(entries) = fs::read_dir(parent) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.is_file() {
+                            if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                                if ext.eq_ignore_ascii_case("dll") {
+                                    let fname = entry.file_name();
+                                    let _ = fs::copy(&p, py_target_dir.join(&fname));
+                                    let _ = fs::copy(&p, py_bin_dir.join(&fname));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         if let Ok(output) = std::process::Command::new(&py_bin)
             .arg("-c")
@@ -2199,9 +2227,19 @@ fn test_definitive_multi_ecosystem_compilation_proof() {
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("python3");
-                    let target_lib = py_target_dir.join("lib");
-                    fs::create_dir_all(&target_lib).unwrap();
-                    link_or_copy_dir(&stdlib_dir, &target_lib.join(folder_name));
+
+                    if cfg!(windows) || folder_name.eq_ignore_ascii_case("Lib") {
+                        let target_lib = py_target_dir.join("Lib");
+                        link_or_copy_dir(&stdlib_dir, &target_lib);
+                        let target_lib_lower = py_target_dir.join("lib");
+                        if !target_lib_lower.exists() {
+                            link_or_copy_dir(&stdlib_dir, &target_lib_lower);
+                        }
+                    } else {
+                        let target_lib = py_target_dir.join("lib");
+                        fs::create_dir_all(&target_lib).unwrap();
+                        link_or_copy_dir(&stdlib_dir, &target_lib.join(folder_name));
+                    }
                 }
             }
         }
@@ -2211,7 +2249,13 @@ fn test_definitive_multi_ecosystem_compilation_proof() {
         let mut envs = HashMap::new();
         ToolchainPackager::inject_toolchain_paths(target_ws, &mut envs);
 
-        let py_exec = std::process::Command::new(py_bin_dir.join("python"))
+        let py_run_bin = if cfg!(windows) {
+            py_bin_dir.join("python.exe")
+        } else {
+            py_bin_dir.join("python")
+        };
+
+        let py_exec = std::process::Command::new(&py_run_bin)
             .arg("-c")
             .arg("import sys; print(f'Hermetic Python {sys.version_info.major} Success')")
             .envs(&envs)

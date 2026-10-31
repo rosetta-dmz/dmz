@@ -111,6 +111,29 @@ impl ToolchainDiscoverer for PythonDiscoverer {
         bin_files.push((py_bin.clone(), "bin/python3".into()));
         bin_files.push((py_bin.clone(), "bin/python".into()));
 
+        if cfg!(windows) {
+            bin_files.push((py_bin.clone(), "python.exe".into()));
+            bin_files.push((py_bin.clone(), "bin/python.exe".into()));
+            bin_files.push((py_bin.clone(), "bin/python3.exe".into()));
+
+            if let Some(parent) = py_bin.parent() {
+                if let Ok(entries) = fs::read_dir(parent) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.is_file() {
+                            if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                                if ext.eq_ignore_ascii_case("dll") {
+                                    let fname = entry.file_name().to_string_lossy().to_string();
+                                    bin_files.push((p.clone(), fname.clone()));
+                                    bin_files.push((p, format!("bin/{}", fname)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Companion pip
         if let Some(parent) = py_bin.parent() {
             let pip3 = parent.join("pip3");
@@ -146,7 +169,7 @@ impl ToolchainDiscoverer for PythonDiscoverer {
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("python3");
-                    let target_prefix = if cfg!(windows) && folder_name.eq_ignore_ascii_case("Lib")
+                    let target_prefix = if cfg!(windows) || folder_name.eq_ignore_ascii_case("Lib")
                     {
                         "Lib".to_string()
                     } else {
