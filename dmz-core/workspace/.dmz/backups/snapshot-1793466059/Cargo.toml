@@ -1,0 +1,9 @@
+
+        [package]
+        name = "test-app"
+        version = "1.0.8"
+        edition = "2021"
+
+        [dependencies]
+        serde = "1.0"
+    
