@@ -212,6 +212,27 @@ impl ToolchainDiscoverer for CcDiscoverer {
             }
         }
 
+        // 4. Companion linker and compiler runtime libraries (e.g. libtapi, libLTO, libcodedirectory on macOS)
+        let lib_dirs = [root_dir.join("usr/lib"), root_dir.join("lib")];
+        for ldir in &lib_dirs {
+            if ldir.is_dir() {
+                for dylib_name in &[
+                    "libtapi.dylib",
+                    "libcodedirectory.dylib",
+                    "libLTO.dylib",
+                    "libswiftDemangle.dylib",
+                ] {
+                    let p = ldir.join(dylib_name);
+                    if p.is_file() {
+                        let target_rel = format!("lib/{}", dylib_name);
+                        if !lib_files.iter().any(|(_, rel)| rel == &target_rel) {
+                            lib_files.push((p, target_rel));
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(Some(DiscoveredToolchain {
             ecosystem: ToolchainEcosystem::Cc,
             version,

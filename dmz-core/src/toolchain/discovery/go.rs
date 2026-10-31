@@ -120,10 +120,24 @@ impl ToolchainDiscoverer for GoDiscoverer {
 
         bin_files.push((go_bin.clone(), "bin/go".into()));
 
+        // Companion gofmt tool
+        let gofmt = goroot_dir.join("bin/gofmt");
+        if gofmt.exists() {
+            bin_files.push((gofmt, "bin/gofmt".into()));
+        } else if let Ok(found) = which::which("gofmt") {
+            bin_files.push((found, "bin/gofmt".into()));
+        }
+
         // Companion compilers and tools under pkg/tool
         let pkg_tool_dir = goroot_dir.join("pkg/tool");
         if pkg_tool_dir.exists() {
             collect_files_recursive(&pkg_tool_dir, &pkg_tool_dir, &mut lib_files, "pkg/tool");
+        }
+
+        // Standard library sources under src/ (strictly required for Go compilation)
+        let src_dir = goroot_dir.join("src");
+        if src_dir.exists() {
+            collect_files_recursive(&src_dir, &src_dir, &mut lib_files, "src");
         }
 
         Ok(Some(DiscoveredToolchain {

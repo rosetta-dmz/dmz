@@ -360,7 +360,7 @@ pub(super) fn show(
         ui.horizontal(|ui| {
             ui.checkbox(
                 &mut state.auto_install,
-                "Install offline dependencies into workspace layouts upon import",
+                "Install offline dependencies into workspace",
             );
             ui.add_space(16.0);
             ui.checkbox(

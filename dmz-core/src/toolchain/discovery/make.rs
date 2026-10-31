@@ -36,6 +36,18 @@ impl ToolchainDiscoverer for MakeDiscoverer {
 
         push_unique_path(&mut candidates, PathBuf::from("/opt/make/bin/make"));
 
+        #[cfg(target_os = "macos")]
+        {
+            push_unique_path(
+                &mut candidates,
+                PathBuf::from("/Library/Developer/CommandLineTools/usr/bin/make"),
+            );
+            push_unique_path(
+                &mut candidates,
+                PathBuf::from("/Applications/Xcode.app/Contents/Developer/usr/bin/make"),
+            );
+        }
+
         push_system_bin_candidates(&mut candidates, "gmake");
         push_system_bin_candidates(&mut candidates, "make");
 

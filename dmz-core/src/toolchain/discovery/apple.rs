@@ -112,7 +112,7 @@ impl ToolchainDiscoverer for AppleSdkDiscoverer {
         let mut bin_files = Vec::new();
         let mut lib_files = Vec::new();
 
-        // 1. Locate and bundle relocatable Apple SDK sysroot (headers, .tbd stubs, frameworks)
+        // 1. Locate and bundle relocatable Apple SDK sysroot (headers including zlib.h, .tbd stubs, frameworks)
         if let Some(sdk_path) = locate_apple_sdk_root(&dev_dir) {
             info!(
                 sdk_path = ?sdk_path,
@@ -240,13 +240,13 @@ fn collect_apple_sdk_sysroot(sdk_dir: &Path, lib_files: &mut Vec<(PathBuf, Strin
         }
     }
 
-    // 2. Standard C/C++ headers in usr/include
+    // 2. Standard C/C++ headers in usr/include (including zlib.h, stdio.h, stdlib.h)
     let usr_inc = sdk_dir.join("usr/include");
     if usr_inc.is_dir() {
         super::collect_files_recursive(&usr_inc, sdk_dir, lib_files, target_prefix);
     }
 
-    // 3. Linker dynamic library stubs and runtime objects in usr/lib
+    // 3. Linker dynamic library stubs and runtime objects in usr/lib (including libz.tbd, libSystem.tbd)
     let usr_lib = sdk_dir.join("usr/lib");
     if usr_lib.is_dir() {
         collect_sdk_lib_recursive(&usr_lib, sdk_dir, lib_files, target_prefix);
@@ -347,7 +347,9 @@ mod tests {
         fs::write(sdk_root.join("SDKSettings.plist"), "<plist/>").unwrap();
         fs::write(usr_inc.join("stdio.h"), "int printf(const char*, ...);").unwrap();
         fs::write(usr_inc.join("stdlib.h"), "void* malloc(size_t);").unwrap();
+        fs::write(usr_inc.join("zlib.h"), "#define ZLIB_H").unwrap();
         fs::write(usr_lib.join("libSystem.tbd"), "--- !tapi-tbd").unwrap();
+        fs::write(usr_lib.join("libz.tbd"), "--- !tapi-tbd").unwrap();
         fs::write(frameworks.join("CoreFoundation.h"), "// CoreFoundation").unwrap();
 
         let mut lib_files = Vec::new();
@@ -357,7 +359,9 @@ mod tests {
         assert!(target_paths.contains(&"SDKs/MacOSX.sdk/SDKSettings.plist".to_string()));
         assert!(target_paths.contains(&"SDKs/MacOSX.sdk/usr/include/stdio.h".to_string()));
         assert!(target_paths.contains(&"SDKs/MacOSX.sdk/usr/include/stdlib.h".to_string()));
+        assert!(target_paths.contains(&"SDKs/MacOSX.sdk/usr/include/zlib.h".to_string()));
         assert!(target_paths.contains(&"SDKs/MacOSX.sdk/usr/lib/libSystem.tbd".to_string()));
+        assert!(target_paths.contains(&"SDKs/MacOSX.sdk/usr/lib/libz.tbd".to_string()));
         assert!(target_paths.iter().any(|p| p.contains("CoreFoundation.h")));
     }
 }

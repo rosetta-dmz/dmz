@@ -75,7 +75,8 @@ impl ToolchainDiscoverer for NodeDiscoverer {
             None => return Ok(None),
         };
 
-        let node_root = node_bin
+        let canonical_bin = fs::canonicalize(&node_bin).unwrap_or_else(|_| node_bin.clone());
+        let node_root = canonical_bin
             .parent()
             .and_then(|p| p.parent())
             .map(Path::to_path_buf)
@@ -138,6 +139,23 @@ impl ToolchainDiscoverer for NodeDiscoverer {
                 &mut lib_files,
                 "lib/node_modules",
             );
+        }
+
+        // Collect companion dynamic libraries in lib/ (e.g. libnode.*.dylib, libnode.*.so, libnode.dll)
+        let lib_dir = node_root.join("lib");
+        if lib_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&lib_dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_file() {
+                        let fname = entry.file_name();
+                        let s = fname.to_string_lossy();
+                        if s.starts_with("libnode") {
+                            lib_files.push((p, format!("lib/{}", s)));
+                        }
+                    }
+                }
+            }
         }
 
         Ok(Some(DiscoveredToolchain {

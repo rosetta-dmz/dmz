@@ -55,9 +55,9 @@ impl NpmMapper {
                 for (cmd_name, rel_target) in bin_map {
                     let source_file = target_dir.join(&rel_target);
                     if source_file.exists() {
-                        let dest_link = bin_dir.join(&cmd_name);
                         #[cfg(unix)]
                         {
+                            let dest_link = bin_dir.join(&cmd_name);
                             use std::os::unix::fs::PermissionsExt;
                             if let Ok(metadata) = fs::metadata(&source_file) {
                                 let mut perms = metadata.permissions();

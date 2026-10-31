@@ -1,7 +1,7 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
 use super::{
-    emit_non_relocatable_notice, is_non_standalone_path, push_system_bin_candidates,
-    push_unique_path, ToolchainDiscoverer,
+    collect_files_recursive, emit_non_relocatable_notice, is_non_standalone_path,
+    push_system_bin_candidates, push_unique_path, ToolchainDiscoverer,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -92,7 +92,8 @@ impl ToolchainDiscoverer for PythonDiscoverer {
             .trim()
             .to_string();
 
-        let py_root = py_bin
+        let canonical_bin = fs::canonicalize(&py_bin).unwrap_or_else(|_| py_bin.clone());
+        let py_root = canonical_bin
             .parent()
             .and_then(|p| p.parent())
             .map(Path::to_path_buf)
@@ -105,17 +106,82 @@ impl ToolchainDiscoverer for PythonDiscoverer {
         );
 
         let mut bin_files = Vec::new();
-        let lib_files = Vec::new();
+        let mut lib_files = Vec::new();
 
         bin_files.push((py_bin.clone(), "bin/python3".into()));
+        bin_files.push((py_bin.clone(), "bin/python".into()));
+
+        if cfg!(windows) {
+            bin_files.push((py_bin.clone(), "python.exe".into()));
+            bin_files.push((py_bin.clone(), "bin/python.exe".into()));
+            bin_files.push((py_bin.clone(), "bin/python3.exe".into()));
+
+            if let Some(parent) = py_bin.parent() {
+                if let Ok(entries) = fs::read_dir(parent) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.is_file() {
+                            if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                                if ext.eq_ignore_ascii_case("dll") {
+                                    let fname = entry.file_name().to_string_lossy().to_string();
+                                    bin_files.push((p.clone(), fname.clone()));
+                                    bin_files.push((p, format!("bin/{}", fname)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Companion pip
         if let Some(parent) = py_bin.parent() {
-            let pip = parent.join("pip3");
-            if pip.exists() {
-                bin_files.push((pip, "bin/pip3".into()));
+            let pip3 = parent.join("pip3");
+            if pip3.exists() {
+                bin_files.push((pip3.clone(), "bin/pip3".into()));
+                bin_files.push((pip3, "bin/pip".into()));
             } else if let Ok(p) = which::which("pip3") {
-                bin_files.push((p, "bin/pip3".into()));
+                bin_files.push((p.clone(), "bin/pip3".into()));
+                bin_files.push((p, "bin/pip".into()));
+            } else {
+                let pip = parent.join("pip");
+                if pip.exists() {
+                    bin_files.push((pip.clone(), "bin/pip".into()));
+                    bin_files.push((pip, "bin/pip3".into()));
+                } else if let Ok(p) = which::which("pip") {
+                    bin_files.push((p.clone(), "bin/pip".into()));
+                    bin_files.push((p, "bin/pip3".into()));
+                }
+            }
+        }
+
+        // Standard library discovery for relocatable Python execution
+        if let Ok(output) = Command::new(&py_bin)
+            .arg("-c")
+            .arg("import sysconfig; print(sysconfig.get_path('stdlib'))")
+            .output()
+        {
+            if output.status.success() {
+                let stdlib_path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let stdlib_dir = PathBuf::from(&stdlib_path_str);
+                if stdlib_dir.is_dir() {
+                    let folder_name = stdlib_dir
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("python3");
+                    let target_prefix = if cfg!(windows) || folder_name.eq_ignore_ascii_case("Lib")
+                    {
+                        "Lib".to_string()
+                    } else {
+                        format!("lib/{}", folder_name)
+                    };
+                    collect_files_recursive(
+                        &stdlib_dir,
+                        &stdlib_dir,
+                        &mut lib_files,
+                        &target_prefix,
+                    );
+                }
             }
         }
 
