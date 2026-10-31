@@ -1178,7 +1178,7 @@ version = "0.1.50"
     }]);
     lockfile.save(&src_ws.join("dmz.lock")).unwrap();
 
-    // 2. Verify detection includes Rust, CMake, Cc, and Ninja (and never AppleSdk/AndroidNdk)
+    // 2. Verify detection includes Rust, CMake, Cc, and Ninja (and companion AppleSdk on macOS)
     let detected = ToolchainProvider::detect_workspace_ecosystems(&src_ws, Some(&lockfile));
     assert!(detected.contains(&ToolchainEcosystem::Rust));
     assert!(detected.contains(&ToolchainEcosystem::CMake));

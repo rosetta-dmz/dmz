@@ -268,9 +268,15 @@ impl ToolchainEnv {
                 );
             }
 
-            // Always export SDKROOT if an authentic .sdk directory is located; never point to a bare non-SDK directory.
+            // Always export SDKROOT when .sdk directory is located
             if let Some(sdk_path) = Self::find_apple_sdk_root(&apple_dir) {
                 env_map.insert("SDKROOT".into(), sdk_path.to_string_lossy().to_string());
+                if !env_map.contains_key("DEVELOPER_DIR") {
+                    env_map.insert(
+                        "DEVELOPER_DIR".into(),
+                        apple_dir.to_string_lossy().to_string(),
+                    );
+                }
             }
         }
 
