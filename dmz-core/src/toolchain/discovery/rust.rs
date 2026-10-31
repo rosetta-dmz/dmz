@@ -124,8 +124,8 @@ impl ToolchainDiscoverer for RustDiscoverer {
         let mut bin_files = Vec::new();
         let mut lib_files = Vec::new();
 
-        // Binaries: cargo, rustc, rustdoc
-        for bin_name in &["cargo", "rustc", "rustdoc"] {
+        // Binaries: cargo, rustc, rustdoc, rust-analyzer
+        for bin_name in &["cargo", "rustc", "rustdoc", "rust-analyzer"] {
             let bin_path = sysroot.join("bin").join(bin_name);
             if bin_path.exists() {
                 bin_files.push((bin_path, format!("bin/{}", bin_name)));

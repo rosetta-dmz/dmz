@@ -186,6 +186,12 @@ impl ToolchainDetector {
             ecosystems.insert(ToolchainEcosystem::Cc);
         }
 
+        // On macOS: If C/C++ compiler is required, the Apple SDK sysroot is strictly required
+        #[cfg(target_os = "macos")]
+        if ecosystems.contains(&ToolchainEcosystem::Cc) {
+            ecosystems.insert(ToolchainEcosystem::AppleSdk);
+        }
+
         ecosystems
     }
 
@@ -607,9 +613,15 @@ pub(crate) mod tests {
             detected.contains(&ToolchainEcosystem::PkgConfig),
             "Rust workspace with pkg-config crate must detect PkgConfig"
         );
+        #[cfg(target_os = "macos")]
+        assert!(
+            detected.contains(&ToolchainEcosystem::AppleSdk),
+            "On macOS, Cc requires companion AppleSdk sysroot for standard C headers"
+        );
+        #[cfg(not(target_os = "macos"))]
         assert!(
             !detected.contains(&ToolchainEcosystem::AppleSdk),
-            "Must never pull AppleSdk without Apple project manifest"
+            "Must never pull AppleSdk without Apple project manifest on non-macOS"
         );
         assert!(
             !detected.contains(&ToolchainEcosystem::AndroidNdk),

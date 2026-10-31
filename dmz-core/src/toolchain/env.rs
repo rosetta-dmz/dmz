@@ -105,7 +105,8 @@ impl ToolchainEnv {
                 || py_dir.join("bin/python").exists()
                 || py_dir.join("bin/pip").exists()
                 || py_dir.join("python.exe").exists();
-            if has_py_bin {
+            let has_stdlib = py_dir.join("lib").exists() || py_dir.join("Lib").exists();
+            if has_py_bin && has_stdlib {
                 env_map.insert("PYTHONHOME".into(), py_dir.to_string_lossy().to_string());
             }
         }
@@ -255,17 +256,19 @@ impl ToolchainEnv {
         if toolchains_dir.join("applesdk").exists() {
             let apple_dir = toolchains_dir.join("applesdk");
 
-            // Only export DEVELOPER_DIR if it is a genuine, verified Xcode or Command Line Tools installation.
+            // Only export DEVELOPER_DIR if it is a genuine, verified Xcode or Command Line Tools installation with xcrun.
             // Per Apple toolchain specifications (man 1 xcrun), pointing DEVELOPER_DIR to an arbitrary directory
             // containing only loose binaries breaks xcrun and causes /usr/bin/cc to exit with status 1.
-            if Self::is_genuine_apple_developer_dir(&apple_dir) {
+            let has_xcrun =
+                apple_dir.join("usr/bin/xcrun").exists() || apple_dir.join("bin/xcrun").exists();
+            if has_xcrun && Self::is_genuine_apple_developer_dir(&apple_dir) {
                 env_map.insert(
                     "DEVELOPER_DIR".into(),
                     apple_dir.to_string_lossy().to_string(),
                 );
             }
 
-            // Only export SDKROOT if an authentic .sdk directory is located; never point to a bare non-SDK directory.
+            // Always export SDKROOT if an authentic .sdk directory is located; never point to a bare non-SDK directory.
             if let Some(sdk_path) = Self::find_apple_sdk_root(&apple_dir) {
                 env_map.insert("SDKROOT".into(), sdk_path.to_string_lossy().to_string());
             }
@@ -315,7 +318,7 @@ impl ToolchainEnv {
         None
     }
 
-    /// Checks whether the directory is a genuine, authentic Apple Xcode or Command Line Tools root.
+    /// Checks whether the directory is a genuine, authentic Apple Xcode, Command Line Tools root, or SDK distribution.
     ///
     /// Per Apple toolchain specifications (`man 1 xcrun`), DEVELOPER_DIR must point to a directory
     /// containing developer tools (such as `usr/bin/xcrun` or `bin/xcrun`) and platform SDKs (`SDKs` or `Platforms`).
@@ -326,11 +329,14 @@ impl ToolchainEnv {
             || apple_dir.join("SDKs").is_dir()
             || apple_dir.join("Toolchains").is_dir();
 
-        has_xcrun && has_sdk_structure && Self::find_apple_sdk_root(apple_dir).is_some()
+        (has_xcrun || has_sdk_structure) && Self::find_apple_sdk_root(apple_dir).is_some()
     }
 
     /// Searches for an authentic Apple SDK directory (*.sdk) within candidate subpaths.
     pub fn find_apple_sdk_root(apple_dir: &Path) -> Option<std::path::PathBuf> {
+        if apple_dir.is_dir() && apple_dir.extension().is_some_and(|ext| ext == "sdk") {
+            return Some(apple_dir.to_path_buf());
+        }
         let sdk_candidates = [
             apple_dir.join("Platforms/MacOSX.platform/Developer/SDKs"),
             apple_dir.join("SDKs"),

@@ -53,14 +53,240 @@ impl ToolchainSetup {
                 .output();
         }
 
-        // 3. Generate .dmz/toolchains/dmz.toolchain.cmake only if CMake is actually used
+        // 3. Generate hermetic Clang wrapper scripts (injecting -isysroot on macOS/Unix)
+        Self::generate_clang_wrappers(workspace_root)?;
+
+        // 4. Setup Node.js companion package managers (npm, npx, pnpm, yarn)
+        Self::setup_node_package_managers(workspace_root)?;
+
+        // 5. Generate .dmz/toolchains/dmz.toolchain.cmake only if CMake is actually used
         Self::generate_cmake_toolchain(workspace_root)?;
 
-        // 4. Generate .dmz/env.sh and .dmz/env.bat activator scripts
+        // 6. Generate .dmz/env.sh and .dmz/env.bat activator scripts
         Self::generate_activator_scripts(workspace_root)?;
 
-        // 5. Configure IDE workspace settings (.vscode/settings.json)
+        // 7. Configure IDE workspace settings (.vscode/settings.json)
         Self::generate_ide_settings(workspace_root)?;
+
+        Ok(())
+    }
+
+    /// Generates hermetic wrapper scripts for Clang/LLVM compiler binaries to ensure
+    /// the Apple SDK sysroot (-isysroot) is automatically passed on macOS.
+    #[cfg(unix)]
+    pub fn generate_clang_wrappers(workspace_root: &Path) -> Result<(), String> {
+        let cc_bin = workspace_root.join(".dmz/toolchains/cc/bin");
+        if !cc_bin.is_dir() {
+            return Ok(());
+        }
+
+        use std::os::unix::fs::PermissionsExt;
+
+        let wrapper_script = r#"#!/bin/sh
+# DMZ Hermetic Clang Wrapper
+# Automatically injects bundled Apple SDK sysroot when compiling on macOS
+
+# 1. Resolve self path and directory purely using POSIX shell builtins (zero external utilities)
+_SELF="$0"
+case "$_SELF" in
+    */*) ;;
+    *)
+        _SELF="$(command -v "$_SELF" 2>/dev/null)"
+        [ -z "$_SELF" ] && _SELF="./$0"
+        ;;
+esac
+
+case "$_SELF" in
+    */*)
+        _DIR="${_SELF%/*}"
+        _NAME="${_SELF##*/}"
+        ;;
+    *)
+        _DIR="."
+        _NAME="$_SELF"
+        ;;
+esac
+
+_DIR="$(cd "$_DIR" 2>/dev/null && pwd)"
+
+# 2. Locate real compiler binary
+_REAL="$_DIR/${_NAME}.real"
+if [ ! -f "$_REAL" ]; then
+    case "$_NAME" in
+        *++|*xx|*XX)
+            if [ -f "$_DIR/clang++.real" ]; then
+                _REAL="$_DIR/clang++.real"
+            fi
+            ;;
+        *)
+            if [ -f "$_DIR/clang.real" ]; then
+                _REAL="$_DIR/clang.real"
+            fi
+            ;;
+    esac
+fi
+
+# 3. Locate Apple SDK root
+_SDK="${SDKROOT}"
+if [ -z "$_SDK" ] || [ ! -d "$_SDK" ]; then
+    for _candidate in \
+        "$_DIR/../../applesdk/SDKs/MacOSX.sdk" \
+        "$_DIR/../../applesdk/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+    do
+        if [ -d "$_candidate" ]; then
+            _SDK="$_candidate"
+            break
+        fi
+    done
+fi
+
+if [ -z "$_SDK" ] || [ ! -d "$_SDK" ]; then
+    for _glob in "$_DIR"/../../applesdk/SDKs/MacOSX*.sdk "$_DIR"/../../applesdk/Platforms/MacOSX.platform/Developer/SDKs/MacOSX*.sdk; do
+        if [ -d "$_glob" ]; then
+            _SDK="$_glob"
+            break
+        fi
+    done
+fi
+
+# 4. Check if -isysroot or --sysroot is already specified in arguments
+_HAS_SYSROOT=0
+_HAS_RESOURCE_DIR=0
+for _arg in "$@"; do
+    case "$_arg" in
+        -isysroot|--sysroot|-isysroot=*|--sysroot=*)
+            _HAS_SYSROOT=1
+            ;;
+        -resource-dir|-resource-dir=*)
+            _HAS_RESOURCE_DIR=1
+            ;;
+    esac
+done
+
+# 5. Locate Clang builtin resource directory (contains include/stdarg.h, include/stddef.h)
+_RES=""
+if [ -d "$_DIR/../lib/clang/include" ]; then
+    _RES="$_DIR/../lib/clang"
+else
+    for _rcand in "$_DIR"/../lib/clang/*; do
+        if [ -d "$_rcand/include" ]; then
+            _RES="$_rcand"
+            break
+        fi
+    done
+fi
+
+_EXTRA_ARGS=""
+if [ -n "$_SDK" ] && [ -d "$_SDK" ]; then
+    export SDKROOT="$_SDK"
+    if [ "$_HAS_SYSROOT" -eq 0 ]; then
+        _EXTRA_ARGS="-isysroot $_SDK"
+    fi
+fi
+
+if [ -n "$_RES" ] && [ -d "$_RES" ] && [ "$_HAS_RESOURCE_DIR" -eq 0 ]; then
+    _EXTRA_ARGS="$_EXTRA_ARGS -resource-dir $_RES"
+fi
+
+if [ -n "$_EXTRA_ARGS" ]; then
+    exec "$_REAL" $_EXTRA_ARGS "$@"
+fi
+
+exec "$_REAL" "$@"
+"#;
+
+        let compiler_names = ["clang", "clang++", "cc", "c++"];
+
+        for name in &compiler_names {
+            let orig_path = cc_bin.join(name);
+            let real_path = cc_bin.join(format!("{}.real", name));
+
+            if orig_path.exists() || fs::symlink_metadata(&orig_path).is_ok() {
+                let is_symlink = fs::symlink_metadata(&orig_path)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false);
+
+                if !real_path.exists() {
+                    if is_symlink {
+                        let _ = fs::remove_file(&orig_path);
+                    } else {
+                        fs::rename(&orig_path, &real_path).map_err(|e| {
+                            format!("Failed to rename {} to {}.real: {}", name, name, e)
+                        })?;
+                    }
+                } else if is_symlink {
+                    let _ = fs::remove_file(&orig_path);
+                }
+
+                fs::write(&orig_path, wrapper_script)
+                    .map_err(|e| format!("Failed to write wrapper script for {}: {}", name, e))?;
+                let _ = fs::set_permissions(&orig_path, fs::Permissions::from_mode(0o755));
+                if real_path.exists() {
+                    let _ = fs::set_permissions(&real_path, fs::Permissions::from_mode(0o755));
+                }
+            } else if real_path.exists() {
+                fs::write(&orig_path, wrapper_script)
+                    .map_err(|e| format!("Failed to write wrapper script for {}: {}", name, e))?;
+                let _ = fs::set_permissions(&orig_path, fs::Permissions::from_mode(0o755));
+                let _ = fs::set_permissions(&real_path, fs::Permissions::from_mode(0o755));
+            } else if (*name == "cc"
+                && (cc_bin.join("clang.real").exists() || cc_bin.join("clang").exists()))
+                || (*name == "c++"
+                    && (cc_bin.join("clang++.real").exists() || cc_bin.join("clang++").exists()))
+            {
+                fs::write(&orig_path, wrapper_script)
+                    .map_err(|e| format!("Failed to write wrapper script for {}: {}", name, e))?;
+                let _ = fs::set_permissions(&orig_path, fs::Permissions::from_mode(0o755));
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    pub fn generate_clang_wrappers(_workspace_root: &Path) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Ensures Node.js companion package managers (npm, npx, pnpm, yarn) are correctly wired
+    /// to their module entry points in `lib/node_modules/`.
+    pub fn setup_node_package_managers(workspace_root: &Path) -> Result<(), String> {
+        let node_dir = workspace_root.join(".dmz/toolchains/node");
+        if !node_dir.is_dir() {
+            return Ok(());
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let bin_dir = node_dir.join("bin");
+            let nm_dir = node_dir.join("lib/node_modules");
+
+            if nm_dir.is_dir() {
+                let _ = fs::create_dir_all(&bin_dir);
+
+                let managers = [
+                    ("npm", "lib/node_modules/npm/bin/npm-cli.js"),
+                    ("npx", "lib/node_modules/npm/bin/npx-cli.js"),
+                    ("pnpm", "lib/node_modules/pnpm/bin/pnpm.cjs"),
+                    ("yarn", "lib/node_modules/yarn/bin/yarn.js"),
+                    ("corepack", "lib/node_modules/corepack/dist/corepack.js"),
+                ];
+
+                for (name, rel_target) in &managers {
+                    let target_full = node_dir.join(rel_target);
+                    if target_full.exists() {
+                        let link_path = bin_dir.join(name);
+                        let rel_symlink_target = format!("../{}", rel_target);
+                        if link_path.exists() || fs::symlink_metadata(&link_path).is_ok() {
+                            let _ = fs::remove_file(&link_path);
+                        }
+                        let _ = symlink(&rel_symlink_target, &link_path);
+                    }
+                }
+            }
+        }
 
         Ok(())
     }
@@ -95,7 +321,32 @@ cmake_minimum_required(VERSION 3.10)
 
 set(DMZ_TOOLCHAINS_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
-# 1. Configure C and C++ Compilers
+# 1. Darwin / Apple Platform Sysroot Detection (evaluated prior to compiler probing)
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin" OR EXISTS "${DMZ_TOOLCHAINS_DIR}/applesdk" OR DEFINED ENV{SDKROOT})
+    set(CMAKE_SYSTEM_NAME "Darwin" CACHE STRING "Target System" FORCE)
+
+    if(NOT DEFINED CMAKE_OSX_SYSROOT OR CMAKE_OSX_SYSROOT STREQUAL "")
+        if(DEFINED ENV{SDKROOT} AND EXISTS "$ENV{SDKROOT}")
+            set(CMAKE_OSX_SYSROOT "$ENV{SDKROOT}" CACHE PATH "Apple SDK Root" FORCE)
+        else()
+            file(GLOB _DMZ_APPLE_SDKS
+                "${DMZ_TOOLCHAINS_DIR}/applesdk/SDKs/MacOSX*.sdk"
+                "${DMZ_TOOLCHAINS_DIR}/applesdk/Platforms/MacOSX.platform/Developer/SDKs/MacOSX*.sdk"
+            )
+            list(LENGTH _DMZ_APPLE_SDKS _DMZ_NUM_SDKS)
+            if(_DMZ_NUM_SDKS GREATER 0)
+                list(GET _DMZ_APPLE_SDKS 0 _DMZ_FIRST_SDK)
+                set(CMAKE_OSX_SYSROOT "${_DMZ_FIRST_SDK}" CACHE PATH "Apple SDK Root" FORCE)
+            endif()
+        endif()
+    endif()
+
+    if(CMAKE_OSX_SYSROOT AND EXISTS "${CMAKE_OSX_SYSROOT}")
+        set(ENV{SDKROOT} "${CMAKE_OSX_SYSROOT}")
+    endif()
+endif()
+
+# 2. Configure C and C++ Compilers
 if(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/clang")
     set(CMAKE_C_COMPILER "${DMZ_TOOLCHAINS_DIR}/cc/bin/clang" CACHE FILEPATH "C Compiler" FORCE)
     set(CMAKE_CXX_COMPILER "${DMZ_TOOLCHAINS_DIR}/cc/bin/clang++" CACHE FILEPATH "C++ Compiler" FORCE)
@@ -114,7 +365,7 @@ elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/cc.exe")
     set(CMAKE_C_COMPILER "${DMZ_TOOLCHAINS_DIR}/cc/bin/cc.exe" CACHE FILEPATH "C Compiler" FORCE)
 endif()
 
-# 2. Configure Archiver and Ranlib
+# 3. Configure Archiver and Ranlib
 if(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/llvm-ar")
     set(CMAKE_AR "${DMZ_TOOLCHAINS_DIR}/cc/bin/llvm-ar" CACHE FILEPATH "Archiver" FORCE)
 elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/llvm-ar.exe")
@@ -135,7 +386,7 @@ elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/ranlib.exe")
     set(CMAKE_RANLIB "${DMZ_TOOLCHAINS_DIR}/cc/bin/ranlib.exe" CACHE FILEPATH "Ranlib" FORCE)
 endif()
 
-# 3. Configure Build Generator (Ninja if bundled)
+# 4. Configure Build Generator (Ninja if bundled)
 if(EXISTS "${DMZ_TOOLCHAINS_DIR}/ninja/bin/ninja")
     set(CMAKE_MAKE_PROGRAM "${DMZ_TOOLCHAINS_DIR}/ninja/bin/ninja" CACHE FILEPATH "Ninja" FORCE)
 elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/ninja/bin/ninja.exe")
@@ -148,24 +399,16 @@ elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/make/bin/mingw32-make.exe")
     set(CMAKE_MAKE_PROGRAM "${DMZ_TOOLCHAINS_DIR}/make/bin/mingw32-make.exe" CACHE FILEPATH "Make" FORCE)
 endif()
 
-# 4. Scope CMake search roots strictly to DMZ bundled toolchain assets
+# 5. Scope CMake search roots strictly to DMZ bundled toolchain assets and Apple SDK sysroot
 set(CMAKE_FIND_ROOT_PATH "${DMZ_TOOLCHAINS_DIR}" CACHE PATH "Find Root Path" FORCE)
-
-# 5. Apple platform SDK integration
-if(APPLE)
-    if(NOT DEFINED CMAKE_OSX_SYSROOT)
-        if(DEFINED ENV{SDKROOT} AND EXISTS "$ENV{SDKROOT}")
-            set(CMAKE_OSX_SYSROOT "$ENV{SDKROOT}" CACHE PATH "Apple SDK Root" FORCE)
-        else()
-            file(GLOB _DMZ_APPLE_SDKS "${DMZ_TOOLCHAINS_DIR}/applesdk/Platforms/MacOSX.platform/Developer/SDKs/MacOSX*.sdk" "${DMZ_TOOLCHAINS_DIR}/applesdk/SDKs/MacOSX*.sdk")
-            list(LENGTH _DMZ_APPLE_SDKS _DMZ_NUM_SDKS)
-            if(_DMZ_NUM_SDKS GREATER 0)
-                list(GET _DMZ_APPLE_SDKS 0 _DMZ_FIRST_SDK)
-                set(CMAKE_OSX_SYSROOT "${_DMZ_FIRST_SDK}" CACHE PATH "Apple SDK Root" FORCE)
-            endif()
-        endif()
-    endif()
+if(CMAKE_OSX_SYSROOT AND EXISTS "${CMAKE_OSX_SYSROOT}")
+    list(APPEND CMAKE_FIND_ROOT_PATH "${CMAKE_OSX_SYSROOT}")
 endif()
+
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER CACHE STRING "" FORCE)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH CACHE STRING "" FORCE)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE BOTH CACHE STRING "" FORCE)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH CACHE STRING "" FORCE)
 
 # 6. Android platform NDK integration (chain official toolchain if present)
 if(DEFINED ENV{ANDROID_NDK_HOME} AND EXISTS "$ENV{ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake")
@@ -245,7 +488,7 @@ if [ -d "$DMZ_WS/.dmz/toolchains/go" ] && ([ -f "$DMZ_WS/.dmz/toolchains/go/bin/
     export GOROOT="$DMZ_WS/.dmz/toolchains/go"
 fi
 
-if [ -d "$DMZ_WS/.dmz/toolchains/python" ] && ([ -f "$DMZ_WS/.dmz/toolchains/python/bin/python3" ] || [ -f "$DMZ_WS/.dmz/toolchains/python/bin/python" ] || [ -f "$DMZ_WS/.dmz/toolchains/python/bin/pip" ] || [ -f "$DMZ_WS/.dmz/toolchains/python/python.exe" ] || [ -d "$DMZ_WS/.dmz/toolchains/python/lib" ] || [ -d "$DMZ_WS/.dmz/toolchains/python/Lib" ]); then
+if [ -d "$DMZ_WS/.dmz/toolchains/python" ] && ([ -d "$DMZ_WS/.dmz/toolchains/python/lib" ] || [ -d "$DMZ_WS/.dmz/toolchains/python/Lib" ]); then
     export PYTHONHOME="$DMZ_WS/.dmz/toolchains/python"
 fi
 
@@ -343,7 +586,11 @@ fi
 
         if crate::toolchain::ToolchainEnv::is_genuine_apple_developer_dir(
             &workspace_root.join(".dmz/toolchains/applesdk"),
-        ) {
+        ) || crate::toolchain::ToolchainEnv::find_apple_sdk_root(
+            &workspace_root.join(".dmz/toolchains/applesdk"),
+        )
+        .is_some()
+        {
             env_sh_content.push_str(
                 r#"
 if [ -d "$DMZ_WS/.dmz/toolchains/applesdk" ]; then
@@ -357,7 +604,7 @@ if [ -d "$DMZ_WS/.dmz/toolchains/applesdk" ]; then
             done
         fi
     done
-    if [ -n "$SDKROOT" ]; then
+    if [ -f "$DMZ_WS/.dmz/toolchains/applesdk/usr/bin/xcrun" ] || [ -f "$DMZ_WS/.dmz/toolchains/applesdk/bin/xcrun" ]; then
         export DEVELOPER_DIR="$DMZ_WS/.dmz/toolchains/applesdk"
     fi
 fi
@@ -388,9 +635,9 @@ if exist "%DMZ_WORKSPACE%\.dmz\toolchains\go\bin\go.exe" (
     set "GOROOT=%DMZ_WORKSPACE%\.dmz\toolchains\go"
 )
 
-if exist "%DMZ_WORKSPACE%\.dmz\toolchains\python\python.exe" (
+if exist "%DMZ_WORKSPACE%\.dmz\toolchains\python\Lib" (
     set "PYTHONHOME=%DMZ_WORKSPACE%\.dmz\toolchains\python"
-) else if exist "%DMZ_WORKSPACE%\.dmz\toolchains\python\bin\python.exe" (
+) else if exist "%DMZ_WORKSPACE%\.dmz\toolchains\python\lib" (
     set "PYTHONHOME=%DMZ_WORKSPACE%\.dmz\toolchains\python"
 )
 
@@ -757,6 +1004,20 @@ echo DMZ bundled toolchains activated.
                             )),
                         );
                     }
+                    if let Some(sdk_path) = crate::toolchain::ToolchainEnv::find_apple_sdk_root(
+                        &toolchains_dir.join("applesdk"),
+                    ) {
+                        if let Ok(rel) = sdk_path.strip_prefix(workspace_root) {
+                            let rel_str = rel.to_string_lossy().replace('\\', "/");
+                            ra_extra_env.insert(
+                                "SDKROOT".into(),
+                                serde_json::Value::String(format!(
+                                    "${{workspaceFolder}}/{}",
+                                    rel_str
+                                )),
+                            );
+                        }
+                    }
                     settings.insert(
                         (*env_setting_key).into(),
                         serde_json::Value::Object(ra_extra_env),
@@ -943,5 +1204,105 @@ mod tests {
         );
         assert!(val.get("python.defaultInterpreterPath").is_none());
         assert!(val.get("go.goroot").is_none());
+    }
+
+    #[test]
+    fn test_generate_clang_wrappers_and_idempotency() {
+        let temp = tempdir().unwrap();
+        let ws = temp.path();
+
+        // Simulate cc toolchain with clang, clang++ binaries
+        let cc_bin = ws.join(".dmz/toolchains/cc/bin");
+        fs::create_dir_all(&cc_bin).unwrap();
+        fs::write(cc_bin.join("clang"), "#!/bin/sh\necho real-clang").unwrap();
+        fs::write(cc_bin.join("clang++"), "#!/bin/sh\necho real-clang++").unwrap();
+
+        // Simulate applesdk
+        let sdk_dir = ws.join(".dmz/toolchains/applesdk/SDKs/MacOSX.sdk/usr/include");
+        fs::create_dir_all(&sdk_dir).unwrap();
+        fs::write(sdk_dir.join("stdio.h"), "/* stdio */").unwrap();
+        fs::write(sdk_dir.join("zlib.h"), "/* zlib */").unwrap();
+
+        // Setup toolchains
+        ToolchainSetup::setup_imported_toolchains(ws).unwrap();
+
+        #[cfg(unix)]
+        {
+            // Verify clang.real and clang++.real exist and have original contents
+            let real_clang = cc_bin.join("clang.real");
+            let real_clangxx = cc_bin.join("clang++.real");
+            assert!(real_clang.exists());
+            assert!(real_clangxx.exists());
+            assert_eq!(
+                fs::read_to_string(&real_clang).unwrap(),
+                "#!/bin/sh\necho real-clang"
+            );
+            assert_eq!(
+                fs::read_to_string(&real_clangxx).unwrap(),
+                "#!/bin/sh\necho real-clang++"
+            );
+
+            // Verify clang and clang++ are hermetic wrappers
+            let clang_wrapper = fs::read_to_string(cc_bin.join("clang")).unwrap();
+            assert!(clang_wrapper.contains("DMZ Hermetic Clang Wrapper"));
+            assert!(clang_wrapper.contains("-isysroot"));
+
+            // Verify cc wrapper was generated as well
+            let cc_path = cc_bin.join("cc");
+            assert!(cc_path.exists());
+            let cc_wrapper = fs::read_to_string(&cc_path).unwrap();
+            assert!(cc_wrapper.contains("DMZ Hermetic Clang Wrapper"));
+
+            // Verify permissions are 0o755
+            use std::os::unix::fs::PermissionsExt;
+            for p in &[&real_clang, &real_clangxx, &cc_bin.join("clang"), &cc_path] {
+                let mode = fs::metadata(p).unwrap().permissions().mode();
+                assert_eq!(mode & 0o111, 0o111, "Must be executable: {:?}", p);
+            }
+
+            // Verify idempotency: running setup again must preserve real binaries
+            ToolchainSetup::setup_imported_toolchains(ws).unwrap();
+            assert_eq!(
+                fs::read_to_string(&real_clang).unwrap(),
+                "#!/bin/sh\necho real-clang"
+            );
+            assert_eq!(
+                fs::read_to_string(&real_clangxx).unwrap(),
+                "#!/bin/sh\necho real-clang++"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cmake_toolchain_with_apple_sdk_sysroot() {
+        let temp = tempdir().unwrap();
+        let ws = temp.path();
+
+        fs::write(ws.join("CMakeLists.txt"), "project(test)").unwrap();
+        fs::create_dir_all(ws.join(".dmz/toolchains/cmake/bin")).unwrap();
+        fs::write(ws.join(".dmz/toolchains/cmake/bin/cmake"), "cmake").unwrap();
+        fs::create_dir_all(ws.join(".dmz/toolchains/cc/bin")).unwrap();
+        fs::write(ws.join(".dmz/toolchains/cc/bin/clang"), "clang").unwrap();
+
+        let sdk_dir = ws.join(".dmz/toolchains/applesdk/SDKs/MacOSX.sdk/usr/include");
+        fs::create_dir_all(&sdk_dir).unwrap();
+        fs::write(sdk_dir.join("zlib.h"), "/* zlib */").unwrap();
+
+        ToolchainSetup::setup_imported_toolchains(ws).unwrap();
+
+        let cmake_tc = ws.join(".dmz/toolchains/dmz.toolchain.cmake");
+        assert!(cmake_tc.exists());
+        let content = fs::read_to_string(&cmake_tc).unwrap();
+
+        // Must configure Darwin and CMAKE_OSX_SYSROOT prior to compiler check
+        assert!(content.contains("CMAKE_SYSTEM_NAME \"Darwin\""));
+        assert!(content.contains("CMAKE_OSX_SYSROOT"));
+        assert!(content.contains("CMAKE_FIND_ROOT_PATH_MODE_INCLUDE BOTH"));
+        assert!(content.contains("CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH"));
+
+        // env.sh must export SDKROOT and NOT export DEVELOPER_DIR (since no xcrun)
+        let env_sh = fs::read_to_string(ws.join(".dmz/env.sh")).unwrap();
+        assert!(env_sh.contains("export SDKROOT="));
+        assert!(env_sh.contains("[ -f \"$DMZ_WS/.dmz/toolchains/applesdk/usr/bin/xcrun\" ]"));
     }
 }

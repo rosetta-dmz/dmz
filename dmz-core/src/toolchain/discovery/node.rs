@@ -75,7 +75,8 @@ impl ToolchainDiscoverer for NodeDiscoverer {
             None => return Ok(None),
         };
 
-        let node_root = node_bin
+        let canonical_bin = fs::canonicalize(&node_bin).unwrap_or_else(|_| node_bin.clone());
+        let node_root = canonical_bin
             .parent()
             .and_then(|p| p.parent())
             .map(Path::to_path_buf)

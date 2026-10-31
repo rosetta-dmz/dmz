@@ -436,7 +436,9 @@ impl AirGapImporter {
         for tc_entry in &manifest_toolchains {
             if tc_entry.ecosystem == crate::toolchain::ToolchainEcosystem::AppleSdk {
                 let apple_dir = effective_workspace.join(".dmz/toolchains/applesdk");
-                if !crate::toolchain::ToolchainEnv::is_genuine_apple_developer_dir(&apple_dir) {
+                if !crate::toolchain::ToolchainEnv::is_genuine_apple_developer_dir(&apple_dir)
+                    && crate::toolchain::ToolchainEnv::find_apple_sdk_root(&apple_dir).is_none()
+                {
                     continue;
                 }
             }
