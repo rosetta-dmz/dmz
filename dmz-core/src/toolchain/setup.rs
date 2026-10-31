@@ -411,11 +411,11 @@ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE BOTH CACHE STRING "" FORCE)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH CACHE STRING "" FORCE)
 
 # 6. Android platform NDK integration (chain official toolchain if present)
-if(DEFINED ENV{ANDROID_NDK_HOME} AND EXISTS "$ENV{ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake")
-    include("$ENV{ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake")
-elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/androidndk/build/cmake/android.toolchain.cmake")
+if(EXISTS "${DMZ_TOOLCHAINS_DIR}/androidndk/build/cmake/android.toolchain.cmake")
     set(ENV{ANDROID_NDK_HOME} "${DMZ_TOOLCHAINS_DIR}/androidndk")
     include("${DMZ_TOOLCHAINS_DIR}/androidndk/build/cmake/android.toolchain.cmake")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Android" AND DEFINED ENV{ANDROID_NDK_HOME} AND EXISTS "$ENV{ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake")
+    include("$ENV{ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake")
 endif()
 "#;
 

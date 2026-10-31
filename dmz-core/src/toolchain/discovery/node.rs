@@ -141,6 +141,23 @@ impl ToolchainDiscoverer for NodeDiscoverer {
             );
         }
 
+        // Collect companion dynamic libraries in lib/ (e.g. libnode.*.dylib, libnode.*.so, libnode.dll)
+        let lib_dir = node_root.join("lib");
+        if lib_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&lib_dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_file() {
+                        let fname = entry.file_name();
+                        let s = fname.to_string_lossy();
+                        if s.starts_with("libnode") {
+                            lib_files.push((p, format!("lib/{}", s)));
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(Some(DiscoveredToolchain {
             ecosystem: ToolchainEcosystem::Node,
             version,

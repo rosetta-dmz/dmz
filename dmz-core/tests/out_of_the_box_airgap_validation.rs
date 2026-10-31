@@ -2037,6 +2037,7 @@ int main() {
                 "/nonexistent_developer_path_for_clean_target_machine",
             )
             .env_remove("SDKROOT")
+            .env_remove("ANDROID_NDK_HOME")
             .output()
             .expect("Failed to invoke cmake");
 
@@ -2055,6 +2056,7 @@ int main() {
                 "/nonexistent_developer_path_for_clean_target_machine",
             )
             .env_remove("SDKROOT")
+            .env_remove("ANDROID_NDK_HOME")
             .output()
             .expect("Failed to invoke cmake --build");
 
@@ -2077,6 +2079,43 @@ fn test_definitive_multi_ecosystem_compilation_proof() {
     let temp = tempdir().unwrap();
     let target_ws = temp.path();
 
+    fn link_or_copy_dir(src: &Path, dst: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let _ = symlink(src, dst);
+        }
+        #[cfg(windows)]
+        {
+            let res = std::process::Command::new("cmd")
+                .arg("/c")
+                .arg("mklink")
+                .arg("/J")
+                .arg(dst)
+                .arg(src)
+                .output();
+            if res.is_err() || !res.unwrap().status.success() {
+                if std::os::windows::fs::symlink_dir(src, dst).is_err() {
+                    fn copy_rec(s: &Path, d: &Path) {
+                        let _ = fs::create_dir_all(d);
+                        if let Ok(entries) = fs::read_dir(s) {
+                            for e in entries.flatten() {
+                                let p = e.path();
+                                let target = d.join(e.file_name());
+                                if p.is_dir() {
+                                    copy_rec(&p, &target);
+                                } else {
+                                    let _ = fs::copy(&p, &target);
+                                }
+                            }
+                        }
+                    }
+                    copy_rec(src, dst);
+                }
+            }
+        }
+    }
+
     // 1. Definitively verify Go compilation with bundled standard library sources ($GOROOT/src)
     if let Ok(go_bin) = which::which("go") {
         if let Ok(output) = std::process::Command::new(&go_bin)
@@ -2090,16 +2129,13 @@ fn test_definitive_multi_ecosystem_compilation_proof() {
                     let go_target_dir = target_ws.join(".dmz/toolchains/go");
                     let go_bin_dir = go_target_dir.join("bin");
                     fs::create_dir_all(&go_bin_dir).unwrap();
-                    let _ = fs::copy(&go_bin, go_bin_dir.join("go"));
+                    let go_exe_name = if cfg!(windows) { "go.exe" } else { "go" };
+                    let _ = fs::copy(&go_bin, go_bin_dir.join(go_exe_name));
 
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::symlink;
-                        if host_goroot.join("pkg").exists() {
-                            let _ = symlink(host_goroot.join("pkg"), go_target_dir.join("pkg"));
-                        }
-                        let _ = symlink(host_goroot.join("src"), go_target_dir.join("src"));
+                    if host_goroot.join("pkg").exists() {
+                        link_or_copy_dir(&host_goroot.join("pkg"), &go_target_dir.join("pkg"));
                     }
+                    link_or_copy_dir(&host_goroot.join("src"), &go_target_dir.join("src"));
 
                     fs::write(
                         target_ws.join("main.go"),
@@ -2111,10 +2147,15 @@ fn test_definitive_multi_ecosystem_compilation_proof() {
                     let mut envs = HashMap::new();
                     ToolchainPackager::inject_toolchain_paths(target_ws, &mut envs);
 
-                    let go_build = std::process::Command::new(go_bin_dir.join("go"))
+                    let go_app_name = if cfg!(windows) {
+                        "go_app.exe"
+                    } else {
+                        "go_app"
+                    };
+                    let go_build = std::process::Command::new(go_bin_dir.join(go_exe_name))
                         .arg("build")
                         .arg("-o")
-                        .arg(target_ws.join("go_app"))
+                        .arg(target_ws.join(go_app_name))
                         .arg(target_ws.join("main.go"))
                         .current_dir(target_ws)
                         .envs(&envs)
@@ -2128,7 +2169,7 @@ fn test_definitive_multi_ecosystem_compilation_proof() {
                         String::from_utf8_lossy(&go_build.stderr)
                     );
 
-                    let go_run = std::process::Command::new(target_ws.join("go_app"))
+                    let go_run = std::process::Command::new(target_ws.join(go_app_name))
                         .output()
                         .expect("Failed to execute compiled go binary");
                     assert!(go_run.status.success());
@@ -2160,11 +2201,7 @@ fn test_definitive_multi_ecosystem_compilation_proof() {
                         .unwrap_or("python3");
                     let target_lib = py_target_dir.join("lib");
                     fs::create_dir_all(&target_lib).unwrap();
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::symlink;
-                        let _ = symlink(&stdlib_dir, target_lib.join(folder_name));
-                    }
+                    link_or_copy_dir(&stdlib_dir, &target_lib.join(folder_name));
                 }
             }
         }
@@ -2197,21 +2234,41 @@ fn test_definitive_multi_ecosystem_compilation_proof() {
         fs::create_dir_all(&node_bin_dir).unwrap();
         let _ = fs::copy(&node_bin, node_bin_dir.join("node"));
 
-        // If host has lib/node_modules with npm or pnpm, wire them to prove execution
+        // If host has lib/node_modules or libnode dylibs, wire them
         let canonical_node = fs::canonicalize(&node_bin).unwrap_or_else(|_| node_bin.clone());
         if let Some(host_node_root) = canonical_node.parent().and_then(|p| p.parent()) {
-            let host_nm = host_node_root.join("lib/node_modules");
-            if host_nm.exists() {
-                let target_nm = node_root.join("lib/node_modules");
-                fs::create_dir_all(&target_nm).unwrap();
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::symlink;
+            let host_lib = host_node_root.join("lib");
+            if host_lib.exists() {
+                let target_lib = node_root.join("lib");
+                fs::create_dir_all(&target_lib).unwrap();
+                if let Ok(entries) = fs::read_dir(&host_lib) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        let fname = entry.file_name();
+                        let s = fname.to_string_lossy();
+                        if p.is_file() && s.starts_with("libnode") {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::symlink;
+                                let _ = symlink(&p, target_lib.join(&*s));
+                            }
+                            #[cfg(windows)]
+                            {
+                                let _ = fs::copy(&p, target_lib.join(&*s));
+                            }
+                        }
+                    }
+                }
+
+                let host_nm = host_lib.join("node_modules");
+                if host_nm.exists() {
+                    let target_nm = target_lib.join("node_modules");
+                    fs::create_dir_all(&target_nm).unwrap();
                     if host_nm.join("npm").exists() {
-                        let _ = symlink(host_nm.join("npm"), target_nm.join("npm"));
+                        link_or_copy_dir(&host_nm.join("npm"), &target_nm.join("npm"));
                     }
                     if host_nm.join("pnpm").exists() {
-                        let _ = symlink(host_nm.join("pnpm"), target_nm.join("pnpm"));
+                        link_or_copy_dir(&host_nm.join("pnpm"), &target_nm.join("pnpm"));
                     }
                 }
             }
