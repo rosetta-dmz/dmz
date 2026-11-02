@@ -59,14 +59,26 @@ impl ToolchainArchivePackager {
                 }
             }
 
-            // Package library / runtime assets (0o644)
+            // Package library / runtime assets (0o755 for executables/shared libraries, 0o644 for headers/data)
             for (host_path, rel_path) in &tc.lib_files {
                 let archive_entry_path = format!("{}/{}", base_archive_path, rel_path);
                 if let Ok(mut file) = fs::File::open(host_path) {
                     if let Ok(metadata) = file.metadata() {
+                        let is_executable_or_shlib = {
+                            let p_str = rel_path.to_lowercase();
+                            p_str.ends_with(".dylib")
+                                || p_str.ends_with(".so")
+                                || p_str.contains(".so.")
+                                || p_str.ends_with(".dll")
+                                || p_str.starts_with("pkg/tool/")
+                                || p_str.contains("libexec/")
+                                || p_str.contains("cc1")
+                                || p_str.contains("collect2")
+                        };
+                        let mode = if is_executable_or_shlib { 0o755 } else { 0o644 };
                         let mut header = tar::Header::new_gnu();
                         header.set_size(metadata.len());
-                        header.set_mode(0o644);
+                        header.set_mode(mode);
                         header.set_cksum();
                         tar_builder
                             .append_data(&mut header, &archive_entry_path, &mut file)

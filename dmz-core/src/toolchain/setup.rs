@@ -34,7 +34,13 @@ impl ToolchainSetup {
                                 .parent()
                                 .and_then(|parent| parent.file_name())
                                 .is_some_and(|name| name == "bin");
-                            if in_bin {
+                            let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                            let is_shlib_or_tool = fname.ends_with(".dylib")
+                                || fname.ends_with(".so")
+                                || fname.contains(".so.")
+                                || p.to_string_lossy().contains("pkg/tool")
+                                || p.to_string_lossy().contains("libexec");
+                            if in_bin || is_shlib_or_tool {
                                 let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o755));
                             }
                         }
@@ -525,6 +531,10 @@ if [ -d "$DMZ_WS/.dmz/toolchains/cc" ]; then
         export RANLIB="$DMZ_WS/.dmz/toolchains/cc/bin/llvm-ranlib"
     elif [ -f "$DMZ_WS/.dmz/toolchains/cc/bin/ranlib" ]; then
         export RANLIB="$DMZ_WS/.dmz/toolchains/cc/bin/ranlib"
+    fi
+    if [ -d "$DMZ_WS/.dmz/toolchains/cc/lib" ]; then
+        export DYLD_LIBRARY_PATH="$DMZ_WS/.dmz/toolchains/cc/lib:$DYLD_LIBRARY_PATH"
+        export LD_LIBRARY_PATH="$DMZ_WS/.dmz/toolchains/cc/lib:$LD_LIBRARY_PATH"
     fi
 fi
 

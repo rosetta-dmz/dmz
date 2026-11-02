@@ -1,7 +1,7 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
 use super::{
-    emit_non_relocatable_notice, is_non_standalone_path, push_system_bin_candidates,
-    push_unique_path, ToolchainDiscoverer,
+    collect_files_recursive, emit_non_relocatable_notice, is_non_standalone_path,
+    push_system_bin_candidates, push_unique_path, ToolchainDiscoverer,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -87,6 +87,14 @@ impl ToolchainDiscoverer for PkgConfigDiscoverer {
             "Discovered standalone pkg-config distribution"
         );
 
+        let mut lib_files = Vec::new();
+        for sub in &["lib/pkgconfig", "share/pkgconfig", "share/aclocal"] {
+            let p = root_dir.join(sub);
+            if p.is_dir() {
+                collect_files_recursive(&p, &root_dir, &mut lib_files, "");
+            }
+        }
+
         Ok(Some(DiscoveredToolchain {
             ecosystem: ToolchainEcosystem::PkgConfig,
             version,
@@ -95,7 +103,40 @@ impl ToolchainDiscoverer for PkgConfigDiscoverer {
                 (pkg_bin.clone(), "bin/pkg-config".to_string()),
                 (pkg_bin, "bin/pkgconf".to_string()),
             ],
-            lib_files: vec![],
+            lib_files,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_pkgconfig_collects_pc_dirs() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("fake_pkgconfig");
+        let lib_pc = root.join("lib/pkgconfig");
+        let share_pc = root.join("share/pkgconfig");
+
+        fs::create_dir_all(&lib_pc).unwrap();
+        fs::create_dir_all(&share_pc).unwrap();
+
+        fs::write(lib_pc.join("zlib.pc"), "Name: zlib").unwrap();
+        fs::write(share_pc.join("openssl.pc"), "Name: openssl").unwrap();
+
+        let mut lib_files = Vec::new();
+        for sub in &["lib/pkgconfig", "share/pkgconfig", "share/aclocal"] {
+            let p = root.join(sub);
+            if p.is_dir() {
+                collect_files_recursive(&p, &root, &mut lib_files, "");
+            }
+        }
+
+        let rel_paths: Vec<String> = lib_files.into_iter().map(|(_, r)| r).collect();
+        assert!(rel_paths.contains(&"lib/pkgconfig/zlib.pc".to_string()));
+        assert!(rel_paths.contains(&"share/pkgconfig/openssl.pc".to_string()));
     }
 }

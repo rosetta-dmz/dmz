@@ -120,24 +120,32 @@ impl ToolchainDiscoverer for GoDiscoverer {
 
         bin_files.push((go_bin.clone(), "bin/go".into()));
 
-        // Companion gofmt tool
-        let gofmt = goroot_dir.join("bin/gofmt");
-        if gofmt.exists() {
-            bin_files.push((gofmt, "bin/gofmt".into()));
-        } else if let Ok(found) = which::which("gofmt") {
-            bin_files.push((found, "bin/gofmt".into()));
-        }
-
-        // Companion compilers and tools under pkg/tool
+        // 1. Companion compilers and tools under pkg/tool
         let pkg_tool_dir = goroot_dir.join("pkg/tool");
         if pkg_tool_dir.exists() {
             collect_files_recursive(&pkg_tool_dir, &pkg_tool_dir, &mut lib_files, "pkg/tool");
         }
 
-        // Standard library sources under src/ (strictly required for Go compilation)
+        // 2. Standard library source code under src/ (essential for go build/compile)
         let src_dir = goroot_dir.join("src");
-        if src_dir.exists() {
+        if src_dir.is_dir() {
             collect_files_recursive(&src_dir, &src_dir, &mut lib_files, "src");
+        }
+
+        // 3. Runtime headers under pkg/include if present
+        let pkg_inc = goroot_dir.join("pkg/include");
+        if pkg_inc.is_dir() {
+            collect_files_recursive(&pkg_inc, &pkg_inc, &mut lib_files, "pkg/include");
+        }
+
+        // 4. Runtime zoneinfo and environment descriptor
+        let zoneinfo = goroot_dir.join("lib/time/zoneinfo.zip");
+        if zoneinfo.is_file() {
+            lib_files.push((zoneinfo, "lib/time/zoneinfo.zip".into()));
+        }
+        let go_env = goroot_dir.join("go.env");
+        if go_env.is_file() {
+            lib_files.push((go_env, "go.env".into()));
         }
 
         Ok(Some(DiscoveredToolchain {
@@ -147,5 +155,43 @@ impl ToolchainDiscoverer for GoDiscoverer {
             bin_files,
             lib_files,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_go_collects_src_and_runtime_assets() {
+        let temp = tempdir().unwrap();
+        let goroot = temp.path().join("fake_goroot");
+        let bin = goroot.join("bin");
+        let src_fmt = goroot.join("src/fmt");
+        let pkg_tool = goroot.join("pkg/tool/darwin_arm64");
+
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&src_fmt).unwrap();
+        fs::create_dir_all(&pkg_tool).unwrap();
+
+        fs::write(bin.join("go"), "go").unwrap();
+        fs::write(src_fmt.join("print.go"), "package fmt").unwrap();
+        fs::write(pkg_tool.join("compile"), "compile").unwrap();
+
+        let mut lib_files = Vec::new();
+
+        let pkg_tool_dir = goroot.join("pkg/tool");
+        if pkg_tool_dir.exists() {
+            collect_files_recursive(&pkg_tool_dir, &pkg_tool_dir, &mut lib_files, "pkg/tool");
+        }
+        let src_dir = goroot.join("src");
+        if src_dir.is_dir() {
+            collect_files_recursive(&src_dir, &src_dir, &mut lib_files, "src");
+        }
+
+        let rel_paths: Vec<String> = lib_files.into_iter().map(|(_, r)| r).collect();
+        assert!(rel_paths.contains(&"src/fmt/print.go".to_string()));
+        assert!(rel_paths.iter().any(|p| p.starts_with("pkg/tool/")));
     }
 }

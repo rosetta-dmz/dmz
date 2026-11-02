@@ -177,6 +177,17 @@ impl ToolchainDiscoverer for AndroidNdkDiscoverer {
                             "sysroot/usr/include",
                         );
                     }
+
+                    // Sysroot libraries and runtime objects (sysroot/usr/lib)
+                    let sysroot_lib = host_llvm.join("sysroot/usr/lib");
+                    if sysroot_lib.is_dir() {
+                        collect_files_recursive(
+                            &sysroot_lib,
+                            &sysroot_lib,
+                            &mut lib_files,
+                            "sysroot/usr/lib",
+                        );
+                    }
                 }
             }
         }
@@ -194,5 +205,41 @@ impl ToolchainDiscoverer for AndroidNdkDiscoverer {
             bin_files,
             lib_files,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_android_ndk_collects_sysroot_include_and_lib() {
+        let temp = tempdir().unwrap();
+        let ndk = temp.path().join("fake_ndk");
+        let prebuilt = ndk.join("toolchains/llvm/prebuilt/darwin-x86_64");
+        let inc = prebuilt.join("sysroot/usr/include");
+        let lib = prebuilt.join("sysroot/usr/lib/aarch64-linux-android");
+        let cmake = ndk.join("build/cmake");
+
+        fs::create_dir_all(inc.join("android")).unwrap();
+        fs::create_dir_all(&lib).unwrap();
+        fs::create_dir_all(&cmake).unwrap();
+
+        fs::write(inc.join("android/log.h"), "#define LOG").unwrap();
+        fs::write(lib.join("crtbegin_so.o"), "crt").unwrap();
+        fs::write(lib.join("libc++_shared.so"), "stl").unwrap();
+        fs::write(cmake.join("android.toolchain.cmake"), "# cmake").unwrap();
+
+        let mut lib_files = Vec::new();
+        collect_files_recursive(&inc, &inc, &mut lib_files, "sysroot/usr/include");
+        collect_files_recursive(&lib, &lib, &mut lib_files, "sysroot/usr/lib");
+        collect_files_recursive(&cmake, &ndk, &mut lib_files, "");
+
+        let rel_names: Vec<String> = lib_files.into_iter().map(|(_, r)| r).collect();
+        assert!(rel_names.contains(&"sysroot/usr/include/android/log.h".to_string()));
+        assert!(rel_names.iter().any(|p| p.contains("crtbegin_so.o")));
+        assert!(rel_names.iter().any(|p| p.contains("libc++_shared.so")));
+        assert!(rel_names.contains(&"build/cmake/android.toolchain.cmake".to_string()));
     }
 }

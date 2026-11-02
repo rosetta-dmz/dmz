@@ -179,6 +179,38 @@ impl ToolchainEnv {
             } else if let Some(bin) = ranlib_bin {
                 env_map.insert("RANLIB".into(), bin.to_string_lossy().to_string());
             }
+
+            let cc_lib = cc_dir.join("lib");
+            if cc_lib.is_dir() {
+                let cc_lib_str = cc_lib.to_string_lossy().to_string();
+                #[cfg(target_os = "macos")]
+                {
+                    let existing = env_map
+                        .get("DYLD_LIBRARY_PATH")
+                        .cloned()
+                        .unwrap_or_default();
+                    env_map.insert(
+                        "DYLD_LIBRARY_PATH".into(),
+                        if existing.is_empty() {
+                            cc_lib_str.clone()
+                        } else {
+                            format!("{}:{}", cc_lib_str, existing)
+                        },
+                    );
+                }
+                #[cfg(unix)]
+                {
+                    let existing = env_map.get("LD_LIBRARY_PATH").cloned().unwrap_or_default();
+                    env_map.insert(
+                        "LD_LIBRARY_PATH".into(),
+                        if existing.is_empty() {
+                            cc_lib_str
+                        } else {
+                            format!("{}:{}", cc_lib_str, existing)
+                        },
+                    );
+                }
+            }
         }
 
         if toolchains_dir.join("cmake").exists() {

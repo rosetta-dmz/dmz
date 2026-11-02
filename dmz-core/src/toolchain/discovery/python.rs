@@ -185,6 +185,29 @@ impl ToolchainDiscoverer for PythonDiscoverer {
             }
         }
 
+        // Standard library modules and C headers
+        let lib_dir = py_root.join("lib");
+        if lib_dir.is_dir() {
+            if let Ok(entries) = fs::read_dir(&lib_dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    let fname = entry.file_name();
+                    let s = fname.to_string_lossy();
+                    if p.is_dir() && s.starts_with("python3.") {
+                        collect_python_files_recursive(&p, &py_root, &mut lib_files, "");
+                    }
+                }
+            }
+        }
+        let win_lib = py_root.join("Lib");
+        if win_lib.is_dir() {
+            collect_python_files_recursive(&win_lib, &py_root, &mut lib_files, "");
+        }
+        let inc_dir = py_root.join("include");
+        if inc_dir.is_dir() {
+            collect_files_recursive(&inc_dir, &py_root, &mut lib_files, "");
+        }
+
         Ok(Some(DiscoveredToolchain {
             ecosystem: ToolchainEcosystem::Python,
             version,
@@ -192,5 +215,72 @@ impl ToolchainDiscoverer for PythonDiscoverer {
             bin_files,
             lib_files,
         }))
+    }
+}
+
+/// Recursively collects Python standard library files while omitting bytecode cache directories.
+fn collect_python_files_recursive(
+    dir: &Path,
+    base: &Path,
+    acc: &mut Vec<(PathBuf, String)>,
+    target_prefix: &str,
+) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                let name = entry.file_name();
+                if name == "__pycache__" || name == "idlelib" || name == "test" || name == "tests" {
+                    continue;
+                }
+                collect_python_files_recursive(&p, base, acc, target_prefix);
+            } else if p.is_file() {
+                if let Ok(rel) = p.strip_prefix(base) {
+                    let rel_str = rel.to_string_lossy().replace('\\', "/");
+                    let target_path = if target_prefix.is_empty() {
+                        rel_str
+                    } else if target_prefix.ends_with('/') {
+                        format!("{}{}", target_prefix, rel_str)
+                    } else {
+                        format!("{}/{}", target_prefix, rel_str)
+                    };
+                    acc.push((p.clone(), target_path));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_python_collects_stdlib_and_skips_pycache() {
+        let temp = tempdir().unwrap();
+        let py_root = temp.path().join("fake_py");
+        let stdlib = py_root.join("lib/python3.11");
+        let pycache = stdlib.join("__pycache__");
+        let inc = py_root.join("include/python3.11");
+
+        fs::create_dir_all(&stdlib).unwrap();
+        fs::create_dir_all(&pycache).unwrap();
+        fs::create_dir_all(&inc).unwrap();
+
+        fs::write(stdlib.join("os.py"), "# os").unwrap();
+        fs::write(stdlib.join("sys.py"), "# sys").unwrap();
+        fs::write(pycache.join("os.cpython-311.pyc"), "bytecode").unwrap();
+        fs::write(inc.join("Python.h"), "#define PYTHON_H").unwrap();
+
+        let mut lib_files = Vec::new();
+        collect_python_files_recursive(&stdlib, &py_root, &mut lib_files, "");
+        collect_files_recursive(&inc, &py_root, &mut lib_files, "");
+
+        let rel_paths: Vec<String> = lib_files.into_iter().map(|(_, r)| r).collect();
+        assert!(rel_paths.contains(&"lib/python3.11/os.py".to_string()));
+        assert!(rel_paths.contains(&"lib/python3.11/sys.py".to_string()));
+        assert!(!rel_paths.iter().any(|p| p.contains("__pycache__")));
+        assert!(rel_paths.contains(&"include/python3.11/Python.h".to_string()));
     }
 }

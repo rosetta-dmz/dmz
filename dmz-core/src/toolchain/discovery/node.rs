@@ -102,8 +102,8 @@ impl ToolchainDiscoverer for NodeDiscoverer {
 
         bin_files.push((node_bin.clone(), "bin/node".into()));
 
-        // Companion package managers: npm, npx, pnpm, yarn
-        for mgr in &["npm", "npx", "pnpm", "yarn"] {
+        // Companion package managers: npm, npx, pnpm, yarn, corepack
+        for mgr in &["npm", "npx", "pnpm", "yarn", "corepack"] {
             let companion = node_bin.parent().map(|p| p.join(mgr));
             if let Some(cp) = companion {
                 if cp.exists() {
@@ -141,21 +141,10 @@ impl ToolchainDiscoverer for NodeDiscoverer {
             );
         }
 
-        // Collect companion dynamic libraries in lib/ (e.g. libnode.*.dylib, libnode.*.so, libnode.dll)
-        let lib_dir = node_root.join("lib");
-        if lib_dir.exists() {
-            if let Ok(entries) = fs::read_dir(&lib_dir) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    if p.is_file() {
-                        let fname = entry.file_name();
-                        let s = fname.to_string_lossy();
-                        if s.starts_with("libnode") {
-                            lib_files.push((p, format!("lib/{}", s)));
-                        }
-                    }
-                }
-            }
+        // Collect C/C++ development headers under include/node for native addon compilation (e.g. node-gyp)
+        let include_node = node_root.join("include/node");
+        if include_node.exists() {
+            collect_files_recursive(&include_node, &node_root, &mut lib_files, "");
         }
 
         Ok(Some(DiscoveredToolchain {
@@ -165,5 +154,63 @@ impl ToolchainDiscoverer for NodeDiscoverer {
             bin_files,
             lib_files,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_node_collects_headers_and_modules() {
+        let temp = tempdir().unwrap();
+        let node_root = temp.path().join("fake_node");
+        let bin = node_root.join("bin");
+        let inc = node_root.join("include/node");
+        let nm = node_root.join("lib/node_modules/npm");
+
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&inc).unwrap();
+        fs::create_dir_all(&nm).unwrap();
+
+        fs::write(bin.join("node"), "node").unwrap();
+        fs::write(bin.join("npm"), "npm").unwrap();
+        fs::write(bin.join("corepack"), "corepack").unwrap();
+        fs::write(inc.join("node.h"), "#define NODE_H").unwrap();
+        fs::write(nm.join("package.json"), "{}").unwrap();
+
+        let mut bin_files = Vec::new();
+        let mut lib_files = Vec::new();
+
+        bin_files.push((bin.join("node"), "bin/node".into()));
+        for mgr in &["npm", "npx", "pnpm", "yarn", "corepack"] {
+            let cp = bin.join(mgr);
+            if cp.exists() {
+                bin_files.push((cp, format!("bin/{}", mgr)));
+            }
+        }
+
+        let node_modules_dir = node_root.join("lib/node_modules");
+        if node_modules_dir.exists() {
+            collect_files_recursive(
+                &node_modules_dir,
+                &node_modules_dir,
+                &mut lib_files,
+                "lib/node_modules",
+            );
+        }
+        let include_node = node_root.join("include/node");
+        if include_node.exists() {
+            collect_files_recursive(&include_node, &node_root, &mut lib_files, "");
+        }
+
+        let bin_names: Vec<String> = bin_files.into_iter().map(|(_, r)| r).collect();
+        assert!(bin_names.contains(&"bin/npm".to_string()));
+        assert!(bin_names.contains(&"bin/corepack".to_string()));
+
+        let lib_names: Vec<String> = lib_files.into_iter().map(|(_, r)| r).collect();
+        assert!(lib_names.contains(&"include/node/node.h".to_string()));
+        assert!(lib_names.contains(&"lib/node_modules/npm/package.json".to_string()));
     }
 }
