@@ -100,6 +100,16 @@ impl ToolchainDiscoverer for JuceDiscoverer {
             collect_files_recursive(&modules_dir, &root_dir, &mut lib_files, "");
         }
 
+        // Capture JUCE CMake build scripts if present
+        let cmake_file = root_dir.join("CMakeLists.txt");
+        if cmake_file.is_file() {
+            lib_files.push((cmake_file, "CMakeLists.txt".to_string()));
+        }
+        let cmake_dir = root_dir.join("extras/Build/CMake");
+        if cmake_dir.is_dir() {
+            collect_files_recursive(&cmake_dir, &root_dir, &mut lib_files, "");
+        }
+
         Ok(Some(DiscoveredToolchain {
             ecosystem: ToolchainEcosystem::Juce,
             version: "JUCE".to_string(),

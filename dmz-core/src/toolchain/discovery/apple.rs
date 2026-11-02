@@ -136,6 +136,7 @@ impl ToolchainDiscoverer for AppleSdkDiscoverer {
             "codesign",
             "clang",
             "clang++",
+            "ld",
             "ar",
             "ranlib",
         ];
@@ -153,6 +154,35 @@ impl ToolchainDiscoverer for AppleSdkDiscoverer {
             if !found {
                 if let Ok(p) = which::which(bin_name) {
                     bin_files.push((p, format!("bin/{}", bin_name)));
+                }
+            }
+        }
+
+        // 3. Locate companion toolchain dynamic libraries (e.g. libtapi.dylib, libLTO.dylib)
+        let search_lib_dirs = vec![
+            dev_dir.join("usr/lib"),
+            dev_dir.join("Toolchains/XcodeDefault.xctoolchain/usr/lib"),
+        ];
+
+        for lib_dir in &search_lib_dirs {
+            if lib_dir.is_dir() {
+                if let Ok(entries) = fs::read_dir(lib_dir) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.is_file() {
+                            let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                            if fname.ends_with(".dylib") {
+                                let target_rel = format!("lib/{}", fname);
+                                if !lib_files.iter().any(|(_, r)| r == &target_rel) {
+                                    lib_files.push((p, target_rel));
+                                }
+                            }
+                        }
+                    }
+                }
+                let swift_compiler = lib_dir.join("swift/host/compiler");
+                if swift_compiler.is_dir() {
+                    super::collect_files_recursive(&swift_compiler, lib_dir, &mut lib_files, "lib");
                 }
             }
         }

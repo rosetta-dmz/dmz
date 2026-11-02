@@ -124,8 +124,15 @@ impl ToolchainDiscoverer for RustDiscoverer {
         let mut bin_files = Vec::new();
         let mut lib_files = Vec::new();
 
-        // Binaries: cargo, rustc, rustdoc
-        for bin_name in &["cargo", "rustc", "rustdoc"] {
+        // Binaries: cargo, rustc, rustdoc, rust-analyzer, clippy
+        for bin_name in &[
+            "cargo",
+            "rustc",
+            "rustdoc",
+            "rust-analyzer",
+            "cargo-clippy",
+            "clippy-driver",
+        ] {
             let bin_path = sysroot.join("bin").join(bin_name);
             if bin_path.exists() {
                 bin_files.push((bin_path, format!("bin/{}", bin_name)));
@@ -163,5 +170,48 @@ impl ToolchainDiscoverer for RustDiscoverer {
             bin_files,
             lib_files,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_rust_discovers_rust_analyzer_and_clippy() {
+        let temp = tempdir().unwrap();
+        let sysroot = temp.path().join("fake_sysroot");
+        let bin = sysroot.join("bin");
+        let lib = sysroot.join("lib");
+
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&lib).unwrap();
+
+        fs::write(bin.join("cargo"), "cargo").unwrap();
+        fs::write(bin.join("rustc"), "rustc").unwrap();
+        fs::write(bin.join("rust-analyzer"), "ra").unwrap();
+        fs::write(bin.join("cargo-clippy"), "clippy").unwrap();
+
+        let mut bin_files = Vec::new();
+        for bin_name in &[
+            "cargo",
+            "rustc",
+            "rustdoc",
+            "rust-analyzer",
+            "cargo-clippy",
+            "clippy-driver",
+        ] {
+            let bin_path = bin.join(bin_name);
+            if bin_path.exists() {
+                bin_files.push((bin_path, format!("bin/{}", bin_name)));
+            }
+        }
+
+        let bin_names: Vec<String> = bin_files.into_iter().map(|(_, r)| r).collect();
+        assert!(bin_names.contains(&"bin/cargo".to_string()));
+        assert!(bin_names.contains(&"bin/rustc".to_string()));
+        assert!(bin_names.contains(&"bin/rust-analyzer".to_string()));
+        assert!(bin_names.contains(&"bin/cargo-clippy".to_string()));
     }
 }
