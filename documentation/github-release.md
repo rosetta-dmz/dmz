@@ -26,7 +26,7 @@ For automated version calculation, workspace synchronization, and changelog main
 Once merged into `main`:
 1. `release-plz` cuts the Git tag `v*` and creates the GitHub Release notes.
 2. The Git tag push automatically triggers the `Release DMZ Platform` workflow (`.github/workflows/release.yml`).
-3. Multi-platform binaries (`ubuntu-24.04`, `macos-15`, `windows-2022`) are compiled, packaged (`DMZ.app`, Windows zip, Linux tarball), and attached to the GitHub Release.
+3. Multi-platform binaries (`ubuntu-24.04`, `macos-latest`, `windows-2022`) are compiled, packaged (`DMZ.app`, Windows zip, Linux tarball), and attached to the GitHub Release.
 
 ---
 
