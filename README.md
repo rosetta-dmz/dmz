@@ -1,6 +1,6 @@
 # DMZ
 
-> **Daemonless Sandbox & Air-Gapped Workspace Engine**
+> **Daemonless Sandbox & Air-Gapped Workspace Package Manager**
 
 DMZ is a fully open-source, daemonless workspace management and standalone sandbox platform. It provides isolated developer environments, secure proxy-audited AI agent execution, and deterministic air-gapped closure imports with no host system dependencies. No pre-installed Python, Node, Docker, or system Git needed.
 
