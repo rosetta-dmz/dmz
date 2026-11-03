@@ -148,4 +148,3 @@ fn test_cli_safe_socket_path_length_guard() {
     let dangerous_path = PathBuf::from(format!("/var/run/dmz/{}.sock", "x".repeat(110)));
     assert!(check_socket_path_length(&dangerous_path).is_some());
 }
-
