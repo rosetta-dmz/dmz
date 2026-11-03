@@ -52,10 +52,6 @@ impl ToolchainDiscoverer for PkgConfigDiscoverer {
         let mut chosen_version: Option<String> = None;
 
         for candidate in candidates {
-            if is_non_standalone_path(&candidate) {
-                emit_non_relocatable_notice(&candidate);
-            }
-
             if let Ok(output) = Command::new(&candidate).arg("--version").output() {
                 if output.status.success() {
                     let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -78,6 +74,10 @@ impl ToolchainDiscoverer for PkgConfigDiscoverer {
             Some(bin) => bin,
             None => return Ok(None),
         };
+
+        if is_non_standalone_path(&pkg_bin) {
+            emit_non_relocatable_notice(&pkg_bin);
+        }
         let version = chosen_version.unwrap_or_else(|| "pkg-config".to_string());
         let root_dir = pkg_bin.parent().unwrap_or(Path::new("")).to_path_buf();
 
@@ -138,5 +138,17 @@ mod tests {
         let rel_paths: Vec<String> = lib_files.into_iter().map(|(_, r)| r).collect();
         assert!(rel_paths.contains(&"lib/pkgconfig/zlib.pc".to_string()));
         assert!(rel_paths.contains(&"share/pkgconfig/openssl.pc".to_string()));
+    }
+
+    #[test]
+    fn test_pkgconfig_discovers_standalone_when_present() {
+        let discoverer = PkgConfigDiscoverer;
+        if let Ok(Some(tc)) = discoverer.discover() {
+            assert_eq!(tc.ecosystem, ToolchainEcosystem::PkgConfig);
+            // If ~/.local/bin/pkgconf is installed, it should be selected and not be non-standalone
+            if std::path::Path::new("/Users/rd/.local/bin/pkgconf").exists() {
+                assert!(!is_non_standalone_path(&tc.root_dir));
+            }
+        }
     }
 }
