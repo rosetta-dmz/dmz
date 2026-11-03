@@ -196,6 +196,19 @@ impl IpcServer {
                 IpcResponse::ok("Sandbox command dispatched")
             }
 
+            IpcRequest::GetSidecarStatus => {
+                let status_data = serde_json::json!({
+                    "state": "idle",
+                    "socket": null,
+                });
+                IpcResponse::ok_with_data("Sidecar status query", status_data)
+            }
+
+            IpcRequest::StopSidecarPair => {
+                info!("StopSidecarPair requested via IPC");
+                IpcResponse::ok("Sidecar pair stopped")
+            }
+
             IpcRequest::Shutdown => {
                 info!("Shutdown request received via IPC");
                 is_running.store(false, Ordering::SeqCst);

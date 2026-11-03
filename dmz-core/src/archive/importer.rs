@@ -43,6 +43,8 @@ pub struct ImportResult {
     #[serde(default)]
     pub has_toolchains: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_project: Option<crate::workspace::WorkspaceProjectConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcs: Option<VcsProvenance>,
 }
 
@@ -221,6 +223,7 @@ impl AirGapImporter {
         let mut vcs_provenance = None;
         let mut manifest_toolchains = Vec::new();
         let mut parsed_lockfile: Option<DmzLockfile> = None;
+        let mut workspace_project = None;
 
         // Single-pass entry iteration, extraction, and verification
         let entries = archive.entries().map_err(|e| {
@@ -251,6 +254,7 @@ impl AirGapImporter {
                 has_git_history = manifest.has_git_history;
                 vcs_provenance = manifest.vcs.clone();
                 manifest_toolchains = manifest.toolchains.clone();
+                workspace_project = manifest.workspace_project.clone();
 
                 info!(
                     closure = %closure_signature,
@@ -554,6 +558,7 @@ impl AirGapImporter {
             is_delta,
             has_git_history,
             has_toolchains,
+            workspace_project,
             vcs: vcs_provenance,
         })
     }

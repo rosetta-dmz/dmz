@@ -21,6 +21,8 @@ pub enum IpcRequest {
         args: Vec<String>,
         allow_network: bool,
     },
+    GetSidecarStatus,
+    StopSidecarPair,
     Shutdown,
 }
 

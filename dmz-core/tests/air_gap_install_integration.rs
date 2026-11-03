@@ -56,6 +56,7 @@ fn test_airgap_offline_install_workflow() -> Result<(), Box<dyn std::error::Erro
         sha256: computed_sha256,
         source_url: None,
         dependencies: vec![],
+        member_id: None,
     };
 
     let mut packages = BTreeMap::new();
@@ -66,6 +67,7 @@ fn test_airgap_offline_install_workflow() -> Result<(), Box<dyn std::error::Erro
         version: 1,
         target_platform: None,
         vcs: None,
+        workspaces: BTreeMap::new(),
         closure_signature: closure_sig,
         packages,
     };
@@ -246,6 +248,7 @@ fn test_airgap_offline_install_nested_npm_package_flattening(
         sha256: computed_sha256,
         source_url: None,
         dependencies: vec![],
+        member_id: None,
     };
 
     let mut packages = BTreeMap::new();
@@ -256,6 +259,7 @@ fn test_airgap_offline_install_nested_npm_package_flattening(
         version: 1,
         target_platform: None,
         vcs: None,
+        workspaces: BTreeMap::new(),
         closure_signature: closure_sig,
         packages,
     };
@@ -326,6 +330,7 @@ fn test_airgap_offline_install_python_workflow() -> Result<(), Box<dyn std::erro
         sha256: computed_sha256,
         source_url: None,
         dependencies: vec![],
+        member_id: None,
     };
 
     let mut packages = BTreeMap::new();
@@ -336,6 +341,7 @@ fn test_airgap_offline_install_python_workflow() -> Result<(), Box<dyn std::erro
         version: 1,
         target_platform: None,
         vcs: None,
+        workspaces: BTreeMap::new(),
         closure_signature: closure_sig,
         packages,
     };
@@ -431,6 +437,7 @@ fn test_airgap_offline_install_npm_bin_links() -> Result<(), Box<dyn std::error:
         sha256: computed_sha256,
         source_url: None,
         dependencies: vec![],
+        member_id: None,
     };
 
     let mut packages = BTreeMap::new();
@@ -441,6 +448,7 @@ fn test_airgap_offline_install_npm_bin_links() -> Result<(), Box<dyn std::error:
         version: 1,
         target_platform: None,
         vcs: None,
+        workspaces: BTreeMap::new(),
         closure_signature: closure_sig,
         packages,
     };

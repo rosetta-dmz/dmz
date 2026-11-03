@@ -83,7 +83,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-24.04", "macos-latest", "windows-2022"]') || fromJSON('["ubuntu-24.04"]') }}
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-24.04", "macos-14", "windows-2022"]') || fromJSON('["ubuntu-24.04"]') }}
 
     steps:
       - name: Checkout Repository

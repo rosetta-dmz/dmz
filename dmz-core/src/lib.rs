@@ -6,6 +6,11 @@ pub mod packaging;
 pub mod resolver;
 pub mod toolchain;
 pub mod vcs;
+pub mod workspace;
 
 pub use resolver::ResolverEngine;
 pub use vcs::{BundleInfo, GitProvider, VcsProvenance};
+pub use workspace::{
+    analyze_sidecar_abi, check_socket_path_length, cleanup_stale_socket, safe_socket_path,
+    IpcBridgeConfig, MemberRole, SidecarAbiReport, WorkspaceMember, WorkspaceProjectConfig,
+};

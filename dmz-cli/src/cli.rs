@@ -28,6 +28,10 @@ pub enum Commands {
         #[arg(short, long, default_value = ".")]
         workspace: PathBuf,
 
+        /// Path to companion sidecar workspace root (optional dual-repo mode)
+        #[arg(long)]
+        sidecar: Option<PathBuf>,
+
         /// Destination path for generated lockfile
         #[arg(short, long, default_value = "dmz.lock")]
         output: PathBuf,
@@ -93,6 +97,10 @@ pub enum Commands {
         #[arg(short, long, default_value = ".")]
         workspace: PathBuf,
 
+        /// Path to companion sidecar workspace root (optional dual-repo mode)
+        #[arg(long)]
+        sidecar: Option<PathBuf>,
+
         /// Path to dependency closure store (mounted R/O)
         #[arg(short, long, default_value = "/nix/store")]
         closure: PathBuf,
@@ -129,6 +137,10 @@ pub enum Commands {
         /// Path to workspace root directory
         #[arg(short, long, default_value = ".")]
         workspace: PathBuf,
+
+        /// Path to companion sidecar workspace root (optional dual-repo mode)
+        #[arg(long)]
+        sidecar: Option<PathBuf>,
 
         /// Destination path for generated lockfile
         #[arg(short, long, default_value = "dmz.lock")]
@@ -212,6 +224,10 @@ pub enum Commands {
         /// Path to workspace directory (mounted R/W)
         #[arg(short, long, default_value = ".")]
         workspace: PathBuf,
+
+        /// Path to companion sidecar workspace root (optional dual-repo mode)
+        #[arg(long)]
+        sidecar: Option<PathBuf>,
 
         /// Path to dependency closure store (mounted R/O)
         #[arg(long, default_value = "/nix/store")]
@@ -328,6 +344,10 @@ pub enum AirgapCommands {
         /// Path to workspace root directory
         #[arg(short, long, default_value = ".")]
         workspace: PathBuf,
+
+        /// Path to companion sidecar workspace root (optional dual-repo mode)
+        #[arg(long)]
+        sidecar: Option<PathBuf>,
 
         /// Destination path for generated lockfile
         #[arg(short, long, default_value = "dmz.lock")]

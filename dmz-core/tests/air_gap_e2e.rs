@@ -159,6 +159,7 @@ fn test_toolchain_packaging_and_import_roundtrip() -> anyhow::Result<()> {
         with_git_history: false,
         since: None,
         with_toolchain: true,
+        multi_workspace: None,
     };
 
     let manifest = AirGapExporter::export(&export_config)?;

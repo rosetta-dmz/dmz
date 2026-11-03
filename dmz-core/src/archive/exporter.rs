@@ -41,6 +41,8 @@ pub struct AirGapManifest {
     pub has_git_history: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub toolchains: Vec<crate::toolchain::ToolchainManifestEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_project: Option<crate::workspace::WorkspaceProjectConfig>,
     pub closure_signature: String,
     pub package_count: usize,
     pub created_at_utc: u64,
@@ -59,6 +61,7 @@ pub struct ExportConfig {
     pub with_git_history: bool,
     pub since: Option<String>,
     pub with_toolchain: bool,
+    pub multi_workspace: Option<crate::workspace::WorkspaceProjectConfig>,
 }
 
 impl Default for ExportConfig {
@@ -74,6 +77,7 @@ impl Default for ExportConfig {
             with_git_history: false,
             since: None,
             with_toolchain: false,
+            multi_workspace: None,
         }
     }
 }
@@ -397,6 +401,7 @@ impl AirGapExporter {
             delta_base,
             has_git_history,
             toolchains: toolchain_manifest_entries,
+            workspace_project: config.multi_workspace.clone(),
             closure_signature: lockfile.closure_signature.clone(),
             package_count: packed_count,
             created_at_utc: std::time::SystemTime::now()

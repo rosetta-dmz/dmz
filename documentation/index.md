@@ -32,6 +32,7 @@ The DMZ workspace is organized into **five primary crates**:
 
 * **[GUI User Workflow Guide](gui-user-workflow.md)** — Step-by-step GUI workflow instructions for workspace selection (open/save locations), dependency resolution, air-gap bundle export/import, package building, and sandbox testing.
 * **[CLI User Workflow Guide](dev-user-workflow.md)** — Terminal-based resolution, air-gap bundling, and sandbox execution workflow.
+* **[Dual-Repo & Sidecar Workflow Guide](dual-repo-sidecar-workflow.md)** — Comprehensive CLI and GUI workflow guide for managing dual-repo workspaces, KEP-753 lifecycle sequencing, POSIX safe socket IPC, and multi-ecosystem air-gap closures.
 * **[Version Control & Provenance Guide](version-control.md)** — Embedded `libgit2` repository provenance, Git bundle export/import, and incremental delta air-gap packaging.
 * **[Air-Gap Packaging & Transfer Guide](air-gap-pipeline.md)** — Complete instructions on bundling, cryptographically signing, and offline-importing `.tar.zst` closure archives with zero host dependencies.
 * **[Post-Import Tool Execution Guide](post-import-execution.md)** — Running project tools, compilers, and test suites after import via environment activators, `dmz shell`, or `dmz sandbox`.
