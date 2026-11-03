@@ -212,16 +212,26 @@ exec "$_REAL" "$@"
                     .map(|m| m.file_type().is_symlink())
                     .unwrap_or(false);
 
-                if !real_path.exists() {
-                    if is_symlink {
+                let is_already_wrapper = if orig_path.is_file() {
+                    fs::read_to_string(&orig_path)
+                        .map(|content| content.contains("# DMZ Hermetic Clang Wrapper"))
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+
+                if !is_already_wrapper {
+                    if !real_path.exists() {
+                        if is_symlink {
+                            let _ = fs::remove_file(&orig_path);
+                        } else {
+                            fs::rename(&orig_path, &real_path).map_err(|e| {
+                                format!("Failed to rename {} to {}.real: {}", name, name, e)
+                            })?;
+                        }
+                    } else if is_symlink {
                         let _ = fs::remove_file(&orig_path);
-                    } else {
-                        fs::rename(&orig_path, &real_path).map_err(|e| {
-                            format!("Failed to rename {} to {}.real: {}", name, name, e)
-                        })?;
                     }
-                } else if is_symlink {
-                    let _ = fs::remove_file(&orig_path);
                 }
 
                 fs::write(&orig_path, wrapper_script)
@@ -477,7 +487,10 @@ if [ -d "$DMZ_WS/.dmz/toolchains" ]; then
                     fi
                     ;;
             esac
-            export PATH="$tc_bin:$PATH"
+            case ":$PATH:" in
+                *":$tc_bin:"*) ;;
+                *) export PATH="$tc_bin:$PATH" ;;
+            esac
         fi
     done
 fi
@@ -486,8 +499,14 @@ fi
 if [ -d "$DMZ_WS/.dmz/toolchains/rust" ]; then
     export RUSTUP_HOME="$DMZ_WS/.dmz/toolchains/rust"
     export CARGO_HOME="${CARGO_HOME:-$DMZ_WS/.cargo}"
-    export DYLD_LIBRARY_PATH="$DMZ_WS/.dmz/toolchains/rust/lib:$DYLD_LIBRARY_PATH"
-    export LD_LIBRARY_PATH="$DMZ_WS/.dmz/toolchains/rust/lib:$LD_LIBRARY_PATH"
+    case ":$DYLD_LIBRARY_PATH:" in
+        *":$DMZ_WS/.dmz/toolchains/rust/lib:"*) ;;
+        *) export DYLD_LIBRARY_PATH="$DMZ_WS/.dmz/toolchains/rust/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" ;;
+    esac
+    case ":$LD_LIBRARY_PATH:" in
+        *":$DMZ_WS/.dmz/toolchains/rust/lib:"*) ;;
+        *) export LD_LIBRARY_PATH="$DMZ_WS/.dmz/toolchains/rust/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+    esac
 fi
 
 if [ -d "$DMZ_WS/.dmz/toolchains/go" ] && ([ -f "$DMZ_WS/.dmz/toolchains/go/bin/go" ] || [ -f "$DMZ_WS/.dmz/toolchains/go/bin/go.exe" ]); then
@@ -500,7 +519,10 @@ fi
 
 if [ -d "$DMZ_WS/.dmz/toolchains/node" ]; then
     if [ -d "$DMZ_WS/.dmz/toolchains/node/lib/node_modules" ]; then
-        export NODE_PATH="$DMZ_WS/.dmz/toolchains/node/lib/node_modules${NODE_PATH:+:$NODE_PATH}"
+        case ":$NODE_PATH:" in
+            *":$DMZ_WS/.dmz/toolchains/node/lib/node_modules:"*) ;;
+            *) export NODE_PATH="$DMZ_WS/.dmz/toolchains/node/lib/node_modules${NODE_PATH:+:$NODE_PATH}" ;;
+        esac
     fi
 fi
 
@@ -632,7 +654,7 @@ set DMZ_WORKSPACE=%~dp0..
 
 for /d %%D in ("%DMZ_WORKSPACE%\.dmz\toolchains\*") do (
     if exist "%%D\bin" (
-        set "PATH=%%D\bin;%PATH%"
+        echo ;%PATH%; | findstr /I /C:";%%D\bin;" >nul || set "PATH=%%D\bin;%PATH%"
     )
 )
 
@@ -1314,5 +1336,88 @@ mod tests {
         let env_sh = fs::read_to_string(ws.join(".dmz/env.sh")).unwrap();
         assert!(env_sh.contains("export SDKROOT="));
         assert!(env_sh.contains("[ -f \"$DMZ_WS/.dmz/toolchains/applesdk/usr/bin/xcrun\" ]"));
+    }
+
+    #[test]
+    fn test_setup_imported_toolchains_is_strictly_idempotent() {
+        let temp = tempdir().unwrap();
+        let ws = temp.path();
+
+        let cc_bin = ws.join(".dmz/toolchains/cc/bin");
+        fs::create_dir_all(&cc_bin).unwrap();
+        fs::write(
+            cc_bin.join("clang"),
+            "#!/bin/sh\necho \"real clang binary\"\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink("clang", cc_bin.join("cc")).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            fs::write(cc_bin.join("cc"), "#!/bin/sh\necho \"real cc binary\"\n").unwrap();
+        }
+
+        let rust_bin = ws.join(".dmz/toolchains/rust/bin");
+        fs::create_dir_all(&rust_bin).unwrap();
+        fs::write(rust_bin.join("cargo"), "cargo").unwrap();
+
+        // 1. First execution
+        ToolchainSetup::setup_imported_toolchains(ws).unwrap();
+
+        #[cfg(unix)]
+        {
+            let real_clang = cc_bin.join("clang.real");
+            assert!(
+                real_clang.exists(),
+                "clang.real must exist after first setup"
+            );
+            assert_eq!(
+                fs::read_to_string(&real_clang).unwrap(),
+                "#!/bin/sh\necho \"real clang binary\"\n"
+            );
+
+            let clang_wrapper = fs::read_to_string(cc_bin.join("clang")).unwrap();
+            assert!(clang_wrapper.contains("# DMZ Hermetic Clang Wrapper"));
+
+            let cc_wrapper = fs::read_to_string(cc_bin.join("cc")).unwrap();
+            assert!(cc_wrapper.contains("# DMZ Hermetic Clang Wrapper"));
+            assert!(
+                !cc_bin.join("cc.real").exists(),
+                "cc.real must not be created"
+            );
+        }
+
+        let env_sh_1 = fs::read_to_string(ws.join(".dmz/env.sh")).unwrap();
+
+        // 2. Second execution (must be strictly idempotent)
+        ToolchainSetup::setup_imported_toolchains(ws).unwrap();
+
+        #[cfg(unix)]
+        {
+            let real_clang = cc_bin.join("clang.real");
+            assert_eq!(
+                fs::read_to_string(&real_clang).unwrap(),
+                "#!/bin/sh\necho \"real clang binary\"\n",
+                "clang.real must remain intact and never be overwritten by a wrapper script"
+            );
+            assert!(
+                !cc_bin.join("cc.real").exists(),
+                "cc.real must not be created on repeated setup runs"
+            );
+        }
+
+        let env_sh_2 = fs::read_to_string(ws.join(".dmz/env.sh")).unwrap();
+        assert_eq!(
+            env_sh_1, env_sh_2,
+            "env.sh content must be completely identical across repeated setups"
+        );
+
+        // 3. Third execution
+        ToolchainSetup::setup_imported_toolchains(ws).unwrap();
+        let env_sh_3 = fs::read_to_string(ws.join(".dmz/env.sh")).unwrap();
+        assert_eq!(env_sh_1, env_sh_3);
     }
 }

@@ -186,6 +186,10 @@ impl ToolchainDiscoverer for CcDiscoverer {
                     }
                 }
             } else if let Ok(found) = which::which(name) {
+                if is_non_standalone_path(&found) {
+                    emit_non_relocatable_notice(&found);
+                    continue;
+                }
                 if !bin_files.iter().any(|(_, rel)| rel == &target_name) {
                     bin_files.push((found, target_name));
                 }

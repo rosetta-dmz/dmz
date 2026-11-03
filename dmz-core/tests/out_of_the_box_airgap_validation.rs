@@ -1131,7 +1131,7 @@ fn test_rust_workspace_with_cmake_dependency_bundles_and_installs_cmake_upon_imp
     let src_ws = temp.path().join("rust_cmake_src");
     fs::create_dir_all(src_ws.join("src")).unwrap();
 
-    // 1. Rust workspace that depends on flate2 with zlib-ng -> libz-ng-sys -> cmake (no root CMakeLists.txt)
+    // 1. Rust workspace that explicitly declares a native build-tool dependency (cmake = "0.1.50")
     fs::write(
         src_ws.join("Cargo.toml"),
         r#"[package]
@@ -1141,6 +1141,7 @@ edition = "2021"
 
 [dependencies]
 flate2 = { version = "1.0", features = ["zlib-ng"] }
+cmake = "0.1.50"
 "#,
     )
     .unwrap();

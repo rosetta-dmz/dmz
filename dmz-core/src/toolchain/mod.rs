@@ -77,11 +77,26 @@ impl ToolchainProvider {
 
         for eco in &ecosystems {
             if !toolchains.iter().any(|tc| tc.ecosystem == *eco) {
-                tracing::warn!(
-                    ecosystem = eco.as_str(),
-                    "Workspace requires {} toolchain, but no standalone host distribution was discovered.",
-                    eco.as_str()
-                );
+                let is_strictly_required = match eco {
+                    ToolchainEcosystem::Ninja => {
+                        ToolchainDetector::has_explicit_ninja_manifest(workspace_root)
+                    }
+                    _ => true,
+                };
+
+                if is_strictly_required {
+                    tracing::warn!(
+                        ecosystem = eco.as_str(),
+                        "Workspace requires {} toolchain, but no standalone host distribution was discovered.",
+                        eco.as_str()
+                    );
+                } else {
+                    tracing::info!(
+                        ecosystem = eco.as_str(),
+                        "Companion {} toolchain was not discovered on host; omitting from bundle.",
+                        eco.as_str()
+                    );
+                }
             }
         }
 
