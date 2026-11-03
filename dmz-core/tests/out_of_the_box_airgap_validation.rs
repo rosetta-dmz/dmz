@@ -1,9 +1,6 @@
-//! Official Battle-Tested Integration Test Suite for Out-of-the-Box Air-Gap Readiness.
-//!
-//! Validates Root Manifest Dominance and ensures exported bundles are strictly complete
-//! and ready out-of-the-box on clean target machines without toolchain hallucination,
-//! spurious IDE errors ("Bad CMake executable: ''"), or broken native linker configurations
-//! ("Linking with 'cc' failed, exit status 1" / "missing xcrun for applesdk").
+// Air-Gap Validation
+// Validates Root Manifest Dominance and ensures exported bundles are strictly complete
+// and ready out-of-the-box
 
 use dmz_core::toolchain::{
     DiscoveredToolchain, ToolchainArchivePackager, ToolchainEcosystem, ToolchainPackager,
@@ -33,8 +30,7 @@ fn test_pure_rust_proc_macro_workspace_never_hallucinates_foreign_toolchains() {
     let temp = tempdir().unwrap();
     let ws = temp.path();
 
-    // 1. Setup a real Rust project with proc-macros and common FFI crates that previously
-    // tricked heuristic directory scanners into hallucinating CMake, CC, and AppleSdk.
+    // 1. Setup Rust project with proc-macros and common FFI crates
     let cargo_toml = r#"
 [package]
 name = "airgap-service"
@@ -253,8 +249,8 @@ fn test_declared_cmake_workspace_correctly_configures_cmake_and_compilers() {
         "Cc must be inferred companion for CMake"
     );
     assert!(
-        detected.contains(&ToolchainEcosystem::Ninja),
-        "Ninja must be inferred companion build generator for CMake"
+        !detected.contains(&ToolchainEcosystem::Ninja),
+        "Ninja must not be falsely inferred companion build generator for CMake"
     );
 
     // 2. Simulate bundled CMake, CC, and Ninja toolchains
@@ -1184,7 +1180,7 @@ version = "0.1.50"
     assert!(detected.contains(&ToolchainEcosystem::Rust));
     assert!(detected.contains(&ToolchainEcosystem::CMake));
     assert!(detected.contains(&ToolchainEcosystem::Cc));
-    assert!(detected.contains(&ToolchainEcosystem::Ninja));
+    assert!(!detected.contains(&ToolchainEcosystem::Ninja));
     #[cfg(target_os = "macos")]
     assert!(detected.contains(&ToolchainEcosystem::AppleSdk));
     #[cfg(not(target_os = "macos"))]

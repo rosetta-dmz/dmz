@@ -23,7 +23,7 @@ build-cli:
 	@echo "==> Compiling statically-linked dmz-cli (Release)..."
 	mkdir -p $(DIST_DIR)
 	$(CARGO) build --release -p dmz-cli
-	cp $(TARGET_DIR)/release/dmz-cli $(DIST_DIR)/dmz
+	cp $(TARGET_DIR)/release/dmz $(DIST_DIR)/dmz
 	@echo "==> Output written to $(DIST_DIR)/dmz"
 
 ## build-gui: Build release binary for the current host architecture (GUI)
@@ -41,7 +41,7 @@ linux-musl:
 	mkdir -p $(DIST_DIR)
 	RUSTFLAGS="$(RUSTFLAGS)" $(CARGO) build --release --target x86_64-unknown-linux-musl -p dmz-cli
 	RUSTFLAGS="$(RUSTFLAGS)" $(CARGO) build --release --target x86_64-unknown-linux-musl -p dmz-gui
-	cp $(TARGET_DIR)/x86_64-unknown-linux-musl/release/dmz-cli $(DIST_DIR)/dmz-linux-x86_64
+	cp $(TARGET_DIR)/x86_64-unknown-linux-musl/release/dmz $(DIST_DIR)/dmz-linux-x86_64
 	cp $(TARGET_DIR)/x86_64-unknown-linux-musl/release/dmz-gui $(DIST_DIR)/dmz-gui-linux-x86_64
 
 ## macos: Build optimized macOS binaries (Apple Silicon / Intel)
@@ -50,7 +50,7 @@ macos:
 	mkdir -p $(DIST_DIR)
 	$(CARGO) build --release -p dmz-cli
 	$(CARGO) build --release -p dmz-gui
-	cp $(TARGET_DIR)/release/dmz-cli $(DIST_DIR)/dmz-macos
+	cp $(TARGET_DIR)/release/dmz $(DIST_DIR)/dmz-macos
 	cp $(TARGET_DIR)/release/dmz-gui $(DIST_DIR)/dmz-gui-macos
 
 ## windows: Build static Windows binaries (.exe)
@@ -60,7 +60,7 @@ windows:
 	mkdir -p $(DIST_DIR)
 	RUSTFLAGS="$(RUSTFLAGS)" $(CARGO) build --release --target x86_64-pc-windows-msvc -p dmz-cli
 	RUSTFLAGS="$(RUSTFLAGS)" $(CARGO) build --release --target x86_64-pc-windows-msvc -p dmz-gui
-	cp $(TARGET_DIR)/x86_64-pc-windows-msvc/release/dmz-cli.exe $(DIST_DIR)/dmz-windows-x86_64.exe
+	cp $(TARGET_DIR)/x86_64-pc-windows-msvc/release/dmz.exe $(DIST_DIR)/dmz-windows-x86_64.exe
 	cp $(TARGET_DIR)/x86_64-pc-windows-msvc/release/dmz-gui.exe $(DIST_DIR)/dmz-gui-windows-x86_64.exe
 
 ## bundle: Package release binaries into tar.zst air-gap archives
