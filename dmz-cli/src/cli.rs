@@ -8,7 +8,7 @@ use std::path::PathBuf;
     name = "dmz",
     author = "DMZ Open Source Contributors",
     version = env!("CARGO_PKG_VERSION"),
-    about = "Universal Daemonless Environment & Packaging Engine",
+    about = "Universal Daemonless Environment & Workspace Package Manager",
     long_about = "DMZ provides zero-dependency, daemonless process isolation, dependency resolution, build targeting, and air-gap distribution."
 )]
 pub struct Cli {

@@ -156,7 +156,7 @@ pub(super) fn show(
             ui.radio_value(
                 &mut state.export_mode,
                 GuiExportMode::Unified,
-                "Complete Package",
+                "Complete Bundle",
             );
             ui.radio_value(
                 &mut state.export_mode,

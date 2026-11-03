@@ -31,7 +31,7 @@ pub struct BundleInfo {
 pub struct GitProvider;
 
 impl GitProvider {
-    /// Clones a repository offline/directly into a target workspace using embedded libgit2
+    /// Clone repository offline/directly into a target workspace using embedded libgit2
     pub fn clone_repository(url: &str, target_path: &Path) -> Result<String, GitError> {
         let repo = Repository::clone(url, target_path)?;
         let head = repo.head()?;
@@ -41,7 +41,7 @@ impl GitProvider {
         Ok(commit_oid.to_string())
     }
 
-    /// Extracts the current commit hash of an existing local workspace repository
+    /// Extract current commit hash of an existing local workspace repository
     pub fn get_current_commit(workspace_path: &Path) -> Result<String, GitError> {
         let repo = Repository::open(workspace_path)?;
         let head = repo.head()?;
@@ -49,8 +49,8 @@ impl GitProvider {
         Ok(commit.id().to_string())
     }
 
-    /// Inspects workspace repository provenance: active commit, active branch, dirty status,
-    /// and full breakdown of uncommitted modified files and untracked files.
+    /// Inspect workspace repository provenance: active commit, active branch, dirty status,
+    /// with full breakdown of uncommitted modified files and untracked files.
     /// Returns Ok(None) if workspace_path is not a git repository.
     pub fn get_provenance(workspace_path: &Path) -> Result<Option<VcsProvenance>, GitError> {
         let repo = match Repository::open(workspace_path) {
@@ -124,19 +124,19 @@ impl GitProvider {
         }))
     }
 
-    /// Returns the list of uncommitted (modified, deleted, or staged) files in the workspace
+    /// Return list of uncommitted (modified, deleted, or staged) files in the workspace
     pub fn get_uncommitted_files(workspace_path: &Path) -> Result<Vec<String>, GitError> {
         let prov = Self::get_provenance(workspace_path)?;
         Ok(prov.map(|p| p.uncommitted_files).unwrap_or_default())
     }
 
-    /// Returns the list of untracked files in the workspace
+    /// Return list of untracked files in the workspace
     pub fn get_untracked_files(workspace_path: &Path) -> Result<Vec<String>, GitError> {
         let prov = Self::get_provenance(workspace_path)?;
         Ok(prov.map(|p| p.untracked_files).unwrap_or_default())
     }
 
-    /// Generates a deterministic Git bundle v2 file containing HEAD (and optionally incremental commits)
+    /// Generate deterministic Git bundle v2 file containing HEAD (and optionally incremental commits)
     pub fn create_bundle(
         workspace_path: &Path,
         output_bundle_path: &Path,
@@ -229,7 +229,7 @@ impl GitProvider {
         })
     }
 
-    /// Computes the list of modified or newly added files in the workspace since a baseline commit or ref
+    /// Compute list of modified or newly added files in the workspace since a baseline commit or ref
     pub fn get_changed_files_since(
         workspace_path: &Path,
         since_commit_or_ref: &str,
@@ -256,7 +256,7 @@ impl GitProvider {
         Ok(changed_files)
     }
 
-    /// Restores a Git bundle into the workspace repository offline
+    /// Restore Git bundle into the workspace repository offline
     pub fn restore_bundle(workspace_path: &Path, bundle_path: &Path) -> Result<(), GitError> {
         if !bundle_path.exists() {
             return Err(GitError::from_str(&format!(
@@ -271,7 +271,7 @@ impl GitProvider {
             Repository::init(workspace_path)?
         };
 
-        // If repo exists or was initialized, copy the bundle into .git/workspace.bundle for record & local fetch
+        // If repo exists or was initialized, copy bundle into .git/workspace.bundle for record & local fetch
         let git_dir = repo.path();
         let target_bundle_path = git_dir.join("workspace.bundle");
         let _ = std::fs::copy(bundle_path, &target_bundle_path);

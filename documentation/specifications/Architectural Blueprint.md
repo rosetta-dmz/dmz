@@ -1,8 +1,8 @@
 # **Architectural Blueprint**
 
-### Statically Compiled Engine (Core)**
+### Statically Compiled Engine (Core)
 
-To achieve the "zero dependency factory" where open-source contributors can download a single binary and immediately compile the platform itself, **Rust** is the optimal choice over Go or Zig. Rust provides zero-cost abstractions, deterministic cross-platform compilation, and deeply granular control over system-level process sandboxing (via `libc` and platform-specific kernel APIs).
+To achieve the "zero dependency factory" where open-source contributors can download a single binary and immediately compile the platform itself, we choose **Rust** over Go or Zig. Rust provides zero-cost abstractions, deterministic cross-platform compilation, and deeply granular control over system-level process sandboxing (via `libc` and platform-specific kernel APIs).
 
 **Compilation Strategy:**
 
@@ -13,7 +13,7 @@ To achieve the "zero dependency factory" where open-source contributors can down
   * *Archive/Compression:* Embed `tar` and `zstd` compression crates natively so the engine can pack and unpack `.nar` closures and OCI images offline.
   * *Host Toolchain Packaging:* Discover and package active compiler toolchains (Rust `cargo`/`rustc` sysroot, Node.js, Python, Go, PHP, Ruby) directly into `.tar.zst` closures (`--with-toolchain`), autonomously unpack to `.dmz/toolchains/`, clear security quarantines (`xattr -cr` on macOS), and generate `.dmz/env.sh` / `.dmz/env.bat` environment activators.
 
-### Daemonless Sandbox Engine (Workspace)**
+### Daemonless Sandbox Engine (Workspace)
 
 Because we are stripping out the Docker daemon, the engine must leverage the native isolation features of the host operating system directly. When a developer clicks "Start Workspace", the single Rust binary acts as the local orchestrator:
 
@@ -23,7 +23,7 @@ Because we are stripping out the Docker daemon, the engine must leverage the nat
 
 ### 
 
-### Agent Sandbox (Supervisor)**
+### Agent Sandbox (Supervisor)
 
 AI agents require continuous execution, network access, and isolated scratchpads. To accommodate this without a global system daemon, the architecture introduces a **Workspace Supervisor**—an isolated, lightweight thread spawned by the main Rust binary when the environment starts.
 

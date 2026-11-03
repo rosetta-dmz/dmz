@@ -169,7 +169,6 @@ fn test_toolchain_packaging_and_import_roundtrip() -> anyhow::Result<()> {
         "Archive SHA256 must be computed"
     );
 
-    // Pure Rust workspace must only package Rust toolchain (no Go, Python, Node, etc.)
     for tc in &manifest.toolchains {
         assert_eq!(
             tc.ecosystem,

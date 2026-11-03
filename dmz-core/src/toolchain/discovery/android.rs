@@ -7,7 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 use tracing::info;
 
-/// Discovers standalone Android NDK distributions (Clang cross-compilers, sysroots, and android.toolchain.cmake).
+/// Discover standalone Android NDK distributions (Clang cross-compilers, sysroots, and android.toolchain.cmake).
 #[derive(Debug, Default, Clone)]
 pub struct AndroidNdkDiscoverer;
 
@@ -19,7 +19,7 @@ impl ToolchainDiscoverer for AndroidNdkDiscoverer {
     fn discover(&self) -> Result<Option<DiscoveredToolchain>, String> {
         let mut candidates: Vec<PathBuf> = Vec::new();
 
-        // 1. Explicit environment variables
+        // Explicit environment variables
         for var in &["ANDROID_NDK_HOME", "ANDROID_NDK_ROOT", "NDK_HOME"] {
             if let Ok(val) = std::env::var(var) {
                 let p = PathBuf::from(val);
@@ -29,7 +29,7 @@ impl ToolchainDiscoverer for AndroidNdkDiscoverer {
             }
         }
 
-        // 2. Discover inside Android SDK roots
+        // Discover inside Android SDK roots
         for var in &["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
             if let Ok(val) = std::env::var(var) {
                 let ndk_root = PathBuf::from(val).join("ndk");
@@ -44,7 +44,7 @@ impl ToolchainDiscoverer for AndroidNdkDiscoverer {
             }
         }
 
-        // 3. Standard user home SDK locations
+        // Standard user home SDK locations
         if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
             let home_path = PathBuf::from(home);
             for sub in &[
@@ -64,7 +64,7 @@ impl ToolchainDiscoverer for AndroidNdkDiscoverer {
             }
         }
 
-        // 4. System standalone directories
+        // System standalone directories
         push_unique_path(&mut candidates, PathBuf::from("/opt/android-ndk"));
         for base in &[
             "/opt/android-sdk/ndk",
@@ -84,7 +84,7 @@ impl ToolchainDiscoverer for AndroidNdkDiscoverer {
             }
         }
 
-        // 5. Fallback via which ndk-build
+        // Fallback via which ndk-build
         if let Ok(p) = which::which("ndk-build") {
             if let Some(parent) = p.parent() {
                 if parent.join("build/cmake/android.toolchain.cmake").exists() {
@@ -130,7 +130,7 @@ impl ToolchainDiscoverer for AndroidNdkDiscoverer {
         let mut bin_files = Vec::new();
         let mut lib_files = Vec::new();
 
-        // 1. Core build script
+        // Core build script
         for name in &["ndk-build", "ndk-build.cmd"] {
             let p = ndk_root.join(name);
             if p.exists() {
@@ -138,7 +138,7 @@ impl ToolchainDiscoverer for AndroidNdkDiscoverer {
             }
         }
 
-        // 2. Prebuilt LLVM toolchains (clang, clang++, llvm-ar, lld)
+        // Prebuilt LLVM toolchains (clang, clang++, llvm-ar, lld)
         let llvm_prebuilt = ndk_root.join("toolchains/llvm/prebuilt");
         if llvm_prebuilt.is_dir() {
             if let Ok(entries) = fs::read_dir(&llvm_prebuilt) {
@@ -192,7 +192,7 @@ impl ToolchainDiscoverer for AndroidNdkDiscoverer {
             }
         }
 
-        // 3. Official CMake toolchain scripts (build/cmake/)
+        // CMake toolchain scripts (build/cmake/)
         let cmake_dir = ndk_root.join("build/cmake");
         if cmake_dir.is_dir() {
             collect_files_recursive(&cmake_dir, &ndk_root, &mut lib_files, "");

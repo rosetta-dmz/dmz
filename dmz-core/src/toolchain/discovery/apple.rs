@@ -19,7 +19,7 @@ impl ToolchainDiscoverer for AppleSdkDiscoverer {
     fn discover(&self) -> Result<Option<DiscoveredToolchain>, String> {
         let mut candidates: Vec<PathBuf> = Vec::new();
 
-        // 1. Explicit DEVELOPER_DIR or SDKROOT environment variables
+        // Explicit DEVELOPER_DIR or SDKROOT environment variables
         for var in &["DEVELOPER_DIR", "SDKROOT"] {
             if let Ok(val) = std::env::var(var) {
                 let p = PathBuf::from(val);
@@ -29,7 +29,7 @@ impl ToolchainDiscoverer for AppleSdkDiscoverer {
             }
         }
 
-        // 2. Query active Xcode Developer path via xcode-select
+        // Query active Xcode Developer path via xcode-select
         #[cfg(target_os = "macos")]
         {
             if let Ok(output) = Command::new("xcode-select").arg("-p").output() {
@@ -53,7 +53,7 @@ impl ToolchainDiscoverer for AppleSdkDiscoverer {
             }
         }
 
-        // 3. Standard Apple system paths
+        // Standard Apple system paths
         push_unique_path(
             &mut candidates,
             PathBuf::from("/Library/Developer/CommandLineTools"),
@@ -112,7 +112,7 @@ impl ToolchainDiscoverer for AppleSdkDiscoverer {
         let mut bin_files = Vec::new();
         let mut lib_files = Vec::new();
 
-        // 1. Locate and bundle relocatable Apple SDK sysroot (headers including zlib.h, .tbd stubs, frameworks)
+        // Locate and bundle relocatable Apple SDK sysroot (headers including zlib.h, .tbd stubs, frameworks)
         if let Some(sdk_path) = locate_apple_sdk_root(&dev_dir) {
             info!(
                 sdk_path = ?sdk_path,
@@ -121,7 +121,7 @@ impl ToolchainDiscoverer for AppleSdkDiscoverer {
             collect_apple_sdk_sysroot(&sdk_path, &mut lib_files);
         }
 
-        // 2. Locate developer binaries
+        // Locate developer binaries
         let search_bin_dirs = vec![
             dev_dir.join("usr/bin"),
             dev_dir.join("Toolchains/XcodeDefault.xctoolchain/usr/bin"),
@@ -158,7 +158,7 @@ impl ToolchainDiscoverer for AppleSdkDiscoverer {
             }
         }
 
-        // 3. Locate companion toolchain dynamic libraries (e.g. libtapi.dylib, libLTO.dylib)
+        // Locate companion toolchain dynamic libraries (e.g. libtapi.dylib, libLTO.dylib)
         let search_lib_dirs = vec![
             dev_dir.join("usr/lib"),
             dev_dir.join("Toolchains/XcodeDefault.xctoolchain/usr/lib"),
@@ -197,7 +197,7 @@ impl ToolchainDiscoverer for AppleSdkDiscoverer {
     }
 }
 
-/// Locates the active macOS SDK sysroot directory (*.sdk).
+/// Locate active macOS SDK sysroot directory (*.sdk).
 fn locate_apple_sdk_root(dev_dir: &Path) -> Option<PathBuf> {
     // 1. Explicit SDKROOT environment variable
     if let Ok(val) = std::env::var("SDKROOT") {
@@ -207,7 +207,7 @@ fn locate_apple_sdk_root(dev_dir: &Path) -> Option<PathBuf> {
         }
     }
 
-    // 2. Query xcrun --show-sdk-path
+    // Query xcrun --show-sdk-path
     #[cfg(target_os = "macos")]
     if let Ok(output) = Command::new("xcrun").arg("--show-sdk-path").output() {
         if output.status.success() {
@@ -219,7 +219,7 @@ fn locate_apple_sdk_root(dev_dir: &Path) -> Option<PathBuf> {
         }
     }
 
-    // 3. Known direct subpaths within dev_dir
+    // Known direct subpaths within dev_dir
     for sub in &[
         "SDKs/MacOSX.sdk",
         "Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
@@ -230,7 +230,7 @@ fn locate_apple_sdk_root(dev_dir: &Path) -> Option<PathBuf> {
         }
     }
 
-    // 4. Search in SDKs parent directories within dev_dir or standard locations
+    // Search in SDKs parent directories within dev_dir or standard locations
     let parent_dirs = [
         dev_dir.join("SDKs"),
         dev_dir.join("Platforms/MacOSX.platform/Developer/SDKs"),
@@ -254,11 +254,11 @@ fn locate_apple_sdk_root(dev_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Recursively collects Apple SDK sysroot library stubs, framework headers, and settings.
+/// Recursively collect Apple SDK sysroot library stubs, framework headers, and settings.
 fn collect_apple_sdk_sysroot(sdk_dir: &Path, lib_files: &mut Vec<(PathBuf, String)>) {
     let target_prefix = "SDKs/MacOSX.sdk";
 
-    // 1. Root SDK descriptor plists
+    // Root SDK descriptor plists
     for fname in &[
         "SDKSettings.plist",
         "SDKSettings.json",
@@ -270,19 +270,19 @@ fn collect_apple_sdk_sysroot(sdk_dir: &Path, lib_files: &mut Vec<(PathBuf, Strin
         }
     }
 
-    // 2. Standard C/C++ headers in usr/include (including zlib.h, stdio.h, stdlib.h)
+    // Standard C/C++ headers in usr/include (including zlib.h, stdio.h, stdlib.h)
     let usr_inc = sdk_dir.join("usr/include");
     if usr_inc.is_dir() {
         super::collect_files_recursive(&usr_inc, sdk_dir, lib_files, target_prefix);
     }
 
-    // 3. Linker dynamic library stubs and runtime objects in usr/lib (including libz.tbd, libSystem.tbd)
+    // Linker dynamic library stubs and runtime objects in usr/lib (including libz.tbd, libSystem.tbd)
     let usr_lib = sdk_dir.join("usr/lib");
     if usr_lib.is_dir() {
         collect_sdk_lib_recursive(&usr_lib, sdk_dir, lib_files, target_prefix);
     }
 
-    // 4. Framework headers and stubs in System/Library/Frameworks
+    // Framework headers and stubs in System/Library/Frameworks
     let frameworks = sdk_dir.join("System/Library/Frameworks");
     if frameworks.is_dir() {
         let mut visited = std::collections::HashSet::new();
