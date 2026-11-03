@@ -359,6 +359,12 @@ pub(super) fn show(
                     PathBuf::from(&state.delta_output_path)
                 };
 
+                let multi_workspace =
+                    dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(
+                        &ws_canon,
+                    )
+                    .map(|(cfg, _)| cfg);
+
                 let config = ExportConfig {
                     workspace_path: ws_canon.clone(),
                     lockfile_path: lockfile,
@@ -370,6 +376,7 @@ pub(super) fn show(
                     with_git_history: true,
                     since: Some(state.since_ref.clone()),
                     with_toolchain: false,
+                    multi_workspace,
                 };
 
                 match AirGapExporter::export(&config) {

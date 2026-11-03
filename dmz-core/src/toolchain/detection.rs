@@ -6,6 +6,19 @@ use std::path::Path;
 pub struct ToolchainDetector;
 
 impl ToolchainDetector {
+    /// Aggregates active toolchains across multiple workspace members (primary + sidecars).
+    pub fn detect_multi_workspace_ecosystems(
+        members: &[crate::workspace::WorkspaceMember],
+        lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
+    ) -> HashSet<ToolchainEcosystem> {
+        let mut ecosystems = HashSet::new();
+        for member in members {
+            let member_ecosystems = Self::detect_workspace_ecosystems(&member.path, lockfile);
+            ecosystems.extend(member_ecosystems);
+        }
+        ecosystems
+    }
+
     /// Detects active workspace ecosystems strictly from declared workspace root manifests.
     pub fn detect_workspace_ecosystems(
         workspace_root: &Path,
@@ -512,6 +525,7 @@ pub(crate) mod tests {
                     sha256: "fake".into(),
                     source_url: None,
                     dependencies: vec![],
+                    member_id: None,
                 },
             );
         }
@@ -519,6 +533,7 @@ pub(crate) mod tests {
             version: 1,
             target_platform: None,
             vcs: None,
+            workspaces: std::collections::BTreeMap::new(),
             closure_signature: "sig".into(),
             packages: map,
         }

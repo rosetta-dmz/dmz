@@ -981,6 +981,7 @@ dependencies = [
  "dmz-core",
  "dmz-sandbox",
  "dmz-supervisor",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1034,6 +1035,7 @@ dependencies = [
  "dmz-core",
  "libc",
  "nix",
+ "tempfile",
  "tokio",
  "tracing",
  "which",
@@ -1050,6 +1052,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]

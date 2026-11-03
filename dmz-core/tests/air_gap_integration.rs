@@ -27,6 +27,7 @@ fn test_air_gap_import_and_verification() {
             sha256: "mockchecksum123456789".to_string(),
             source_url: Some("https://crates.io/api/v1/crates/tokio/1.38.0/download".to_string()),
             dependencies: vec![],
+            member_id: None,
         },
     );
 
@@ -34,6 +35,7 @@ fn test_air_gap_import_and_verification() {
         version: 1,
         target_platform: None,
         vcs: None,
+        workspaces: BTreeMap::new(),
         // Match the expected signature or prefix checked by your lockfile verification logic
         closure_signature: "4c378397e78464329d42b543b944d2824cdd9856abac26c0f26e323587289ab6"
             .to_string(),

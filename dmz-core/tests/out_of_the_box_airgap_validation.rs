@@ -1172,6 +1172,7 @@ version = "0.1.50"
         sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
         source_url: None,
         dependencies: vec![],
+        member_id: None,
     }]);
     lockfile.save(&src_ws.join("dmz.lock")).unwrap();
 
@@ -1260,6 +1261,7 @@ version = "0.1.50"
             delta_base: None,
             has_git_history: false,
             toolchains: tc_entries,
+            workspace_project: None,
             closure_signature: lockfile.closure_signature.clone(),
             package_count: 1,
             created_at_utc: 0,
@@ -1343,6 +1345,7 @@ fn test_export_fails_fast_when_locked_store_artifact_is_missing_and_import_verif
         sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
         source_url: None,
         dependencies: vec![],
+        member_id: None,
     }]);
     lockfile.save(&src_ws.join("dmz.lock")).unwrap();
     fs::create_dir_all(src_ws.join(".dmz/store")).unwrap();
@@ -1402,6 +1405,7 @@ fn test_export_fails_fast_when_locked_store_artifact_is_missing_and_import_verif
                 path_in_archive: "toolchains/rust".into(),
                 binaries: vec!["cargo".into(), "rustc".into()],
             }],
+            workspace_project: None,
             closure_signature: empty_lock.closure_signature.clone(),
             package_count: 0,
             created_at_utc: 0,
@@ -1561,6 +1565,7 @@ mini-util = "0.1.0"
             sha256: crate_sha,
             source_url: None,
             dependencies: vec![],
+            member_id: None,
         },
         LockedPackage {
             name: "js-util".into(),
@@ -1569,6 +1574,7 @@ mini-util = "0.1.0"
             sha256: npm_sha,
             source_url: None,
             dependencies: vec![],
+            member_id: None,
         },
     ]);
     lockfile.save(&src_ws.join("dmz.lock")).unwrap();
@@ -1713,6 +1719,7 @@ mini-util = "0.1.0"
             delta_base: None,
             has_git_history: false,
             toolchains: tc_entries,
+            workspace_project: None,
             closure_signature: lockfile.closure_signature.clone(),
             package_count: 2,
             created_at_utc: 0,

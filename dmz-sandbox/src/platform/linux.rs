@@ -4,6 +4,12 @@ use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitStatus, Stdio};
 
 pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError> {
+    if let Some(ref sock_path) = config.ipc_socket_path {
+        if let Some(parent) = sock_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+
     let mut cmd = Command::new(&config.command);
     cmd.args(&config.args);
     cmd.envs(config.envs.iter().map(|(k, v)| (k, v)));

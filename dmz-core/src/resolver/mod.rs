@@ -100,6 +100,7 @@ impl ResolverEngine {
                             sha256: dummy_hash,
                             source_url: None,
                             dependencies: Vec::new(),
+                            member_id: None,
                         });
                     }
                 }
@@ -130,6 +131,7 @@ impl ResolverEngine {
                         sha256: dummy_hash,
                         source_url: None,
                         dependencies: Vec::new(),
+                        member_id: None,
                     });
                 }
             }

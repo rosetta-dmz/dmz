@@ -182,6 +182,7 @@ pub(super) fn show(
                         args: vec!["-c".to_string(), state.command.clone()],
                         envs: env_vec,
                         allow_network: state.allow_network,
+                        ipc_socket_path: None,
                     };
 
                     match run_sandboxed(&config) {

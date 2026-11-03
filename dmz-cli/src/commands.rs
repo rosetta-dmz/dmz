@@ -13,10 +13,11 @@ pub fn dispatch(command: Commands) {
     match command {
         Commands::Resolve {
             workspace,
+            sidecar,
             output,
             target,
         } => {
-            run_resolve(workspace, output, target);
+            run_resolve(workspace, sidecar, output, target);
         }
 
         Commands::Fetch { lockfile, store } => {
@@ -44,6 +45,7 @@ pub fn dispatch(command: Commands) {
 
         Commands::Sandbox {
             workspace,
+            sidecar,
             closure,
             allow_network,
             diagnose,
@@ -52,6 +54,7 @@ pub fn dispatch(command: Commands) {
         } => {
             run_sandbox(
                 workspace,
+                sidecar,
                 closure,
                 allow_network,
                 diagnose,
@@ -63,6 +66,7 @@ pub fn dispatch(command: Commands) {
         Commands::Bundle {
             target,
             workspace,
+            sidecar,
             lockfile,
             store,
             output,
@@ -77,6 +81,7 @@ pub fn dispatch(command: Commands) {
             run_bundle(BundleArgs {
                 target,
                 workspace,
+                sidecar,
                 lockfile,
                 store,
                 output,
@@ -111,6 +116,7 @@ pub fn dispatch(command: Commands) {
 
         Commands::Shell {
             workspace,
+            sidecar,
             closure,
             allow_network,
             no_sandbox,
@@ -120,6 +126,7 @@ pub fn dispatch(command: Commands) {
         } => {
             run_shell(
                 workspace,
+                sidecar,
                 closure,
                 allow_network,
                 no_sandbox,
@@ -137,6 +144,7 @@ pub fn dispatch(command: Commands) {
             AirgapCommands::Bundle {
                 target,
                 workspace,
+                sidecar,
                 lockfile,
                 store,
                 output,
@@ -151,6 +159,7 @@ pub fn dispatch(command: Commands) {
                 run_bundle(BundleArgs {
                     target,
                     workspace,
+                    sidecar,
                     lockfile,
                     store,
                     output,
@@ -217,27 +226,136 @@ pub fn dispatch(command: Commands) {
     }
 }
 
-pub fn run_resolve(workspace: PathBuf, output: PathBuf, target: Option<String>) {
+pub fn run_resolve(
+    workspace: PathBuf,
+    sidecar: Option<PathBuf>,
+    output: PathBuf,
+    target: Option<String>,
+) {
     info!("Resolving workspace dependencies at {:?}", workspace);
     let effective_output = if output.is_relative() && workspace != Path::new(".") {
         workspace.join(&output)
     } else {
         output
     };
-    match ResolverEngine::resolve_workspace_with_target(&workspace, target) {
-        Ok(lockfile) => {
-            if let Err(e) = lockfile.save(&effective_output) {
-                error!("Failed to save lockfile: {}", e);
+
+    if let Some(ref sc_path) = sidecar {
+        info!(
+            "Dual-repo workspace mode active with sidecar at {:?}",
+            sc_path
+        );
+
+        // Run ABI and dynamic library diagnostic check
+        let abi_report = dmz_core::workspace::analyze_sidecar_abi(sc_path);
+        for warning in &abi_report.warnings {
+            eprintln!("\x1b[33m[DMZ ABI DIAGNOSTIC]\x1b[0m {}", warning);
+        }
+
+        // Socket path limit advisory
+        let sock_path = dmz_core::workspace::safe_socket_path(&workspace, "sidecar");
+        if let Some(posix_warn) = dmz_core::workspace::check_socket_path_length(&sock_path) {
+            eprintln!("\x1b[33m[DMZ POSIX ADVISORY]\x1b[0m {}", posix_warn);
+        }
+
+        let prim_lock =
+            match ResolverEngine::resolve_workspace_with_target(&workspace, target.clone()) {
+                Ok(lock) => lock,
+                Err(e) => {
+                    error!("Primary workspace dependency resolution failed: {}", e);
+                    exit(1);
+                }
+            };
+
+        let sidecar_lock = match ResolverEngine::resolve_workspace_with_target(sc_path, target) {
+            Ok(lock) => lock,
+            Err(e) => {
+                error!("Sidecar workspace dependency resolution failed: {}", e);
                 exit(1);
             }
-            info!(
-                "Successfully written closure lock to {:?}",
-                effective_output
-            );
+        };
+
+        // Merge locked packages with workspace member IDs
+        let mut merged_packages = Vec::new();
+        for (_, mut pkg) in prim_lock.packages {
+            pkg.member_id = Some("primary".to_string());
+            merged_packages.push(pkg);
         }
-        Err(e) => {
-            error!("Dependency resolution failed: {}", e);
+        for (_, mut pkg) in sidecar_lock.packages {
+            pkg.member_id = Some("sidecar".to_string());
+            merged_packages.push(pkg);
+        }
+
+        let mut unified_lock = dmz_core::resolver::lockfile::DmzLockfile::new(merged_packages);
+        unified_lock.add_workspace(dmz_core::resolver::lockfile::WorkspaceMetadata {
+            id: "primary".to_string(),
+            path: workspace.display().to_string(),
+            role: "primary".to_string(),
+            ecosystem: None,
+            closure_signature: None,
+        });
+        unified_lock.add_workspace(dmz_core::resolver::lockfile::WorkspaceMetadata {
+            id: "sidecar".to_string(),
+            path: sc_path.display().to_string(),
+            role: "sidecar".to_string(),
+            ecosystem: None,
+            closure_signature: None,
+        });
+
+        if let Err(e) = unified_lock.save(&effective_output) {
+            error!("Failed to save lockfile: {}", e);
             exit(1);
+        }
+
+        // Auto-generate dmz-workspace.toml if absent
+        let manifest_path = workspace.join("dmz-workspace.toml");
+        if !manifest_path.exists() {
+            let primary_m = dmz_core::workspace::WorkspaceMember::new(
+                "primary",
+                &workspace,
+                dmz_core::workspace::MemberRole::Primary,
+            );
+            let sidecar_m = dmz_core::workspace::WorkspaceMember::new(
+                "sidecar",
+                sc_path,
+                dmz_core::workspace::MemberRole::Sidecar,
+            );
+            let proj_name = workspace
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("project");
+            let project_cfg = dmz_core::workspace::WorkspaceProjectConfig::new(
+                proj_name,
+                vec![primary_m, sidecar_m],
+            );
+            if let Ok(()) = project_cfg.save_to_file(&manifest_path) {
+                info!(
+                    "Auto-generated dual-repo project manifest at {:?}",
+                    manifest_path
+                );
+            }
+        }
+
+        info!(
+            "Successfully written dual-workspace closure lock ({} packages) to {:?}",
+            unified_lock.packages.len(),
+            effective_output
+        );
+    } else {
+        match ResolverEngine::resolve_workspace_with_target(&workspace, target) {
+            Ok(lockfile) => {
+                if let Err(e) = lockfile.save(&effective_output) {
+                    error!("Failed to save lockfile: {}", e);
+                    exit(1);
+                }
+                info!(
+                    "Successfully written closure lock to {:?}",
+                    effective_output
+                );
+            }
+            Err(e) => {
+                error!("Dependency resolution failed: {}", e);
+                exit(1);
+            }
         }
     }
 }
@@ -325,12 +443,37 @@ pub fn run_build(
 
 pub fn run_sandbox(
     workspace: PathBuf,
+    sidecar: Option<PathBuf>,
     closure: PathBuf,
     allow_network: bool,
     diagnose: bool,
     exec_command: String,
     args: Vec<String>,
 ) {
+    if let Some(ref sc) = sidecar {
+        let abi_report = dmz_core::workspace::analyze_sidecar_abi(sc);
+        for warning in &abi_report.warnings {
+            eprintln!("\x1b[33m[DMZ ABI DIAGNOSTIC]\x1b[0m {}", warning);
+        }
+    }
+
+    let ipc_socket_path =
+        dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(&workspace)
+            .map(|(project, _)| {
+                dmz_core::workspace::safe_socket_path(&workspace, &project.ipc.socket_id)
+            })
+            .or_else(|| {
+                sidecar
+                    .as_ref()
+                    .map(|_| dmz_core::workspace::safe_socket_path(&workspace, "sidecar"))
+            });
+
+    if let Some(ref sock) = ipc_socket_path {
+        if let Some(posix_warn) = dmz_core::workspace::check_socket_path_length(sock) {
+            eprintln!("\x1b[33m[DMZ POSIX ADVISORY]\x1b[0m {}", posix_warn);
+        }
+    }
+
     let config = SandboxConfig {
         workspace_path: workspace,
         closure_path: closure,
@@ -338,6 +481,7 @@ pub fn run_sandbox(
         args,
         envs: std::env::vars().collect(),
         allow_network,
+        ipc_socket_path,
     };
 
     match run_sandboxed(&config) {
@@ -373,6 +517,7 @@ pub fn run_sandbox(
 pub struct BundleArgs {
     pub target: Option<String>,
     pub workspace: PathBuf,
+    pub sidecar: Option<PathBuf>,
     pub lockfile: PathBuf,
     pub store: PathBuf,
     pub output: PathBuf,
@@ -389,6 +534,13 @@ pub fn run_bundle(args: BundleArgs) {
         "Starting streamlined air-gap bundling for workspace {:?}",
         args.workspace
     );
+
+    if let Some(ref sc) = args.sidecar {
+        let abi_report = dmz_core::workspace::analyze_sidecar_abi(sc);
+        for warning in &abi_report.warnings {
+            eprintln!("\x1b[33m[DMZ ABI DIAGNOSTIC]\x1b[0m {}", warning);
+        }
+    }
 
     let ws_canon =
         std::fs::canonicalize(&args.workspace).unwrap_or_else(|_| args.workspace.clone());
@@ -477,6 +629,32 @@ pub fn run_bundle(args: BundleArgs) {
         args.output
     };
 
+    let multi_workspace =
+        dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(&ws_canon)
+            .map(|(cfg, _)| cfg)
+            .or_else(|| {
+                args.sidecar.as_ref().map(|sc| {
+                    let primary = dmz_core::workspace::WorkspaceMember::new(
+                        "primary",
+                        &ws_canon,
+                        dmz_core::workspace::MemberRole::Primary,
+                    );
+                    let sidecar_m = dmz_core::workspace::WorkspaceMember::new(
+                        "sidecar",
+                        sc,
+                        dmz_core::workspace::MemberRole::Sidecar,
+                    );
+                    let proj_name = ws_canon
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("project");
+                    dmz_core::workspace::WorkspaceProjectConfig::new(
+                        proj_name,
+                        vec![primary, sidecar_m],
+                    )
+                })
+            });
+
     let config = ExportConfig {
         workspace_path: ws_canon,
         lockfile_path: effective_lockfile,
@@ -488,6 +666,7 @@ pub fn run_bundle(args: BundleArgs) {
         with_git_history: args.with_git_history,
         since: args.since,
         with_toolchain: args.with_toolchain,
+        multi_workspace,
     };
 
     match AirGapExporter::export(&config) {
@@ -563,6 +742,10 @@ pub fn run_export(args: ExportArgs) {
         args.output
     };
 
+    let multi_workspace =
+        dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(&ws_canon)
+            .map(|(cfg, _)| cfg);
+
     let config = ExportConfig {
         workspace_path: ws_canon,
         lockfile_path: effective_lockfile,
@@ -574,6 +757,7 @@ pub fn run_export(args: ExportArgs) {
         with_git_history: args.with_git_history,
         since: args.since,
         with_toolchain: args.with_toolchain,
+        multi_workspace,
     };
 
     match AirGapExporter::export(&config) {
@@ -720,6 +904,7 @@ pub fn run_import(
                             args: cmd.args.clone(),
                             envs: toolchain_envs.into_iter().collect(),
                             allow_network: false,
+                            ipc_socket_path: None,
                         };
                         run_sandboxed(&config).map_err(|e| e.to_string())
                     };
@@ -747,8 +932,10 @@ pub fn run_import(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_shell(
     workspace: PathBuf,
+    sidecar: Option<PathBuf>,
     closure: PathBuf,
     allow_network: bool,
     no_sandbox: bool,
@@ -756,6 +943,13 @@ pub fn run_shell(
     command: Option<String>,
     args: Vec<String>,
 ) {
+    if let Some(ref sc) = sidecar {
+        let abi_report = dmz_core::workspace::analyze_sidecar_abi(sc);
+        for warning in &abi_report.warnings {
+            eprintln!("\x1b[33m[DMZ ABI DIAGNOSTIC]\x1b[0m {}", warning);
+        }
+    }
+
     // Advisory pre-flight check for dmz.lock
     let lockfile_path = workspace.join("dmz.lock");
     let store_path = workspace.join(".dmz").join("store");
@@ -818,6 +1012,24 @@ pub fn run_shell(
         },
     );
 
+    let ipc_socket_path =
+        dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(&workspace)
+            .map(|(project, _)| {
+                dmz_core::workspace::safe_socket_path(&workspace, &project.ipc.socket_id)
+            })
+            .or_else(|| {
+                sidecar
+                    .as_ref()
+                    .map(|_| dmz_core::workspace::safe_socket_path(&workspace, "sidecar"))
+            });
+
+    if let Some(ref sock) = ipc_socket_path {
+        if let Some(posix_warn) = dmz_core::workspace::check_socket_path_length(sock) {
+            eprintln!("\x1b[33m[DMZ POSIX ADVISORY]\x1b[0m {}", posix_warn);
+        }
+        envs.insert("DMZ_SIDECAR_SOCK".to_string(), sock.display().to_string());
+    }
+
     // Visual prompt indicator
     let current_ps1 = std::env::var("PS1").unwrap_or_else(|_| "\\u@\\h:\\w\\$ ".to_string());
     let prompt_prefix = if is_sandbox {
@@ -858,6 +1070,7 @@ pub fn run_shell(
             network_allowed = allow_network,
             "Launching daemonless sandboxed shell"
         );
+
         let config = SandboxConfig {
             workspace_path: workspace,
             closure_path: closure,
@@ -865,6 +1078,7 @@ pub fn run_shell(
             args: final_args,
             envs: env_vec,
             allow_network,
+            ipc_socket_path,
         };
         match run_sandboxed(&config) {
             Ok(status) => {
@@ -979,6 +1193,7 @@ pub fn run_ecosystem(action: EcosystemAction) {
                             args: cmd.args.clone(),
                             envs: toolchain_envs.into_iter().collect(),
                             allow_network: false,
+                            ipc_socket_path: None,
                         };
                         run_sandboxed(&config).map_err(|e| e.to_string())
                     };

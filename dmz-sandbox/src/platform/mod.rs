@@ -8,6 +8,8 @@ use std::process::ExitStatus;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::generate_seatbelt_profile;
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -19,6 +21,30 @@ pub struct SandboxConfig {
     pub args: Vec<String>,
     pub envs: Vec<(String, String)>,
     pub allow_network: bool,
+    pub ipc_socket_path: Option<PathBuf>,
+}
+
+impl SandboxConfig {
+    pub fn new(
+        workspace_path: impl Into<PathBuf>,
+        closure_path: impl Into<PathBuf>,
+        command: impl Into<String>,
+    ) -> Self {
+        Self {
+            workspace_path: workspace_path.into(),
+            closure_path: closure_path.into(),
+            command: command.into(),
+            args: Vec::new(),
+            envs: Vec::new(),
+            allow_network: false,
+            ipc_socket_path: None,
+        }
+    }
+
+    pub fn with_ipc_socket(mut self, socket_path: impl Into<PathBuf>) -> Self {
+        self.ipc_socket_path = Some(socket_path.into());
+        self
+    }
 }
 
 #[derive(Debug)]
@@ -180,6 +206,14 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
         env_map.insert("HTTPS_PROXY".into(), "http://127.0.0.1:0".into());
         env_map.insert("ALL_PROXY".into(), "http://127.0.0.1:0".into());
     }
+
+    if let Some(ref sock_path) = resolved_config.ipc_socket_path {
+        env_map.insert(
+            "DMZ_SIDECAR_SOCK".into(),
+            sock_path.to_string_lossy().to_string(),
+        );
+    }
+
     resolved_config.envs = env_map.into_iter().collect();
 
     #[cfg(target_os = "macos")]

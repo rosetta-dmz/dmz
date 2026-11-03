@@ -14,6 +14,19 @@ pub struct LockedPackage {
     pub sha256: String,
     pub source_url: Option<String>,
     pub dependencies: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceMetadata {
+    pub id: String,
+    pub path: String,
+    pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ecosystem: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closure_signature: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +36,8 @@ pub struct DmzLockfile {
     pub target_platform: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcs: Option<VcsProvenance>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub workspaces: BTreeMap<String, WorkspaceMetadata>,
     pub closure_signature: String,
     pub packages: BTreeMap<String, LockedPackage>,
 }
@@ -68,6 +83,7 @@ impl DmzLockfile {
             version: 1,
             target_platform,
             vcs: None,
+            workspaces: BTreeMap::new(),
             closure_signature,
             packages: package_map,
         }
@@ -76,6 +92,15 @@ impl DmzLockfile {
     pub fn with_vcs(mut self, vcs: Option<VcsProvenance>) -> Self {
         self.vcs = vcs;
         self
+    }
+
+    pub fn with_workspaces(mut self, workspaces: BTreeMap<String, WorkspaceMetadata>) -> Self {
+        self.workspaces = workspaces;
+        self
+    }
+
+    pub fn add_workspace(&mut self, meta: WorkspaceMetadata) {
+        self.workspaces.insert(meta.id.clone(), meta);
     }
 
     /// Computes a deterministic SHA-256 signature across the entire ordered package map
@@ -87,6 +112,9 @@ impl DmzLockfile {
             hasher.update(pkg.name.as_bytes());
             hasher.update(pkg.version.as_bytes());
             hasher.update(pkg.sha256.as_bytes());
+            if let Some(ref mid) = pkg.member_id {
+                hasher.update(mid.as_bytes());
+            }
         }
 
         format!("{:x}", hasher.finalize())
@@ -126,5 +154,63 @@ impl DmzLockfile {
         let mut hasher = Sha256::new();
         hasher.update(data);
         format!("{:x}", hasher.finalize())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_multi_workspace_lockfile_compatibility() {
+        let pkg1 = LockedPackage {
+            name: "express".to_string(),
+            version: "4.19.2".to_string(),
+            ecosystem: Ecosystem::Npm,
+            sha256: "a1b2c3d4".to_string(),
+            source_url: None,
+            dependencies: vec![],
+            member_id: Some("frontend".to_string()),
+        };
+
+        let pkg2 = LockedPackage {
+            name: "tokio".to_string(),
+            version: "1.38.0".to_string(),
+            ecosystem: Ecosystem::Cargo,
+            sha256: "e5f6a7b8".to_string(),
+            source_url: None,
+            dependencies: vec![],
+            member_id: Some("sidecar".to_string()),
+        };
+
+        let mut lockfile = DmzLockfile::new(vec![pkg1, pkg2]);
+        lockfile.add_workspace(WorkspaceMetadata {
+            id: "frontend".to_string(),
+            path: "./apps/web".to_string(),
+            role: "primary".to_string(),
+            ecosystem: Some("npm".to_string()),
+            closure_signature: None,
+        });
+        lockfile.add_workspace(WorkspaceMetadata {
+            id: "sidecar".to_string(),
+            path: "../engine-sidecar".to_string(),
+            role: "sidecar".to_string(),
+            ecosystem: Some("cargo".to_string()),
+            closure_signature: None,
+        });
+
+        assert_eq!(lockfile.workspaces.len(), 2);
+        assert_eq!(lockfile.packages.len(), 2);
+
+        // Test serialization / deserialization roundtrip
+        let serialized = serde_json::to_string_pretty(&lockfile).unwrap();
+        let deserialized: DmzLockfile = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(deserialized.workspaces.len(), 2);
+        assert_eq!(deserialized.packages.len(), 2);
+        assert_eq!(
+            deserialized.closure_signature,
+            DmzLockfile::compute_closure_hash(&deserialized.packages)
+        );
     }
 }

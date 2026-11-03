@@ -1,8 +1,6 @@
-mod cli;
-mod commands;
-
 use clap::Parser;
-use cli::Cli;
+use dmz_cli::cli::Cli;
+use dmz_cli::commands;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 

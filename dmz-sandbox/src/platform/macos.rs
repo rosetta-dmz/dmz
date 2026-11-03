@@ -22,7 +22,7 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     Ok(status)
 }
 
-fn generate_seatbelt_profile(config: &SandboxConfig) -> String {
+pub fn generate_seatbelt_profile(config: &SandboxConfig) -> String {
     let canonical_workspace =
         fs::canonicalize(&config.workspace_path).unwrap_or_else(|_| config.workspace_path.clone());
     let workspace = canonical_workspace.to_string_lossy();
@@ -32,9 +32,9 @@ fn generate_seatbelt_profile(config: &SandboxConfig) -> String {
     let closure = canonical_closure.to_string_lossy();
 
     let network_rule = if config.allow_network {
-        "(allow network*)"
+        "(allow network*)".to_string()
     } else {
-        "(deny network*)"
+        "(deny network*)\n(allow network* (to unix-socket))\n(allow network-bind (to unix-socket))\n(allow network-outbound (to unix-socket))".to_string()
     };
 
     let home = std::env::var("HOME").unwrap_or_else(|_| "/Users".to_string());
@@ -49,6 +49,40 @@ fn generate_seatbelt_profile(config: &SandboxConfig) -> String {
         let p = format!("{}/{}", home, dir);
         if std::path::Path::new(&p).exists() {
             user_toolchain_rules.push_str(&format!("    (subpath \"{}\")\n", p));
+        }
+    }
+
+    let mut ipc_socket_rules = String::new();
+    if let Some(ref sock_path) = config.ipc_socket_path {
+        let raw_str = sock_path.to_string_lossy();
+        ipc_socket_rules.push_str(&format!(
+            "(allow file-read* file-write* (literal \"{}\"))\n",
+            raw_str
+        ));
+
+        let sock_canon = fs::canonicalize(sock_path).unwrap_or_else(|_| sock_path.clone());
+        let sock_str = sock_canon.to_string_lossy();
+        if sock_str != raw_str {
+            ipc_socket_rules.push_str(&format!(
+                "(allow file-read* file-write* (literal \"{}\"))\n",
+                sock_str
+            ));
+        }
+
+        if let Some(parent) = sock_canon.parent() {
+            ipc_socket_rules.push_str(&format!(
+                "(allow file-read* file-write* (subpath \"{}\"))\n",
+                parent.display()
+            ));
+        }
+        if let Some(parent) = sock_path.parent() {
+            let p_str = parent.display().to_string();
+            if !p_str.is_empty() && p_str != "." && p_str != "/tmp" && p_str != "/private/tmp" {
+                ipc_socket_rules.push_str(&format!(
+                    "(allow file-read* file-write* (subpath \"{}\"))\n",
+                    p_str
+                ));
+            }
         }
     }
 
@@ -88,7 +122,41 @@ fn generate_seatbelt_profile(config: &SandboxConfig) -> String {
 
 (allow file-read* file-write* (subpath "{}"))
 (allow file-read* (subpath "{}"))
+{}
 "#,
-        network_rule, user_toolchain_rules, workspace, closure
+        network_rule, user_toolchain_rules, workspace, closure, ipc_socket_rules
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_seatbelt_profile_unix_socket_and_safe_path() {
+        let sock_path = PathBuf::from("/tmp/dmz_abc123_sidecar.sock");
+        let config = SandboxConfig {
+            workspace_path: PathBuf::from("/Users/test/workspace"),
+            closure_path: PathBuf::from("/nix/store"),
+            command: "/bin/sh".to_string(),
+            args: vec![],
+            envs: vec![],
+            allow_network: false,
+            ipc_socket_path: Some(sock_path.clone()),
+        };
+
+        let profile = generate_seatbelt_profile(&config);
+
+        // Strict network denial is enforced
+        assert!(profile.contains("(deny network*)"));
+
+        // Unix domain sockets are explicitly permitted under network denial
+        assert!(profile.contains("(allow network* (to unix-socket))"));
+        assert!(profile.contains("(allow network-bind (to unix-socket))"));
+        assert!(profile.contains("(allow network-outbound (to unix-socket))"));
+
+        // Safe socket literal path is mounted
+        assert!(profile.contains(&format!("(literal \"{}\")", sock_path.display())));
+    }
 }

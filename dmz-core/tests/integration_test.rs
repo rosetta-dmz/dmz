@@ -97,6 +97,7 @@ fn test_end_to_end_dmz_pipeline() {
         args,
         envs: std::env::vars().collect(),
         allow_network: false,
+        ipc_socket_path: None,
     };
 
     match run_sandboxed(&sandbox_config) {
@@ -167,6 +168,7 @@ fn test_package_builder_anchors_relative_paths() {
         packages: std::collections::BTreeMap::new(),
         target_platform: None,
         vcs: None,
+        workspaces: std::collections::BTreeMap::new(),
     };
     mock_lockfile
         .save(&workspace_path.join("dmz.lock"))
