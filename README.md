@@ -2,7 +2,7 @@
 
 > **Daemonless Sandbox & Air-Gapped Workspace Package Manager**
 
-DMZ is a fully open-source, daemonless workspace management and standalone sandbox platform. It provides isolated developer environments, secure proxy-audited AI agent execution, and deterministic air-gapped closure imports with no host system dependencies. No pre-installed Python, Node, Docker, or system Git needed.
+DMZ is a fully open-source, daemonless workspace management and standalone sandbox platform. It provides isolated developer environments, secure proxy-audited AI agent execution, and deterministic air-gapped closure imports with no host system dependencies. No pre-installed runtimes, toolchains, build tools, daemons, or system Git needed (i.e. Python, Node, Docker, Podman, etc.).
 
 Of course, it's still recommended to use a daemon when necessary (Docker, Podman, etc.), however DMZ provides a lightweight solution to ensure interoperability and workspace/codebase reproducibility across Windows/Linux/MacOS regardless of connectivity, programming language, or dependencies used. DMZ focuses on eliminating the need to have a ridiculous amount of tools to manage the most important aspects of software development -- reproducibility, SBOM management, and vulnerability analysis across your stack. DMZ also offers a simple and seamless GUI experience for those who prefer fast and minimal button workflows.
 
@@ -33,7 +33,7 @@ chmod +x dmz-*
 
 ### MacOS GUI Install Note:
 
-Apple designed modern macOS (from Catalina through Sequoia and beyond) to hard-block any application downloaded from the web unless it's notarized by Apple with a Developer ID. After placing the DMZ app in Applications, run the following command:
+Apple designed modern macOS (from Catalina through Sequoia and beyond) to hard-block any application downloaded from the web unless it's notarized by Apple with a Developer ID. After unzipping, place the DMZ app in Applications, then run the following command:
 
 ```bash
 xattr -cr /Applications/DMZ.app
@@ -65,7 +65,7 @@ Export an entire workspace, its dependencies, and the active compiler toolchains
 dmz bundle --with-toolchain --output dist/workspace_closure.tar.zst
 ```
 
-On the air-gapped target machine (even with no pre-installed Rust, Node, or Python), unpack and verify:
+On the air-gapped target machine (regardless of pre-installed Rust, Node, or Python), unpack and verify:
 
 ```bash
 # Unpack workspace, local dependency store, and compiler toolchains

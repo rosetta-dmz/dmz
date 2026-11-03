@@ -7,7 +7,7 @@ use std::process::Command;
 pub struct ToolchainSetup;
 
 impl ToolchainSetup {
-    /// Sets up imported toolchain directory: execution permissions, quarantine clearance, and activator scripts.
+    /// Set up imported toolchain directory: execution permissions, quarantine clearance, and activator scripts.
     pub fn setup_imported_toolchains(workspace_root: &Path) -> Result<(), String> {
         let toolchains_dir = workspace_root.join(".dmz/toolchains");
         let has_toolchains = toolchains_dir.exists()
@@ -19,7 +19,8 @@ impl ToolchainSetup {
             return Ok(());
         }
 
-        // 1. Ensure 0o755 execution permissions on all binary files
+        // Ensure 0o755 execution permissions on all binary files.
+        // TODO: Change to user-consent execution permission
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -50,7 +51,7 @@ impl ToolchainSetup {
             make_exec_recursive(&toolchains_dir);
         }
 
-        // 2. Clear macOS quarantine attribute (xattr -cr)
+        // Clear macOS quarantine attribute (xattr -cr)
         #[cfg(target_os = "macos")]
         {
             let _ = Command::new("xattr")
@@ -59,25 +60,25 @@ impl ToolchainSetup {
                 .output();
         }
 
-        // 3. Generate hermetic Clang wrapper scripts (injecting -isysroot on macOS/Unix)
+        // Generate hermetic Clang wrapper scripts (injecting -isysroot on macOS/Unix)
         Self::generate_clang_wrappers(workspace_root)?;
 
-        // 4. Setup Node.js companion package managers (npm, npx, pnpm, yarn)
+        // Setup Node.js companion package managers (npm, npx, pnpm, yarn)
         Self::setup_node_package_managers(workspace_root)?;
 
-        // 5. Generate .dmz/toolchains/dmz.toolchain.cmake only if CMake is actually used
+        // Generate .dmz/toolchains/dmz.toolchain.cmake only if CMake is actually used
         Self::generate_cmake_toolchain(workspace_root)?;
 
-        // 6. Generate .dmz/env.sh and .dmz/env.bat activator scripts
+        // Generate .dmz/env.sh and .dmz/env.bat activator scripts
         Self::generate_activator_scripts(workspace_root)?;
 
-        // 7. Configure IDE workspace settings (.vscode/settings.json)
+        // Configure IDE workspace settings (.vscode/settings.json)
         Self::generate_ide_settings(workspace_root)?;
 
         Ok(())
     }
 
-    /// Generates hermetic wrapper scripts for Clang/LLVM compiler binaries to ensure
+    /// Generate hermetic wrapper scripts for Clang/LLVM compiler binaries to ensure
     /// the Apple SDK sysroot (-isysroot) is automatically passed on macOS.
     #[cfg(unix)]
     pub fn generate_clang_wrappers(workspace_root: &Path) -> Result<(), String> {
@@ -92,7 +93,7 @@ impl ToolchainSetup {
 # DMZ Hermetic Clang Wrapper
 # Automatically injects bundled Apple SDK sysroot when compiling on macOS
 
-# 1. Resolve self path and directory purely using POSIX shell builtins (zero external utilities)
+# Resolve self path and directory purely using POSIX shell builtins (zero external utilities)
 _SELF="$0"
 case "$_SELF" in
     */*) ;;
@@ -115,7 +116,7 @@ esac
 
 _DIR="$(cd "$_DIR" 2>/dev/null && pwd)"
 
-# 2. Locate real compiler binary
+# Locate real compiler binary
 _REAL="$_DIR/${_NAME}.real"
 if [ ! -f "$_REAL" ]; then
     case "$_NAME" in
@@ -132,7 +133,7 @@ if [ ! -f "$_REAL" ]; then
     esac
 fi
 
-# 3. Locate Apple SDK root
+# Locate Apple SDK root
 _SDK="${SDKROOT}"
 if [ -z "$_SDK" ] || [ ! -d "$_SDK" ]; then
     for _candidate in \
@@ -155,7 +156,7 @@ if [ -z "$_SDK" ] || [ ! -d "$_SDK" ]; then
     done
 fi
 
-# 4. Check if -isysroot or --sysroot is already specified in arguments
+# Check if -isysroot or --sysroot is already specified in arguments
 _HAS_SYSROOT=0
 _HAS_RESOURCE_DIR=0
 for _arg in "$@"; do
@@ -169,7 +170,7 @@ for _arg in "$@"; do
     esac
 done
 
-# 5. Locate Clang builtin resource directory (contains include/stdarg.h, include/stddef.h)
+# Locate Clang builtin resource directory (contains include/stdarg.h, include/stddef.h)
 _RES=""
 if [ -d "$_DIR/../lib/clang/include" ]; then
     _RES="$_DIR/../lib/clang"
@@ -337,7 +338,7 @@ cmake_minimum_required(VERSION 3.10)
 
 set(DMZ_TOOLCHAINS_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
-# 1. Darwin / Apple Platform Sysroot Detection (evaluated prior to compiler probing)
+# Darwin / Apple Platform Sysroot Detection (evaluated prior to compiler probing)
 if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin" OR EXISTS "${DMZ_TOOLCHAINS_DIR}/applesdk" OR DEFINED ENV{SDKROOT})
     set(CMAKE_SYSTEM_NAME "Darwin" CACHE STRING "Target System" FORCE)
 
@@ -362,7 +363,7 @@ if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin" OR EXISTS "${DMZ_TOOLCHAINS_DIR}/app
     endif()
 endif()
 
-# 2. Configure C and C++ Compilers
+# Configure C and C++ Compilers
 if(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/clang")
     set(CMAKE_C_COMPILER "${DMZ_TOOLCHAINS_DIR}/cc/bin/clang" CACHE FILEPATH "C Compiler" FORCE)
     set(CMAKE_CXX_COMPILER "${DMZ_TOOLCHAINS_DIR}/cc/bin/clang++" CACHE FILEPATH "C++ Compiler" FORCE)
@@ -381,7 +382,7 @@ elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/cc.exe")
     set(CMAKE_C_COMPILER "${DMZ_TOOLCHAINS_DIR}/cc/bin/cc.exe" CACHE FILEPATH "C Compiler" FORCE)
 endif()
 
-# 3. Configure Archiver and Ranlib
+# Configure Archiver and Ranlib
 if(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/llvm-ar")
     set(CMAKE_AR "${DMZ_TOOLCHAINS_DIR}/cc/bin/llvm-ar" CACHE FILEPATH "Archiver" FORCE)
 elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/llvm-ar.exe")
@@ -402,7 +403,7 @@ elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/cc/bin/ranlib.exe")
     set(CMAKE_RANLIB "${DMZ_TOOLCHAINS_DIR}/cc/bin/ranlib.exe" CACHE FILEPATH "Ranlib" FORCE)
 endif()
 
-# 4. Configure Build Generator (Ninja if bundled)
+# Configure Build Generator (Ninja if bundled)
 if(EXISTS "${DMZ_TOOLCHAINS_DIR}/ninja/bin/ninja")
     set(CMAKE_MAKE_PROGRAM "${DMZ_TOOLCHAINS_DIR}/ninja/bin/ninja" CACHE FILEPATH "Ninja" FORCE)
 elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/ninja/bin/ninja.exe")
@@ -415,7 +416,7 @@ elseif(EXISTS "${DMZ_TOOLCHAINS_DIR}/make/bin/mingw32-make.exe")
     set(CMAKE_MAKE_PROGRAM "${DMZ_TOOLCHAINS_DIR}/make/bin/mingw32-make.exe" CACHE FILEPATH "Make" FORCE)
 endif()
 
-# 5. Scope CMake search roots strictly to DMZ bundled toolchain assets and Apple SDK sysroot
+# Scope CMake search roots strictly to DMZ bundled toolchain assets and Apple SDK sysroot
 set(CMAKE_FIND_ROOT_PATH "${DMZ_TOOLCHAINS_DIR}" CACHE PATH "Find Root Path" FORCE)
 if(CMAKE_OSX_SYSROOT AND EXISTS "${CMAKE_OSX_SYSROOT}")
     list(APPEND CMAKE_FIND_ROOT_PATH "${CMAKE_OSX_SYSROOT}")
@@ -426,7 +427,7 @@ set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH CACHE STRING "" FORCE)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE BOTH CACHE STRING "" FORCE)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH CACHE STRING "" FORCE)
 
-# 6. Android platform NDK integration (chain official toolchain if present)
+# Android platform NDK integration (chain official toolchain if present)
 if(EXISTS "${DMZ_TOOLCHAINS_DIR}/androidndk/build/cmake/android.toolchain.cmake")
     set(ENV{ANDROID_NDK_HOME} "${DMZ_TOOLCHAINS_DIR}/androidndk")
     include("${DMZ_TOOLCHAINS_DIR}/androidndk/build/cmake/android.toolchain.cmake")
