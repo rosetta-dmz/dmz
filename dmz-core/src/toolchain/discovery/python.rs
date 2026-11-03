@@ -141,16 +141,24 @@ impl ToolchainDiscoverer for PythonDiscoverer {
                 bin_files.push((pip3.clone(), "bin/pip3".into()));
                 bin_files.push((pip3, "bin/pip".into()));
             } else if let Ok(p) = which::which("pip3") {
-                bin_files.push((p.clone(), "bin/pip3".into()));
-                bin_files.push((p, "bin/pip".into()));
+                if !is_non_standalone_path(&p) {
+                    bin_files.push((p.clone(), "bin/pip3".into()));
+                    bin_files.push((p, "bin/pip".into()));
+                } else {
+                    emit_non_relocatable_notice(&p);
+                }
             } else {
                 let pip = parent.join("pip");
                 if pip.exists() {
                     bin_files.push((pip.clone(), "bin/pip".into()));
                     bin_files.push((pip, "bin/pip3".into()));
                 } else if let Ok(p) = which::which("pip") {
-                    bin_files.push((p.clone(), "bin/pip".into()));
-                    bin_files.push((p, "bin/pip3".into()));
+                    if !is_non_standalone_path(&p) {
+                        bin_files.push((p.clone(), "bin/pip".into()));
+                        bin_files.push((p, "bin/pip3".into()));
+                    } else {
+                        emit_non_relocatable_notice(&p);
+                    }
                 }
             }
         }

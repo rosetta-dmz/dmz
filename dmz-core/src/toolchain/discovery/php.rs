@@ -49,7 +49,11 @@ impl ToolchainDiscoverer for PhpDiscoverer {
         if composer_bin.exists() {
             bin_files.push((composer_bin, "bin/composer".into()));
         } else if let Ok(composer) = which::which("composer") {
-            bin_files.push((composer, "bin/composer".into()));
+            if is_non_standalone_path(&composer) {
+                emit_non_relocatable_notice(&composer);
+            } else {
+                bin_files.push((composer, "bin/composer".into()));
+            }
         }
 
         // Configuration files (php.ini, etc/php.ini, etc/php)

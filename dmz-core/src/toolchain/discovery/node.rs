@@ -121,6 +121,10 @@ impl ToolchainDiscoverer for NodeDiscoverer {
                 }
             }
             if let Ok(found) = which::which(mgr) {
+                if is_non_standalone_path(&found) {
+                    emit_non_relocatable_notice(&found);
+                    continue;
+                }
                 let name = found
                     .file_name()
                     .and_then(|n| n.to_str())

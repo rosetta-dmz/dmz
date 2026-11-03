@@ -51,6 +51,10 @@ impl ToolchainDiscoverer for RubyDiscoverer {
             if p.exists() {
                 bin_files.push((p, format!("bin/{}", companion)));
             } else if let Ok(found) = which::which(companion) {
+                if is_non_standalone_path(&found) {
+                    emit_non_relocatable_notice(&found);
+                    continue;
+                }
                 bin_files.push((found, format!("bin/{}", companion)));
             }
         }

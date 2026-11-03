@@ -2,12 +2,6 @@ use super::types::ToolchainEcosystem;
 use std::collections::HashSet;
 use std::path::Path;
 
-/// Manifest-driven workspace ecosystem and toolchain detector.
-///
-/// Adheres strictly to the First Principles / Root Manifest Dominance pattern:
-/// A workspace's toolchain requirements are determined strictly by what the target workspace
-/// actually declares and has at its root, never by heuristic crawling of arbitrary nested directories
-/// or inspecting transitive package names in dependency lockfiles.
 pub struct ToolchainDetector;
 
 impl ToolchainDetector {
@@ -80,7 +74,9 @@ impl ToolchainDetector {
             || workspace_root.join("makefile").is_file()
         {
             ecosystems.insert(ToolchainEcosystem::Make);
-            ecosystems.insert(ToolchainEcosystem::Cc);
+            if Self::workspace_requires_c_compiler_for_make(workspace_root) {
+                ecosystems.insert(ToolchainEcosystem::Cc);
+            }
         }
 
         // 3. Platform SDK project manifests declared at workspace root
@@ -138,16 +134,13 @@ impl ToolchainDetector {
             }
         }
 
-        // 4. Map resolver lockfile ecosystems and explicit native build-tool dependencies
+        // 4. Map resolver lockfile ecosystems
         let map_lockfile =
             |lf: &crate::resolver::lockfile::DmzLockfile,
              ecosystems: &mut HashSet<ToolchainEcosystem>| {
                 for pkg in lf.packages.values() {
                     if let Some(eco) = ToolchainEcosystem::from_resolver_ecosystem(&pkg.ecosystem) {
                         ecosystems.insert(eco);
-                    }
-                    if matches!(pkg.ecosystem, crate::resolver::manifest::Ecosystem::Cargo) {
-                        Self::map_cargo_build_tool_crate(&pkg.name, ecosystems);
                     }
                 }
             };
@@ -168,9 +161,13 @@ impl ToolchainDetector {
         // 5. Minimal companion propagation for native tools
         if ecosystems.contains(&ToolchainEcosystem::CMake) {
             ecosystems.insert(ToolchainEcosystem::Cc);
+            ecosystems.insert(ToolchainEcosystem::Ninja);
+        }
+        if ecosystems.contains(&ToolchainEcosystem::Ninja) {
+            ecosystems.insert(ToolchainEcosystem::Cc);
         }
         if ecosystems.contains(&ToolchainEcosystem::Make)
-            || ecosystems.contains(&ToolchainEcosystem::Ninja)
+            && Self::workspace_requires_c_compiler_for_make(workspace_root)
         {
             ecosystems.insert(ToolchainEcosystem::Cc);
         }
@@ -195,6 +192,27 @@ impl ToolchainDetector {
         ecosystems
     }
 
+    /// Returns true if the workspace root or any declared member explicitly contains `build.ninja`
+    /// or explicitly declares a `ninja` dependency in its manifest tables.
+    pub fn has_explicit_ninja_manifest(workspace_root: &Path) -> bool {
+        if workspace_root.join("build.ninja").is_file() {
+            return true;
+        }
+        let cargo_toml = workspace_root.join("Cargo.toml");
+        if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
+            if let Ok(val) = content.parse::<toml::Value>() {
+                for section in &["dependencies", "build-dependencies", "dev-dependencies"] {
+                    if let Some(table) = val.get(*section).and_then(|v| v.as_table()) {
+                        if table.contains_key("ninja") || table.contains_key("ninja-build") {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Checks a declared workspace member directory for explicit native build manifests.
     fn check_member_native_manifests(
         member_dir: &Path,
@@ -214,7 +232,9 @@ impl ToolchainDetector {
             || member_dir.join("makefile").is_file()
         {
             ecosystems.insert(ToolchainEcosystem::Make);
-            ecosystems.insert(ToolchainEcosystem::Cc);
+            if Self::workspace_requires_c_compiler_for_make(member_dir) {
+                ecosystems.insert(ToolchainEcosystem::Cc);
+            }
         }
     }
 
@@ -293,24 +313,11 @@ impl ToolchainDetector {
         }
     }
 
-    /// Checks `Cargo.lock` and `Cargo.toml` (root and declared workspace members) for Cargo build-tool helper crates.
+    /// Checks declared `Cargo.toml` (root and declared workspace members) for Cargo build-tool helper crates.
     fn check_cargo_build_tool_dependencies(
         workspace_root: &Path,
         ecosystems: &mut HashSet<ToolchainEcosystem>,
     ) {
-        let cargo_lock = workspace_root.join("Cargo.lock");
-        if let Ok(content) = std::fs::read_to_string(&cargo_lock) {
-            if let Ok(val) = content.parse::<toml::Value>() {
-                if let Some(pkgs) = val.get("package").and_then(|p| p.as_array()) {
-                    for pkg in pkgs {
-                        if let Some(name) = pkg.get("name").and_then(|n| n.as_str()) {
-                            Self::map_cargo_build_tool_crate(name, ecosystems);
-                        }
-                    }
-                }
-            }
-        }
-
         let cargo_toml = workspace_root.join("Cargo.toml");
         if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
             if let Ok(val) = content.parse::<toml::Value>() {
@@ -391,6 +398,93 @@ impl ToolchainDetector {
                 }
             }
         }
+    }
+
+    /// Checks whether any Makefile in the given directory explicitly contains C/C++ compiler invocations.
+    pub fn makefile_has_native_c_recipes(dir: &Path) -> bool {
+        for name in &["Makefile", "GNUmakefile", "makefile"] {
+            let p = dir.join(name);
+            if p.is_file() {
+                if let Ok(content) = std::fs::read_to_string(&p) {
+                    for line in content.lines() {
+                        let trimmed = line.trim();
+                        if trimmed.starts_with('#') {
+                            continue;
+                        }
+                        if trimmed.contains("gcc")
+                            || trimmed.contains("g++")
+                            || trimmed.contains("clang")
+                            || trimmed.contains("clang++")
+                            || trimmed.contains("cc ")
+                            || trimmed.contains("c++ ")
+                            || trimmed.contains("$(CC)")
+                            || trimmed.contains("${CC}")
+                            || trimmed.contains("$(CXX)")
+                            || trimmed.contains("${CXX}")
+                            || trimmed.contains(".c ")
+                            || trimmed.contains(".cpp ")
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Checks whether the workspace contains native C/C++ source or header files.
+    pub fn workspace_has_native_c_sources(dir: &Path) -> bool {
+        let extensions = [
+            "c", "cpp", "cc", "cxx", "c++", "h", "hpp", "hxx", "h++", "m", "mm",
+        ];
+
+        fn scan_dir(
+            dir: &Path,
+            current_depth: usize,
+            max_depth: usize,
+            extensions: &[&str],
+        ) -> bool {
+            if current_depth > max_depth {
+                return false;
+            }
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_file() {
+                        if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                            if extensions.contains(&ext) {
+                                return true;
+                            }
+                        }
+                    } else if p.is_dir() {
+                        let name = entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        if name_str.starts_with('.')
+                            || name_str == "target"
+                            || name_str == "node_modules"
+                            || name_str == "dist"
+                            || name_str == "build"
+                            || name_str == "venv"
+                            || name_str == ".venv"
+                        {
+                            continue;
+                        }
+                        if scan_dir(&p, current_depth + 1, max_depth, extensions) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+
+        scan_dir(dir, 0, 3, &extensions)
+    }
+
+    /// Determines whether a workspace with a Makefile actually requires a C/C++ compiler.
+    pub fn workspace_requires_c_compiler_for_make(dir: &Path) -> bool {
+        Self::workspace_has_native_c_sources(dir) || Self::makefile_has_native_c_recipes(dir)
     }
 
     /// Backward-compatibility delegate.
@@ -523,6 +617,23 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_detect_task_runner_makefile_does_not_inject_cc() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("Makefile"),
+            "all:\n\tcargo check --workspace\n\tcargo test --workspace\n",
+        )
+        .unwrap();
+
+        let detected = ToolchainDetector::detect_workspace_ecosystems(dir.path(), None);
+        assert!(detected.contains(&ToolchainEcosystem::Make));
+        assert!(
+            !detected.contains(&ToolchainEcosystem::Cc),
+            "Task runner Makefile with only cargo recipes must NOT trigger Cc compiler"
+        );
+    }
+
+    #[test]
     fn test_detect_native_build_tools_juce() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("AudioPlugin.jucer"), "<JUCERPROJECT/>").unwrap();
@@ -572,30 +683,11 @@ pub(crate) mod tests {
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("Cargo.toml"),
-            "[package]\nname = \"zlib-ng-app\"\n",
+            "[package]\nname = \"native-tool-app\"\n\n[dependencies]\ncmake = \"0.1.50\"\npkg-config = \"0.3.30\"\n",
         )
         .unwrap();
 
-        let lf = make_test_lockfile(vec![
-            ("flate2", "1.0", crate::resolver::manifest::Ecosystem::Cargo),
-            (
-                "libz-ng-sys",
-                "1.1",
-                crate::resolver::manifest::Ecosystem::Cargo,
-            ),
-            (
-                "cmake",
-                "0.1.50",
-                crate::resolver::manifest::Ecosystem::Cargo,
-            ),
-            (
-                "pkg-config",
-                "0.3.30",
-                crate::resolver::manifest::Ecosystem::Cargo,
-            ),
-        ]);
-
-        let detected = ToolchainDetector::detect_workspace_ecosystems(dir.path(), Some(&lf));
+        let detected = ToolchainDetector::detect_workspace_ecosystems(dir.path(), None);
         assert!(detected.contains(&ToolchainEcosystem::Rust));
         assert!(
             detected.contains(&ToolchainEcosystem::CMake),

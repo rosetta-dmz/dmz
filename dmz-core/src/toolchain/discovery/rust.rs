@@ -137,6 +137,10 @@ impl ToolchainDiscoverer for RustDiscoverer {
             if bin_path.exists() {
                 bin_files.push((bin_path, format!("bin/{}", bin_name)));
             } else if let Ok(found) = which::which(bin_name) {
+                if is_non_standalone_path(&found) {
+                    emit_non_relocatable_notice(&found);
+                    continue;
+                }
                 bin_files.push((found, format!("bin/{}", bin_name)));
             }
         }
