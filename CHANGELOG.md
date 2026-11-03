@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.8](https://github.com/rosetta-dmz/dmz/releases/tag/dmz-gui-v1.2.8) - 2026-11-03
+
+### Other
+
+- Comments & MD updates
+- Toolchain fixes for each ecosystem
+- release v1.2.8
+
+## [1.2.8](https://github.com/rosetta-dmz/dmz/releases/tag/v1.2.8) - 2026-11-03
+
+### Added
+
+- default toolchain packaging and no-toolchain flag added
+
+### Other
+
+- Comments & MD updates
+- release v1.2.8
+
+## [1.2.8](https://github.com/rosetta-dmz/dmz/releases/tag/dmz-supervisor-v1.2.8) - 2026-11-03
+
+### Other
+
+- Comments & MD updates
+- release v1.2.8
+
+## [1.2.8](https://github.com/rosetta-dmz/dmz/releases/tag/dmz-sandbox-v1.2.8) - 2026-11-03
+
+### Other
+
+- Comments & MD updates
+- release v1.2.8
+
+## [1.2.8](https://github.com/rosetta-dmz/dmz/releases/tag/dmz-core-v1.2.8) - 2026-11-03
+
+### Added
+
+- enhance toolchain discovery for companion libraries and internal drivers across ecosystems
+- bundle Apple SDK sysroot for hermetic C compilation on macOS
+
+### Other
+
+- Comments & MD updates
+- Merge branch 'main' into more-toolchain-fixes - resolve binary and toolchain detection conflicts
+- Toolchain fixes
+- Ecosystem toolchain fix
+- Merge branch 'main' into toolchain-discovery-enhancements
+- minor-toolchain-fixes
+- dynamic-lib-update
+- toolchain-link-fix
+- Merge branch 'main' into multi-ecosystem-toolchain-fixes
+- Toolchain fixes for each ecosystem
+- macos-toolchain-fix-update
+- release v1.2.8
+
 ### Refactoring & Architecture
 - **refactor(cli)**: Modularize CLI architecture following SOLID design principles by extracting `command.rs` into 12 dedicated single-responsibility subcommands under `dmz-cli/src/commands/`.
 - **refactor(core)**: Streamline workspace toolchain detection, enforcing strict root manifest dominance.
