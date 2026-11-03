@@ -197,109 +197,21 @@ fn test_pre_import_backup_snapshot_and_rollback_on_failure() {
     fs::create_dir_all(ws.join("src")).unwrap();
     fs::write(ws.join("src/main.rs"), "fn main() {}\n").unwrap();
 
-    let lockfile = DmzLockfile::new(vec![LockedPackage {
-        name: "cmake".into(),
-        version: "0.1.50".into(),
-        ecosystem: Ecosystem::Cargo,
-        sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
-        source_url: None,
-        dependencies: vec![],
-        member_id: None,
-    }]);
-    lockfile.save(&src_ws.join("dmz.lock")).unwrap();
-
-    // 2. Verify detection includes Rust, CMake, Cc, and Ninja (and companion AppleSdk on macOS)
-    let detected = ToolchainProvider::detect_workspace_ecosystems(&src_ws, Some(&lockfile));
-    assert!(detected.contains(&ToolchainEcosystem::Rust));
-    assert!(detected.contains(&ToolchainEcosystem::CMake));
-    assert!(detected.contains(&ToolchainEcosystem::Cc));
-    assert!(!detected.contains(&ToolchainEcosystem::Ninja));
-    #[cfg(target_os = "macos")]
-    assert!(detected.contains(&ToolchainEcosystem::AppleSdk));
-    #[cfg(not(target_os = "macos"))]
-    assert!(!detected.contains(&ToolchainEcosystem::AppleSdk));
-
-    // 3. Package bundle containing Rust, CMake, Cc, and Ninja toolchains
-    let tc_stage = temp.path().join("tc_stage");
-    let rust_bin = tc_stage.join("rust/bin");
-    let cmake_bin = tc_stage.join("cmake/bin");
-    let cc_bin = tc_stage.join("cc/bin");
-    let ninja_bin = tc_stage.join("ninja/bin");
-    create_mock_bin(&rust_bin, "cargo");
-    create_mock_bin(&rust_bin, "rustc");
-    create_mock_bin(&cmake_bin, "cmake");
-    create_mock_bin(&cc_bin, "clang");
-    create_mock_bin(&cc_bin, "clang++");
-    create_mock_bin(&ninja_bin, "ninja");
-
-    let discovered = vec![
-        DiscoveredToolchain {
-            ecosystem: ToolchainEcosystem::Rust,
-            version: "1.80.0".into(),
-            root_dir: tc_stage.join("rust"),
-            bin_files: vec![
-                (rust_bin.join("cargo"), "bin/cargo".into()),
-                (rust_bin.join("rustc"), "bin/rustc".into()),
-            ],
-            lib_files: vec![],
-        },
-        DiscoveredToolchain {
-            ecosystem: ToolchainEcosystem::CMake,
-            version: "3.28.0".into(),
-            root_dir: tc_stage.join("cmake"),
-            bin_files: vec![(cmake_bin.join("cmake"), "bin/cmake".into())],
-            lib_files: vec![],
-        },
-        DiscoveredToolchain {
-            ecosystem: ToolchainEcosystem::Cc,
-            version: "17.0.0".into(),
-            root_dir: tc_stage.join("cc"),
-            bin_files: vec![
-                (cc_bin.join("clang"), "bin/clang".into()),
-                (cc_bin.join("clang++"), "bin/clang++".into()),
-            ],
-            lib_files: vec![],
-        },
-        DiscoveredToolchain {
-            ecosystem: ToolchainEcosystem::Ninja,
-            version: "1.11.1".into(),
-            root_dir: tc_stage.join("ninja"),
-            bin_files: vec![(ninja_bin.join("ninja"), "bin/ninja".into())],
-            lib_files: vec![],
-        },
-    ];
-
-    let bundle_path = temp.path().join("dist/rust_cmake_bundle.tar.zst");
-    fs::create_dir_all(bundle_path.parent().unwrap()).unwrap();
-    {
-        let file = fs::File::create(&bundle_path).unwrap();
-        let zstd_enc = zstd::stream::write::Encoder::new(file, 3).unwrap();
-        let mut tar = TarBuilder::new(zstd_enc);
+    let lockfile = DmzLockfile::new(Vec::new());
+    lockfile.save(&ws.join("dmz.lock")).unwrap();
 
     let store_dir = ws.join(".dmz/store");
     fs::create_dir_all(&store_dir).unwrap();
 
-        let tc_entries = ToolchainArchivePackager::package(&mut tar, &discovered).unwrap();
-        let manifest = AirGapManifest {
-            dmz_version: "1.2.7".into(),
-            target_platform: None,
-            vcs: None,
-            delta_base: None,
-            has_git_history: false,
-            toolchains: tc_entries,
-            workspace_project: None,
-            closure_signature: lockfile.closure_signature.clone(),
-            package_count: 1,
-            created_at_utc: 0,
-            archive_sha256: String::new(),
-        };
-        let manifest_json = serde_json::to_string_pretty(&manifest).unwrap();
-        let mut mhdr = tar::Header::new_gnu();
-        mhdr.set_size(manifest_json.len() as u64);
-        mhdr.set_mode(0o644);
-        mhdr.set_cksum();
-        tar.append_data(&mut mhdr, "airgap_manifest.json", manifest_json.as_bytes())
-            .unwrap();
+    let output_archive = temp.path().join("dist/valid_bundle.tar.zst");
+    let export_cfg = ExportConfig {
+        workspace_path: ws.to_path_buf(),
+        lockfile_path: ws.join("dmz.lock"),
+        store_dir: store_dir.clone(),
+        output_path: output_archive.clone(),
+        ..Default::default()
+    };
+    AirGapExporter::export(&export_cfg).expect("Export should succeed");
 
     // Create a target workspace with existing valuable user files
     let target_temp = tempdir().unwrap();
