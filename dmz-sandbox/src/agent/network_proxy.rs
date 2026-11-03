@@ -9,7 +9,7 @@ pub struct DomainWhitelist {
 }
 
 impl DomainWhitelist {
-    /// Create a network rule engine from a list of domain strings
+    /// Create network rule engine from a list of domain strings
     pub fn new(rules: Vec<String>) -> Self {
         let mut allowed_domains = HashSet::new();
         let mut allowed_wildcards = Vec::new();
@@ -33,7 +33,7 @@ impl DomainWhitelist {
         }
     }
 
-    /// Evaluates whether an outbound host connection is permitted for the AI agent
+    /// Evaluate whether an outbound host connection is permitted for the AI agent
     pub fn is_allowed(&self, host: &str) -> bool {
         if self.allow_all {
             return true;

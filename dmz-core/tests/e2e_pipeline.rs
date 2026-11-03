@@ -3,7 +3,7 @@ use dmz_core::archive::importer::{AirGapImporter, ImportConfig};
 use std::fs;
 use std::path::PathBuf;
 
-/// Helper to set up a temporary workspace fixture with the raw hex hash (without prefix)
+/// Helper to set up a temporary workspace fixture with the raw hex hash (no prefix)
 fn setup_mock_workspace() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let workspace_path = tmp_dir.path().join("workspace");
@@ -28,7 +28,7 @@ fn setup_mock_workspace() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     fs::write(workspace_path.join("Cargo.toml"), manifest_content).unwrap();
     fs::write(workspace_path.join("src/lib.rs"), "// dummy library source").unwrap();
 
-    // Create a valid JSON lockfile with raw hex hash (validator prepends sha256:)
+    // Create JSON lockfile with raw hex hash (validator prepends sha256:)
     let lockfile_content = r#"{
         "closure_signature": "9ab6c6dbe61cc71e9274a3981cad4468c314a86f8693c7724c23c24c84113c99",
         "version": 1,
@@ -45,7 +45,7 @@ fn setup_mock_workspace() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     let lockfile_path = workspace_path.join("dmz.lock");
     fs::write(&lockfile_path, lockfile_content).unwrap();
 
-    // Create a dummy cached artifact in the store matching the package key "serde"
+    // Create dummy cached artifact in the store matching the package key "serde"
     let serde_store_dir = store_path.join("serde");
     fs::create_dir_all(&serde_store_dir).unwrap();
     fs::write(

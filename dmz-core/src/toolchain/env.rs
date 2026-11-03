@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-/// Injects bundled toolchain binaries and environment variables into runtime execution environments.
+/// Inject bundled toolchain binaries and environment variables into runtime execution environments.
 pub struct ToolchainEnv;
 
 impl ToolchainEnv {
-    /// Injects bundled toolchains into an environment variable map (for sandbox/shell executions).
+    /// Inject bundled toolchains into an environment variable map (for sandbox/shell executions).
     pub fn inject_toolchain_paths(workspace_root: &Path, env_map: &mut HashMap<String, String>) {
         let toolchains_dir = workspace_root.join(".dmz/toolchains");
         if !toolchains_dir.exists() {
@@ -342,7 +342,7 @@ impl ToolchainEnv {
         }
     }
 
-    /// Locates an executable binary within a toolchain directory, checking both extensionless (Unix)
+    /// Locate an executable binary within a toolchain directory, checking both extensionless (Unix)
     /// and `.exe` (Windows) paths.
     pub fn find_binary(dir: &Path, rel_path: &str) -> Option<std::path::PathBuf> {
         let p = dir.join(rel_path);
@@ -356,9 +356,8 @@ impl ToolchainEnv {
         None
     }
 
-    /// Checks whether the directory is a genuine, authentic Apple Xcode, Command Line Tools root, or SDK distribution.
-    ///
-    /// Per Apple toolchain specifications (`man 1 xcrun`), DEVELOPER_DIR must point to a directory
+    /// Check whether the directory is a genuine, authentic Apple Xcode, Command Line Tools root, or SDK distribution.
+    /// Apple toolchain specifications: (`man 1 xcrun`), DEVELOPER_DIR must point to a directory
     /// containing developer tools (such as `usr/bin/xcrun` or `bin/xcrun`) and platform SDKs (`SDKs` or `Platforms`).
     pub fn is_genuine_apple_developer_dir(apple_dir: &Path) -> bool {
         let has_xcrun =
@@ -370,7 +369,7 @@ impl ToolchainEnv {
         (has_xcrun || has_sdk_structure) && Self::find_apple_sdk_root(apple_dir).is_some()
     }
 
-    /// Searches for an authentic Apple SDK directory (*.sdk) within candidate subpaths.
+    /// Search for Apple SDK directory (*.sdk) within candidate subpaths.
     pub fn find_apple_sdk_root(apple_dir: &Path) -> Option<std::path::PathBuf> {
         if apple_dir.is_dir() && apple_dir.extension().is_some_and(|ext| ext == "sdk") {
             return Some(apple_dir.to_path_buf());

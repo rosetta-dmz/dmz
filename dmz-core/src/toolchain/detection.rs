@@ -6,7 +6,7 @@ use std::path::Path;
 pub struct ToolchainDetector;
 
 impl ToolchainDetector {
-    /// Detects active workspace ecosystems strictly from declared workspace root manifests.
+    /// Detect active workspace ecosystems strictly from declared workspace root manifests.
     pub fn detect_workspace_ecosystems(
         workspace_root: &Path,
         lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
@@ -17,7 +17,7 @@ impl ToolchainDetector {
             return ecosystems;
         }
 
-        // 1. Primary language ecosystems declared at workspace root
+        // Primary language ecosystems declared at workspace root
         if workspace_root.join("Cargo.toml").is_file()
             || workspace_root.join("Cargo.lock").is_file()
         {
@@ -60,7 +60,7 @@ impl ToolchainDetector {
             ecosystems.insert(ToolchainEcosystem::Python);
         }
 
-        // 2. Native project manifests declared at workspace root
+        // Native project manifests declared at workspace root
         if workspace_root.join("CMakeLists.txt").is_file() {
             ecosystems.insert(ToolchainEcosystem::CMake);
             ecosystems.insert(ToolchainEcosystem::Cc);
@@ -79,7 +79,7 @@ impl ToolchainDetector {
             }
         }
 
-        // 3. Platform SDK project manifests declared at workspace root
+        // Platform SDK project manifests declared at workspace root
         if workspace_root.join("Package.swift").is_file()
             || workspace_root.join("Podfile").is_file()
             || workspace_root.join("Cartfile").is_file()
@@ -134,7 +134,7 @@ impl ToolchainDetector {
             }
         }
 
-        // 4. Map resolver lockfile ecosystems
+        // Map resolver lockfile ecosystems
         let map_lockfile =
             |lf: &crate::resolver::lockfile::DmzLockfile,
              ecosystems: &mut HashSet<ToolchainEcosystem>| {
@@ -158,7 +158,7 @@ impl ToolchainDetector {
             }
         }
 
-        // 5. Minimal companion propagation for native tools
+        // Minimal companion propagation for native tools
         if ecosystems.contains(&ToolchainEcosystem::CMake) {
             ecosystems.insert(ToolchainEcosystem::Cc);
         }
@@ -212,7 +212,7 @@ impl ToolchainDetector {
         false
     }
 
-    /// Checks a declared workspace member directory for explicit native build manifests.
+    /// Check declared workspace member directory for explicit native build manifests.
     fn check_member_native_manifests(
         member_dir: &Path,
         ecosystems: &mut HashSet<ToolchainEcosystem>,
@@ -236,7 +236,7 @@ impl ToolchainDetector {
         }
     }
 
-    /// Expands a workspace member pattern (supporting literal paths and `dir/*` globs) into directories.
+    /// Expand workspace member pattern (supporting literal paths and `dir/*` globs) into directories.
     fn expand_workspace_member_dirs(
         workspace_root: &Path,
         pattern: &str,
@@ -264,7 +264,7 @@ impl ToolchainDetector {
         }
     }
 
-    /// Maps Cargo build-script helper crates that execute external native build tools at compile time.
+    /// Map Cargo build-script helper crates that execute external native build tools at compile time.
     fn map_cargo_build_tool_crate(crate_name: &str, ecosystems: &mut HashSet<ToolchainEcosystem>) {
         match crate_name {
             "cmake" => {
@@ -282,7 +282,7 @@ impl ToolchainDetector {
         }
     }
 
-    /// Inspects a parsed `Cargo.toml` value for build-tool helper crates in dependency tables.
+    /// Inspect parsed `Cargo.toml` value for build-tool helper crates in dependency tables.
     fn check_cargo_toml_build_tool_deps(
         val: &toml::Value,
         ecosystems: &mut HashSet<ToolchainEcosystem>,
@@ -305,7 +305,7 @@ impl ToolchainDetector {
         }
     }
 
-    /// Checks declared `Cargo.toml` (root and declared workspace members) for Cargo build-tool helper crates.
+    /// Check declared `Cargo.toml` (root and declared workspace members) for Cargo build-tool helper crates.
     fn check_cargo_build_tool_dependencies(
         workspace_root: &Path,
         ecosystems: &mut HashSet<ToolchainEcosystem>,
@@ -338,7 +338,7 @@ impl ToolchainDetector {
         }
     }
 
-    /// Checks declared Cargo workspace members for explicit native build manifests.
+    /// Check declared Cargo workspace members for explicit native build manifests.
     fn check_cargo_workspace_members(
         workspace_root: &Path,
         ecosystems: &mut HashSet<ToolchainEcosystem>,
@@ -363,7 +363,7 @@ impl ToolchainDetector {
         }
     }
 
-    /// Checks declared Node/pnpm/yarn workspace packages for explicit native build manifests.
+    /// Check declared Node/pnpm/yarn workspace packages for explicit native build manifests.
     fn check_node_workspace_members(
         workspace_root: &Path,
         ecosystems: &mut HashSet<ToolchainEcosystem>,
@@ -392,7 +392,7 @@ impl ToolchainDetector {
         }
     }
 
-    /// Checks whether any Makefile in the given directory explicitly contains C/C++ compiler invocations.
+    /// Check whether any Makefile in the given directory explicitly contains C/C++ compiler invocations.
     pub fn makefile_has_native_c_recipes(dir: &Path) -> bool {
         for name in &["Makefile", "GNUmakefile", "makefile"] {
             let p = dir.join(name);
@@ -425,7 +425,7 @@ impl ToolchainDetector {
         false
     }
 
-    /// Checks whether the workspace contains native C/C++ source or header files.
+    /// Check whether the workspace contains native C/C++ source or header files.
     pub fn workspace_has_native_c_sources(dir: &Path) -> bool {
         let extensions = [
             "c", "cpp", "cc", "cxx", "c++", "h", "hpp", "hxx", "h++", "m", "mm",
@@ -474,7 +474,7 @@ impl ToolchainDetector {
         scan_dir(dir, 0, 3, &extensions)
     }
 
-    /// Determines whether a workspace with a Makefile actually requires a C/C++ compiler.
+    /// Determine whether a workspace with a Makefile actually requires a C/C++ compiler.
     pub fn workspace_requires_c_compiler_for_make(dir: &Path) -> bool {
         Self::workspace_has_native_c_sources(dir) || Self::makefile_has_native_c_recipes(dir)
     }

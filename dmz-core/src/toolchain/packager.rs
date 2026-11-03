@@ -8,7 +8,7 @@ use tracing::info;
 pub struct ToolchainArchivePackager;
 
 impl ToolchainArchivePackager {
-    /// Packages all provided discovered toolchains into the target tar archive under `toolchains/<ecosystem>/`.
+    /// Package all provided discovered toolchains into the target tar archive under `toolchains/<ecosystem>/`.
     pub fn package<W: std::io::Write>(
         tar_builder: &mut TarBuilder<W>,
         toolchains: &[DiscoveredToolchain],

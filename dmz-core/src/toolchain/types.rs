@@ -24,7 +24,7 @@ pub enum ToolchainEcosystem {
 }
 
 impl ToolchainEcosystem {
-    /// Returns the canonical string representation of the ecosystem.
+    /// Return canonical string representation of the ecosystem.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Rust => "rust",
@@ -44,7 +44,7 @@ impl ToolchainEcosystem {
         }
     }
 
-    /// Returns a slice of all supported ecosystems.
+    /// Return slice of all supported ecosystems.
     pub fn all() -> &'static [ToolchainEcosystem] {
         &[
             Self::Rust,
@@ -64,7 +64,7 @@ impl ToolchainEcosystem {
         ]
     }
 
-    /// Returns true if this ecosystem represents a primary language compiler/runtime.
+    /// Return true if this ecosystem represents a primary language compiler/runtime.
     pub fn is_primary_runtime(&self) -> bool {
         matches!(
             self,
@@ -72,7 +72,7 @@ impl ToolchainEcosystem {
         )
     }
 
-    /// Returns true if this ecosystem represents an auxiliary native build tool or framework.
+    /// Return true if this ecosystem represents an auxiliary native build tool or framework.
     pub fn is_auxiliary_build_tool(&self) -> bool {
         matches!(
             self,
@@ -87,7 +87,7 @@ impl ToolchainEcosystem {
         )
     }
 
-    /// Parses an ecosystem identifier or stack name into a ToolchainEcosystem.
+    /// Parse an ecosystem identifier or stack name into a ToolchainEcosystem.
     pub fn from_str_name(name: &str) -> Option<Self> {
         match name.to_ascii_lowercase().as_str() {
             "rust" | "cargo" => Some(Self::Rust),
@@ -110,7 +110,7 @@ impl ToolchainEcosystem {
         }
     }
 
-    /// Maps a package dependency resolver ecosystem to its corresponding compiler/runtime toolchain ecosystem.
+    /// Map package dependency resolver ecosystem to its corresponding compiler/runtime toolchain ecosystem.
     pub fn from_resolver_ecosystem(eco: &crate::resolver::manifest::Ecosystem) -> Option<Self> {
         match eco {
             crate::resolver::manifest::Ecosystem::Cargo => Some(Self::Rust),
@@ -133,7 +133,7 @@ pub struct ToolchainManifestEntry {
     pub binaries: Vec<String>,
 }
 
-/// A discovered host toolchain with resolved binaries, runtime libraries, and metadata.
+/// Discovered host toolchain with resolved binaries, runtime libraries, and metadata.
 #[derive(Debug, Clone)]
 pub struct DiscoveredToolchain {
     pub ecosystem: ToolchainEcosystem,

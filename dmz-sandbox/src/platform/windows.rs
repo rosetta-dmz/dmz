@@ -25,7 +25,7 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     let canonical_workspace =
         fs::canonicalize(&config.workspace_path).unwrap_or_else(|_| config.workspace_path.clone());
 
-    // 1. Create a Win32 Job Object for process containment
+    // Create Win32 Job Object for process containment
     let job = unsafe {
         let h = CreateJobObjectW(std::ptr::null(), std::ptr::null());
         if h == 0 {
@@ -36,7 +36,7 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
         JobHandle(h)
     };
 
-    // 2. Configure Job Object to automatically kill all child processes when the handle is closed
+    // Configure Job Object to automatically kill all child processes when the handle is closed
     unsafe {
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
         info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -65,7 +65,7 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
         PlatformError::WindowsError(format!("Failed to spawn Windows process: {}", err))
     })?;
 
-    // 3. Assign spawned process to Job Object
+    // Assign spawned process to Job Object
     unsafe {
         let process_handle = child.as_raw_handle() as HANDLE;
         if AssignProcessToJobObject(job.0, process_handle) == 0 {

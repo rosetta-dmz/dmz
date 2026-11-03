@@ -59,19 +59,19 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
 
     // Universal Ecosystem Cache Redirection:
     // Force all build caches (Cargo, npm, pip, go, etc.) into an isolated scratch directory
-    // inside the workspace (.dmz/cache), which is automatically writable under workspace permissions.
+    // inside the workspace (.dmz/cache) - (automatically writable under workspace permissions).
     let sandbox_cache_dir = resolved_config.workspace_path.join(".dmz").join("cache");
     let _ = std::fs::create_dir_all(&sandbox_cache_dir);
 
     let mut env_map: HashMap<String, String> = resolved_config.envs.into_iter().collect();
 
-    // 1. Delegate bundled toolchain environment configuration to single source of truth in dmz-core
+    // Delegate bundled toolchain environment configuration to single source of truth in dmz-core
     dmz_core::toolchain::ToolchainEnv::inject_toolchain_paths(
         &resolved_config.workspace_path,
         &mut env_map,
     );
 
-    // 2. Augment PATH with host fallback and user toolchain directories
+    // Augment PATH with host fallback and user toolchain directories
     let separator = if cfg!(windows) { ";" } else { ":" };
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))

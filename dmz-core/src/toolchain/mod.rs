@@ -25,25 +25,25 @@ use tar::Builder as TarBuilder;
 pub struct ToolchainProvider;
 
 impl ToolchainProvider {
-    /// Detects whether a path is non-standalone / non-relocatable (e.g. managed by system package managers
+    /// Detect whether a path is non-standalone / non-relocatable (e.g. managed by system package managers
     /// that dynamically link against machine-specific cellar/system libraries).
     #[inline]
     pub fn is_non_standalone_path(path: &Path) -> bool {
         discovery::is_non_standalone_path(path)
     }
 
-    /// Emits standard agnostic guidance when a non-relocatable toolchain is encountered.
+    /// Emit standard agnostic guidance when a non-relocatable toolchain is encountered.
     #[inline]
     pub fn emit_non_relocatable_notice(path: &Path) {
         discovery::emit_non_relocatable_notice(path);
     }
 
-    /// Discovers all available standalone host toolchains using the default registry.
+    /// Discover all available standalone host toolchains using the default registry.
     pub fn discover_all() -> Vec<DiscoveredToolchain> {
         DiscoveryRegistry::with_default_discoverers().discover_all()
     }
 
-    /// Discovers active workspace ecosystems based on workspace manifests, dependency trees, and closure lockfile.
+    /// Discover active workspace ecosystems based on workspace manifests, dependency trees, and closure lockfile.
     #[inline]
     pub fn detect_workspace_ecosystems(
         workspace_root: &Path,
@@ -52,7 +52,7 @@ impl ToolchainProvider {
         ToolchainDetector::detect_workspace_ecosystems(workspace_root, lockfile)
     }
 
-    /// Discovers standalone host toolchains scoped strictly to the target workspace's ecosystems.
+    /// Discover standalone host toolchains scoped strictly to the target workspace's ecosystems.
     pub fn discover_for_workspace(
         workspace_root: &Path,
         lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
@@ -103,85 +103,85 @@ impl ToolchainProvider {
         toolchains
     }
 
-    /// Discovers the host Rust toolchain, prioritizing official standalone Rustup distributions.
+    /// Discover the host Rust toolchain, prioritizing official standalone Rustup distributions.
     #[inline]
     pub fn discover_rust() -> Result<Option<DiscoveredToolchain>, String> {
         RustDiscoverer.discover()
     }
 
-    /// Discovers the host Node.js runtime and npm binary.
+    /// Discover the host Node.js runtime and npm binary.
     #[inline]
     pub fn discover_node() -> Result<Option<DiscoveredToolchain>, String> {
         NodeDiscoverer.discover()
     }
 
-    /// Discovers the host Python interpreter and site-packages.
+    /// Discover the host Python interpreter and site-packages.
     #[inline]
     pub fn discover_python() -> Result<Option<DiscoveredToolchain>, String> {
         PythonDiscoverer.discover()
     }
 
-    /// Discovers the host Go compiler and standard library packages.
+    /// Discover the host Go compiler and standard library packages.
     #[inline]
     pub fn discover_go() -> Result<Option<DiscoveredToolchain>, String> {
         GoDiscoverer.discover()
     }
 
-    /// Discovers standalone PHP runtime distribution.
+    /// Discover standalone PHP runtime distribution.
     #[inline]
     pub fn discover_php() -> Result<Option<DiscoveredToolchain>, String> {
         PhpDiscoverer.discover()
     }
 
-    /// Discovers standalone Ruby runtime distribution.
+    /// Discover standalone Ruby runtime distribution.
     #[inline]
     pub fn discover_ruby() -> Result<Option<DiscoveredToolchain>, String> {
         RubyDiscoverer.discover()
     }
 
-    /// Discovers standalone CMake distribution.
+    /// Discover standalone CMake distribution.
     #[inline]
     pub fn discover_cmake() -> Result<Option<DiscoveredToolchain>, String> {
         CMakeDiscoverer.discover()
     }
 
-    /// Discovers standalone Ninja build tool distribution.
+    /// Discover standalone Ninja build tool distribution.
     #[inline]
     pub fn discover_ninja() -> Result<Option<DiscoveredToolchain>, String> {
         NinjaDiscoverer.discover()
     }
 
-    /// Discovers standalone GNU Make / BSD Make distribution.
+    /// Discover standalone GNU Make / BSD Make distribution.
     #[inline]
     pub fn discover_make() -> Result<Option<DiscoveredToolchain>, String> {
         MakeDiscoverer.discover()
     }
 
-    /// Discovers standalone JUCE framework distribution.
+    /// Discover standalone JUCE framework distribution.
     #[inline]
     pub fn discover_juce() -> Result<Option<DiscoveredToolchain>, String> {
         JuceDiscoverer.discover()
     }
 
-    /// Discovers standalone pkg-config distribution.
+    /// Discover standalone pkg-config distribution.
     #[inline]
     pub fn discover_pkgconfig() -> Result<Option<DiscoveredToolchain>, String> {
         PkgConfigDiscoverer.discover()
     }
 
-    /// Discovers standalone C/C++ compiler toolchain.
+    /// Discover standalone C/C++ compiler toolchain.
     #[inline]
     pub fn discover_cc() -> Result<Option<DiscoveredToolchain>, String> {
         CcDiscoverer.discover()
     }
 
-    /// Discovers standalone Android NDK distribution.
+    /// Discover standalone Android NDK distribution.
     #[inline]
     pub fn discover_android_ndk() -> Result<Option<DiscoveredToolchain>, String> {
         AndroidNdkDiscoverer.discover()
     }
 
-    /// Discovers Apple Developer SDK and toolchain distribution.
+    /// Discover Apple Developer SDK and toolchain distribution.
     #[inline]
     pub fn discover_apple_sdk() -> Result<Option<DiscoveredToolchain>, String> {
         AppleSdkDiscoverer.discover()
@@ -192,7 +192,7 @@ impl ToolchainProvider {
 pub struct ToolchainPackager;
 
 impl ToolchainPackager {
-    /// Packages discovered toolchains scoped to the workspace into the target tar archive under `toolchains/<eco>/`.
+    /// Package discovered toolchains scoped to the workspace into the target tar archive under `toolchains/<eco>/`.
     pub fn package_toolchains<W: std::io::Write>(
         workspace_root: &Path,
         tar_builder: &mut TarBuilder<W>,
@@ -200,7 +200,7 @@ impl ToolchainPackager {
         Self::package_toolchains_with_lockfile(workspace_root, None, tar_builder)
     }
 
-    /// Packages discovered toolchains scoped to the workspace and closure lockfile into the target tar archive.
+    /// Package discovered toolchains scoped to the workspace and closure lockfile into the target tar archive.
     pub fn package_toolchains_with_lockfile<W: std::io::Write>(
         workspace_root: &Path,
         lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
@@ -210,13 +210,13 @@ impl ToolchainPackager {
         ToolchainArchivePackager::package(tar_builder, &toolchains)
     }
 
-    /// Sets up imported toolchain directory: execution permissions, quarantine clearance, and activator scripts.
+    /// Set up imported toolchain directory: execution permissions, quarantine clearance, and activator scripts.
     #[inline]
     pub fn setup_imported_toolchains(workspace_root: &Path) -> Result<(), String> {
         ToolchainSetup::setup_imported_toolchains(workspace_root)
     }
 
-    /// Injects bundled toolchains into an environment variable map (for sandbox/shell executions).
+    /// Inject bundled toolchains into an environment variable map (for sandbox/shell executions).
     #[inline]
     pub fn inject_toolchain_paths(workspace_root: &Path, env_map: &mut HashMap<String, String>) {
         ToolchainEnv::inject_toolchain_paths(workspace_root, env_map);
