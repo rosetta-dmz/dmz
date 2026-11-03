@@ -256,8 +256,8 @@ fn test_native_build_tool_cmake_detection_and_packaging() -> anyhow::Result<()> 
         "Must infer companion Cc compiler when CMake is required"
     );
     assert!(
-        detected.contains(&dmz_core::toolchain::ToolchainEcosystem::Ninja),
-        "Must infer companion build backend (Ninja) when CMake is required"
+        !detected.contains(&dmz_core::toolchain::ToolchainEcosystem::Ninja),
+        "Must not falsely infer companion build backend (Ninja) when CMake is required without build.ninja"
     );
 
     // Test environment injection and activator/toolchain generation

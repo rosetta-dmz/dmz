@@ -3,11 +3,6 @@ use std::collections::HashSet;
 use std::path::Path;
 
 /// Manifest-driven workspace ecosystem and toolchain detector.
-///
-/// Adheres strictly to the First Principles / Root Manifest Dominance pattern:
-/// A workspace's toolchain requirements are determined strictly by what the target workspace
-/// actually declares and has at its root, never by heuristic crawling of arbitrary nested directories
-/// or inspecting transitive package names in dependency lockfiles.
 pub struct ToolchainDetector;
 
 impl ToolchainDetector {
@@ -69,7 +64,6 @@ impl ToolchainDetector {
         if workspace_root.join("CMakeLists.txt").is_file() {
             ecosystems.insert(ToolchainEcosystem::CMake);
             ecosystems.insert(ToolchainEcosystem::Cc);
-            ecosystems.insert(ToolchainEcosystem::Ninja);
         }
         if workspace_root.join("build.ninja").is_file() {
             ecosystems.insert(ToolchainEcosystem::Ninja);
@@ -203,7 +197,6 @@ impl ToolchainDetector {
         if member_dir.join("CMakeLists.txt").is_file() {
             ecosystems.insert(ToolchainEcosystem::CMake);
             ecosystems.insert(ToolchainEcosystem::Cc);
-            ecosystems.insert(ToolchainEcosystem::Ninja);
         }
         if member_dir.join("build.ninja").is_file() {
             ecosystems.insert(ToolchainEcosystem::Ninja);
@@ -247,17 +240,11 @@ impl ToolchainDetector {
     }
 
     /// Maps Cargo build-script helper crates that execute external native build tools at compile time.
-    ///
-    /// Never maps FFI binding crates (`core-foundation`, `objc`, `swift-rs`, `swift-bridge`,
-    /// `android-tzdata`, `ndk-sys`, `libc`, `cc`) to foreign platform SDKs (`AppleSdk`, `AndroidNdk`),
-    /// preserving strict 1-to-1 workspace isolation while guaranteeing `cmake`, `ninja`, and
-    /// `pkg-config` binaries are bundled when required by the dependency closure.
     fn map_cargo_build_tool_crate(crate_name: &str, ecosystems: &mut HashSet<ToolchainEcosystem>) {
         match crate_name {
             "cmake" => {
                 ecosystems.insert(ToolchainEcosystem::CMake);
                 ecosystems.insert(ToolchainEcosystem::Cc);
-                ecosystems.insert(ToolchainEcosystem::Ninja);
             }
             "ninja" | "ninja-build" => {
                 ecosystems.insert(ToolchainEcosystem::Ninja);
@@ -606,8 +593,8 @@ pub(crate) mod tests {
             "Rust workspace with cmake build crate must detect companion Cc"
         );
         assert!(
-            detected.contains(&ToolchainEcosystem::Ninja),
-            "Rust workspace with cmake build crate must detect companion Ninja"
+            !detected.contains(&ToolchainEcosystem::Ninja),
+            "Rust workspace with cmake build crate must not falsely pull Ninja"
         );
         assert!(
             detected.contains(&ToolchainEcosystem::PkgConfig),
