@@ -84,10 +84,11 @@ impl ToolchainDiscoverer for CMakeDiscoverer {
                         .to_string();
 
                     let is_non_standalone = is_non_standalone_path(&candidate);
-                    if chosen_cmake.is_none()
-                        || (!is_non_standalone
-                            && is_non_standalone_path(chosen_cmake.as_ref().unwrap()))
-                    {
+                    let should_replace = match &chosen_cmake {
+                        None => true,
+                        Some(prev) => !is_non_standalone && is_non_standalone_path(prev),
+                    };
+                    if should_replace {
                         chosen_cmake = Some(candidate);
                         chosen_version = Some(version_str);
                         if !is_non_standalone {

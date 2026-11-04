@@ -59,10 +59,11 @@ impl ToolchainDiscoverer for NodeDiscoverer {
             if is_non_standalone_path(&candidate) {
                 emit_non_relocatable_notice(&candidate);
             }
-            if chosen_node.is_none()
-                || (!is_non_standalone_path(&candidate)
-                    && is_non_standalone_path(chosen_node.as_ref().unwrap()))
-            {
+            let should_replace = match &chosen_node {
+                None => true,
+                Some(prev) => !is_non_standalone_path(&candidate) && is_non_standalone_path(prev),
+            };
+            if should_replace {
                 chosen_node = Some(candidate.clone());
                 if !is_non_standalone_path(&candidate) {
                     break;

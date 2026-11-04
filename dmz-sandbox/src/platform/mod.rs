@@ -149,21 +149,40 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     // Set PYTHONPATH and VIRTUAL_ENV if python environments exist
     let venv = resolved_config.workspace_path.join(".venv");
     let dmz_venv = resolved_config.workspace_path.join(".dmz").join("venv");
-    if venv.exists() {
-        env_map.insert("VIRTUAL_ENV".into(), venv.to_string_lossy().to_string());
+    let active_venv = if venv.exists() {
+        Some(venv)
     } else if dmz_venv.exists() {
-        env_map.insert("VIRTUAL_ENV".into(), dmz_venv.to_string_lossy().to_string());
-    }
+        Some(dmz_venv)
+    } else {
+        None
+    };
 
-    let dmz_site_packages = dmz_venv
-        .join("lib")
-        .join("python3.11")
-        .join("site-packages");
-    if dmz_site_packages.exists() {
-        env_map.insert(
-            "PYTHONPATH".into(),
-            dmz_site_packages.to_string_lossy().to_string(),
-        );
+    if let Some(ref v) = active_venv {
+        env_map.insert("VIRTUAL_ENV".into(), v.to_string_lossy().to_string());
+
+        let mut site_packages_found = None;
+        let lib_dir = v.join("lib");
+        if lib_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&lib_dir) {
+                for entry in entries.flatten() {
+                    let sp = entry.path().join("site-packages");
+                    if sp.is_dir() {
+                        site_packages_found = Some(sp);
+                        break;
+                    }
+                }
+            }
+        }
+        if site_packages_found.is_none() {
+            let win_sp = v.join("Lib").join("site-packages");
+            if win_sp.is_dir() {
+                site_packages_found = Some(win_sp);
+            }
+        }
+
+        if let Some(sp) = site_packages_found {
+            env_map.insert("PYTHONPATH".into(), sp.to_string_lossy().to_string());
+        }
     }
 
     // Universal Ecosystem Cache Redirection
@@ -205,6 +224,11 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
         env_map.insert("HTTP_PROXY".into(), "http://127.0.0.1:0".into());
         env_map.insert("HTTPS_PROXY".into(), "http://127.0.0.1:0".into());
         env_map.insert("ALL_PROXY".into(), "http://127.0.0.1:0".into());
+        env_map.insert("http_proxy".into(), "http://127.0.0.1:0".into());
+        env_map.insert("https_proxy".into(), "http://127.0.0.1:0".into());
+        env_map.insert("all_proxy".into(), "http://127.0.0.1:0".into());
+        env_map.insert("NO_PROXY".into(), "localhost,127.0.0.1".into());
+        env_map.insert("no_proxy".into(), "localhost,127.0.0.1".into());
     }
 
     if let Some(ref sock_path) = resolved_config.ipc_socket_path {

@@ -22,16 +22,22 @@ fn main() -> eframe::Result<()> {
 
     #[cfg(not(target_os = "macos"))]
     let viewport_builder = {
-        let image = image::load_from_memory(include_bytes!("../../assets/dmz-icon.png"))
-            .expect("Failed to load dmz-icon.png from workspace root assets directory")
-            .into_rgba8();
-        let (width, height) = image.dimensions();
-        let icon_data = egui::IconData {
-            rgba: image.into_raw(),
-            width,
-            height,
-        };
-        viewport_builder.with_icon(std::sync::Arc::new(icon_data))
+        match image::load_from_memory(include_bytes!("../../assets/dmz-icon.png")) {
+            Ok(loaded) => {
+                let image = loaded.into_rgba8();
+                let (width, height) = image.dimensions();
+                let icon_data = egui::IconData {
+                    rgba: image.into_raw(),
+                    width,
+                    height,
+                };
+                viewport_builder.with_icon(std::sync::Arc::new(icon_data))
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load embedded icon: {}", e);
+                viewport_builder
+            }
+        }
     };
 
     let options = eframe::NativeOptions {

@@ -68,10 +68,11 @@ impl ToolchainDiscoverer for GoDiscoverer {
             if is_non_standalone_path(&candidate) {
                 emit_non_relocatable_notice(&candidate);
             }
-            if chosen_go.is_none()
-                || (!is_non_standalone_path(&candidate)
-                    && is_non_standalone_path(chosen_go.as_ref().unwrap()))
-            {
+            let should_replace = match &chosen_go {
+                None => true,
+                Some(prev) => !is_non_standalone_path(&candidate) && is_non_standalone_path(prev),
+            };
+            if should_replace {
                 chosen_go = Some(candidate.clone());
                 if !is_non_standalone_path(&candidate) {
                     break;

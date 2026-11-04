@@ -62,10 +62,11 @@ impl ToolchainDiscoverer for NinjaDiscoverer {
                 if output.status.success() {
                     let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     let is_non_standalone = is_non_standalone_path(&candidate);
-                    if chosen_ninja.is_none()
-                        || (!is_non_standalone
-                            && is_non_standalone_path(chosen_ninja.as_ref().unwrap()))
-                    {
+                    let should_replace = match &chosen_ninja {
+                        None => true,
+                        Some(prev) => !is_non_standalone && is_non_standalone_path(prev),
+                    };
+                    if should_replace {
                         chosen_ninja = Some(candidate);
                         chosen_version = Some(format!("ninja {}", version_str));
                         if !is_non_standalone {

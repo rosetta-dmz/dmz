@@ -135,6 +135,12 @@ impl ServiceRunner {
             if let Some(mut child) = service.child.take() {
                 info!(service = %name, "Terminating background collateral service");
 
+                #[cfg(windows)]
+                {
+                    let _ = child.kill().await;
+                    return Ok(());
+                }
+
                 #[cfg(unix)]
                 {
                     if let Some(pid) = child.id() {

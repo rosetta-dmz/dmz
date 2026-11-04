@@ -154,3 +154,24 @@ fn test_cli_safe_socket_path_length_guard() {
         assert!(check_socket_path_length(&dangerous_pipe).is_some());
     }
 }
+
+#[test]
+fn test_cli_sandbox_defaults_to_local_store() {
+    let args = vec!["dmz", "sandbox"];
+    let parsed = Cli::try_parse_from(args).expect("Failed to parse sandbox default command");
+    match parsed.command {
+        Commands::Sandbox {
+            closure,
+            exec_command,
+            ..
+        } => {
+            assert_eq!(closure, PathBuf::from(".dmz/store"));
+            if cfg!(windows) {
+                assert_eq!(exec_command, "cmd.exe");
+            } else {
+                assert_eq!(exec_command, "/bin/sh");
+            }
+        }
+        _ => panic!("Expected Commands::Sandbox"),
+    }
+}

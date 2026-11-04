@@ -94,10 +94,11 @@ impl ToolchainDiscoverer for RustDiscoverer {
                             .to_string();
 
                         // If chosen_sysroot already has a standalone candidate, don't overwrite with non-standalone
-                        if chosen_sysroot.is_none()
-                            || (!is_non_standalone
-                                && is_non_standalone_path(chosen_sysroot.as_ref().unwrap()))
-                        {
+                        let should_replace = match &chosen_sysroot {
+                            None => true,
+                            Some(prev) => !is_non_standalone && is_non_standalone_path(prev),
+                        };
+                        if should_replace {
                             chosen_sysroot = Some(sysroot);
                             chosen_version = Some(version);
                             if !is_non_standalone {

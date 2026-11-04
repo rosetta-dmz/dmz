@@ -67,10 +67,11 @@ impl ToolchainDiscoverer for PythonDiscoverer {
             if is_non_standalone_path(&candidate) {
                 emit_non_relocatable_notice(&candidate);
             }
-            if chosen_py.is_none()
-                || (!is_non_standalone_path(&candidate)
-                    && is_non_standalone_path(chosen_py.as_ref().unwrap()))
-            {
+            let should_replace = match &chosen_py {
+                None => true,
+                Some(prev) => !is_non_standalone_path(&candidate) && is_non_standalone_path(prev),
+            };
+            if should_replace {
                 chosen_py = Some(candidate.clone());
                 if !is_non_standalone_path(&candidate) {
                     break;

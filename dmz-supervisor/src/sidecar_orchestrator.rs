@@ -206,12 +206,14 @@ impl SidecarOrchestrator {
         // 4. KEP-753 Readiness Probe Gate
         *self.state.write().await = SidecarLifecycleState::ProbingSocketReadiness;
         let readiness_timeout = config.project.ipc.readiness_timeout_ms;
+        let abort_grace =
+            Duration::from_millis(config.project.ipc.drain_timeout_ms.clamp(500, 2000));
 
         if let Err(err) = Self::poll_socket_readiness(&sock_path, readiness_timeout).await {
             warn!(error = %err, "Readiness probe failed; aborting startup");
             *self.state.write().await = SidecarLifecycleState::Failed;
             // Clean up sidecar process
-            Self::terminate_child_process(sidecar_child, Duration::from_millis(1000)).await;
+            Self::terminate_child_process(sidecar_child, abort_grace).await;
             let _ = cleanup_stale_socket(&sock_path);
             return Err(err);
         }
@@ -234,7 +236,7 @@ impl SidecarOrchestrator {
             Err(e) => {
                 warn!(error = %e, "Failed to spawn primary application; tearing down sidecar");
                 *self.state.write().await = SidecarLifecycleState::Failed;
-                Self::terminate_child_process(sidecar_child, Duration::from_millis(1000)).await;
+                Self::terminate_child_process(sidecar_child, abort_grace).await;
                 let _ = cleanup_stale_socket(&sock_path);
                 return Err(format!("Failed to spawn primary app: {}", e));
             }
@@ -285,7 +287,7 @@ impl SidecarOrchestrator {
         // 2. Terminate Sidecar Process
         *self.state.write().await = SidecarLifecycleState::TerminatingSidecar;
         info!("KEP-753 Phase III: Terminating companion sidecar process");
-        Self::terminate_child_process(pair.sidecar_child, Duration::from_millis(3000)).await;
+        Self::terminate_child_process(pair.sidecar_child, drain_timeout).await;
 
         // 3. Unlink socket
         let _ = cleanup_stale_socket(&pair.socket_path);
@@ -313,8 +315,20 @@ impl SidecarOrchestrator {
             .exec_command
             .clone()
             .unwrap_or_else(|| match member.role {
-                MemberRole::Primary => "/bin/sh".to_string(),
-                MemberRole::Sidecar | MemberRole::Service => "python3".to_string(),
+                MemberRole::Primary => {
+                    if cfg!(windows) {
+                        "cmd.exe".to_string()
+                    } else {
+                        "/bin/sh".to_string()
+                    }
+                }
+                MemberRole::Sidecar | MemberRole::Service => {
+                    if cfg!(windows) {
+                        "python".to_string()
+                    } else {
+                        "python3".to_string()
+                    }
+                }
             });
 
         let mut cmd = Command::new(&exec_cmd);

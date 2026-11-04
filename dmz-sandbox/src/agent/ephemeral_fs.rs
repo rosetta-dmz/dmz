@@ -34,7 +34,22 @@ impl std::error::Error for EphemeralError {}
 impl EphemeralFs {
     /// Create and mount a new ephemeral in-memory scratchpad for an AI agent
     pub fn new(agent_id: &str, size_limit_bytes: usize) -> Result<Self, EphemeralError> {
-        let mount_path = std::env::temp_dir().join(format!("dmz_agent_scratchpad_{}", agent_id));
+        let sanitized_id: String = agent_id
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let safe_id = if sanitized_id.is_empty() {
+            "default"
+        } else {
+            &sanitized_id
+        };
+        let mount_path = std::env::temp_dir().join(format!("dmz_agent_scratchpad_{}", safe_id));
 
         if !mount_path.exists() {
             fs::create_dir_all(&mount_path)
@@ -124,5 +139,22 @@ impl Drop for EphemeralFs {
                 warn!(error = %e, "Failed to remove ephemeral scratchpad directory");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ephemeral_fs_sanitizes_agent_id() {
+        let fs = EphemeralFs::new("../../traversal_agent/evil:name", 1024 * 1024).unwrap();
+        let path = fs.path().to_path_buf();
+        assert!(path.starts_with(std::env::temp_dir()));
+        let file_name = path.file_name().unwrap().to_string_lossy();
+        assert!(!file_name.contains('/'));
+        assert!(!file_name.contains('\\'));
+        assert!(!file_name.contains(':'));
+        assert!(file_name.starts_with("dmz_agent_scratchpad_"));
     }
 }
