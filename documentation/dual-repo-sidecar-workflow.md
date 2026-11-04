@@ -4,7 +4,7 @@
 
 ---
 
-## 1. Overview & Architecture
+## Overview & Architecture
 
 Modern desktop and full-stack applications often pair a primary frontend/app (e.g. desktop GUI, CLI, or web client) with an independent companion **sidecar** service (e.g. local Python AI worker, Rust/C++ computation backend, or IPC engine).
 
@@ -16,7 +16,7 @@ In unconstrained host environments, these multi-repo projects rely on system-ins
 │                                                        │
 │  ┌──────────────────────┐    ┌──────────────────────┐  │
 │  │ Primary Workspace    │    │ Sidecar Workspace    │  │
-│  │ (e.g. Node / GUI)    │    │ (e.g. Python / Rust) │  │
+│  │ (e.g. Python / Rust) │    │ (e.g. Node / GUI)    │  │
 │  └──────────┬───────────┘    └──────────┬───────────┘  │
 │             │ R/W                       │ R/W          │
 │             ▼                           ▼              │
@@ -37,7 +37,7 @@ In unconstrained host environments, these multi-repo projects rely on system-ins
 
 ---
 
-## 2. Workspace Declaration (`dmz-workspace.toml`)
+## Workspace Declaration (`dmz-workspace.toml`)
 
 To link two repositories, create a `dmz-workspace.toml` in your primary project root or umbrella folder:
 
@@ -71,7 +71,7 @@ drain_timeout_ms = 3000
 
 ---
 
-## 3. CLI Developer Workflow
+## CLI Developer Workflow
 
 ### Step 1: Scan & Resolve Heterogeneous Dependencies
 Resolve both ecosystems into a unified, namespaced `dmz.lock`:
@@ -113,24 +113,45 @@ const client = net.createConnection({ path: socketPath }, () => {
 ```
 
 ### Step 4: Air-Gap Closure Export & Distribution
-Package both source trees, their offline package stores, and compiler sysroots (Node + Python runtime) into a single verifiable `.tar.zst` bundle:
+Package both source trees, their offline package stores, documentation, dist assets, and compiler toolchains into a single verifiable `.tar.zst` umbrella bundle:
 
 ```bash
 dmz bundle --with-toolchain --output dist/project_closure.tar.zst
 ```
 
-### Step 5: Unpack & Run on Clean Air-Gapped Machine
+The exported umbrella archive preserves original repository directory names and generates:
+- `<primary-folder-name>/`: Complete primary application source tree.
+- `<secondary-folder-name>/`: Complete sidecar repository tree.
+- `documentation/`: Bundled guides and architecture specifications.
+- `dist/`: Pre-built release deliverables (if present).
+- `dmz-workspace.toml`: Normalized multi-workspace orchestrator manifest.
+- `<project>.code-workspace`: VS Code Multi-Root Workspace file.
+- `README.md`: Air-gap quickstart runbook.
+
+### Step 5: Unpack & Open on Clean Air-Gapped Machine
 On target air-gapped systems with zero pre-installed runtimes:
 
 ```bash
+# Unpack the umbrella bundle
 dmz import --archive dist/project_closure.tar.zst --workspace ./project
 cd project
-dmz shell
+
+# Open the multi-root workspace in VS Code or Cursor:
+code my-desktop-suite.code-workspace
+
+# Or run directly via the DMZ supervisor:
+dmz run --workspace .
 ```
+
+#### Automatic Dependency Hydration:
+Upon import, DMZ automatically hydrates:
+- **Tauri / npm:** Generates `node_modules/.bin/tauri` and pre-configures terminal PATH so `@tauri-apps/cli` is immediately available.
+- **Cargo:** Automatically configures `.cargo/config.toml` vendored source replacement pointing to `.dmz/store` for offline builds (`cargo build --offline`).
+- **Python:** Isolates Python interpreter paths (`python.defaultInterpreterPath`) strictly to the sidecar subproject inside `.code-workspace`, eliminating global "Python 3 interpreter error" popups.
 
 ---
 
-## 4. GUI Developer Workflow
+## GUI Developer Workflow
 
 For users preferring visual management in `dmz-gui`:
 
@@ -166,12 +187,12 @@ For users preferring visual management in `dmz-gui`:
 
 ---
 
-## 5. Security & Best Practices
+## Security & Best Practices
 
 | Recommendation | Rationale |
 | :--- | :--- |
 | **Prefer Static Sidecar Binaries (`musl`)** | When building sidecars in Rust, Go, or C++, compile against `musl` (`x86_64-unknown-linux-musl`) to eliminate host dynamic library (`glibc`) mismatches on air-gapped target machines. |
 | **Never Use TCP Loopback for Sidecars** | Loopback networking (`127.0.0.1`) requires opening sandbox network rules and risks port collisions. Always use Unix domain sockets or Windows Named Pipes. |
-| **Rely on `DMZ_SIDECAR_SOCK`** | Never hardcode socket paths in source code. Reading `DMZ_SIDECAR_SOCK` ensures compliance with POSIX safe path length guarantees and automated cleanup. |
+| **Rely on `DMZ_SIDECAR_SOCK`** | Read `DMZ_SIDECAR_SOCK` to ensure compliance with POSIX safe path length guarantees and automated cleanup. |
 | **Respect the Drain Window** | When receiving `SIGTERM`, primary apps should finalize active requests before closing the socket, allowing clean shutdown without interrupted state. |
 

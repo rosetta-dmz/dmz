@@ -1,9 +1,10 @@
 use crate::ecosystem::EcosystemRegistry;
 use crate::resolver::lockfile::DmzLockfile;
 use crate::vcs::{GitProvider, VcsProvenance};
+use crate::workspace::{MemberRole, WorkspaceProjectConfig};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -292,7 +293,12 @@ impl AirGapExporter {
                 if pkg_store_path.exists() {
                     let archive_dest = Path::new("store").join(&safe_pkg_name);
                     if pkg_store_path.is_dir() {
-                        Self::append_dir_all(&mut tar_builder, &pkg_store_path, &archive_dest)?;
+                        Self::append_dir_all(
+                            &mut tar_builder,
+                            &pkg_store_path,
+                            &archive_dest,
+                            false,
+                        )?;
                     } else {
                         tar_builder
                             .append_path_with_name(&pkg_store_path, &archive_dest)
@@ -313,18 +319,372 @@ impl AirGapExporter {
             }
         }
 
+        // Detect Multi-Workspace Configuration
+        let (ws_project_opt, manifest_path_opt) = match config.multi_workspace.clone() {
+            Some(cfg) => (Some(cfg), None),
+            None => WorkspaceProjectConfig::discover_workspace_manifest(&workspace_root)
+                .map(|(cfg, p)| (Some(cfg), Some(p)))
+                .unwrap_or((None, None)),
+        };
+
+        let mut final_ws_project = None;
+
         // Append workspace source code (if mode is Unified or CodeOnly)
         if config.mode == ExportMode::Unified || config.mode == ExportMode::CodeOnly {
-            info!(path = ?workspace_root, "Appending workspace source code to archive");
-            if workspace_root.is_dir() {
+            if let Some(ref ws_project) = ws_project_opt {
+                // --- MULTI-WORKSPACE UMBRELLA EXPORT ---
+                let primary_folder_name = workspace_root
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or("primary")
+                    .to_string();
+
+                let mut member_folder_names = HashMap::new();
+                let mut member_host_paths = HashMap::new();
+
+                for member in &ws_project.members {
+                    if member.role == MemberRole::Primary {
+                        member_folder_names.insert(member.id.clone(), primary_folder_name.clone());
+                        member_host_paths.insert(member.id.clone(), workspace_root.clone());
+                    } else {
+                        let host_path = if member.path.is_relative() {
+                            if let Some(ref m_path) = manifest_path_opt {
+                                m_path
+                                    .parent()
+                                    .unwrap_or(&workspace_root)
+                                    .join(&member.path)
+                            } else {
+                                workspace_root.join(&member.path)
+                            }
+                        } else {
+                            member.path.clone()
+                        };
+                        let host_path = fs::canonicalize(&host_path).unwrap_or(host_path);
+                        let raw_name = host_path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .filter(|n| !n.is_empty())
+                            .unwrap_or(&member.id)
+                            .to_string();
+                        let folder_name = if raw_name == primary_folder_name {
+                            format!("{}-sidecar", raw_name)
+                        } else {
+                            raw_name
+                        };
+                        member_folder_names.insert(member.id.clone(), folder_name);
+                        member_host_paths.insert(member.id.clone(), host_path);
+                    }
+                }
+
+                // 1. Package Primary Repository into its dedicated umbrella subfolder
+                info!(
+                    folder = %primary_folder_name,
+                    path = ?workspace_root,
+                    "Packaging primary workspace files into umbrella subfolder"
+                );
                 if let Some(ref changed_files) = changed_files_filter {
-                    info!(
-                        changed_count = changed_files.len(),
-                        "Packaging incremental delta workspace files"
-                    );
                     Self::append_filtered_files(&mut tar_builder, &workspace_root, changed_files)?;
                 } else {
-                    Self::append_dir_all(&mut tar_builder, &workspace_root, Path::new(""))?;
+                    Self::append_dir_all(
+                        &mut tar_builder,
+                        &workspace_root,
+                        Path::new(&primary_folder_name),
+                        true,
+                    )?;
+                }
+
+                // 2. Package each Sidecar / Service Member into its dedicated umbrella subfolder
+                for member in &ws_project.members {
+                    if member.role != MemberRole::Primary {
+                        if let Some(host_path) = member_host_paths.get(&member.id) {
+                            if let Some(folder_name) = member_folder_names.get(&member.id) {
+                                if host_path.is_dir() {
+                                    info!(
+                                        member = %member.id,
+                                        src = ?host_path,
+                                        dest = %folder_name,
+                                        "Packaging sidecar workspace files into umbrella subfolder"
+                                    );
+                                    Self::append_dir_all(
+                                        &mut tar_builder,
+                                        host_path,
+                                        Path::new(folder_name),
+                                        true,
+                                    )?;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3. Package Documentation folder if present
+                let mut has_docs = false;
+                let doc_candidates = [
+                    workspace_root.join("documentation"),
+                    workspace_root.join("docs"),
+                    workspace_root
+                        .parent()
+                        .map(|p| p.join("documentation"))
+                        .unwrap_or_default(),
+                    workspace_root
+                        .parent()
+                        .map(|p| p.join("docs"))
+                        .unwrap_or_default(),
+                ];
+                for candidate in &doc_candidates {
+                    if candidate.is_dir() {
+                        info!(path = ?candidate, "Packaging project documentation into umbrella archive");
+                        let _ = Self::append_dir_all(
+                            &mut tar_builder,
+                            candidate,
+                            Path::new("documentation"),
+                            false,
+                        );
+                        has_docs = true;
+                        break;
+                    }
+                }
+
+                // 4. Package Dist folder if present
+                let dist_candidates = [
+                    workspace_root.join("dist"),
+                    workspace_root
+                        .parent()
+                        .map(|p| p.join("dist"))
+                        .unwrap_or_default(),
+                ];
+                for candidate in &dist_candidates {
+                    if candidate.is_dir() {
+                        let has_files = fs::read_dir(candidate)
+                            .map(|entries| {
+                                entries.flatten().any(|e| {
+                                    let name = e.file_name().to_string_lossy().to_string();
+                                    !name.ends_with(".zst") && !name.ends_with(".sha256")
+                                })
+                            })
+                            .unwrap_or(false);
+                        if has_files {
+                            info!(path = ?candidate, "Packaging distribution assets into umbrella archive");
+                            let _ = Self::append_dir_all(
+                                &mut tar_builder,
+                                candidate,
+                                Path::new("dist"),
+                                false,
+                            );
+                            break;
+                        }
+                    }
+                }
+
+                // 5. Serialize and embed normalized dmz-workspace.toml pointing to umbrella subfolders
+                let mut normalized_project = ws_project.clone();
+                for m in &mut normalized_project.members {
+                    if let Some(folder_name) = member_folder_names.get(&m.id) {
+                        m.path = PathBuf::from(folder_name);
+                    }
+                }
+                if let Ok(toml_str) = normalized_project.to_toml_string() {
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(toml_str.len() as u64);
+                    header.set_mode(0o644);
+                    header.set_cksum();
+                    let _ = tar_builder.append_data(
+                        &mut header,
+                        "dmz-workspace.toml",
+                        toml_str.as_bytes(),
+                    );
+                }
+
+                // 6. Generate and embed VS Code Multi-Root Workspace (.code-workspace)
+                let mut folders = Vec::new();
+                let mut linked_rust_projects = Vec::new();
+                let mut node_bin_unix = Vec::new();
+                let mut node_bin_win = Vec::new();
+
+                for m in &normalized_project.members {
+                    let folder_name = m.path.to_string_lossy().to_string();
+                    let host_dir = member_host_paths.get(&m.id).unwrap_or(&workspace_root);
+
+                    let is_python = m.ecosystem.as_deref() == Some("python")
+                        || m.ecosystem.as_deref() == Some("pypi")
+                        || host_dir.join("requirements.txt").exists()
+                        || host_dir.join("pyproject.toml").exists();
+
+                    let is_rust = m.ecosystem.as_deref() == Some("rust")
+                        || m.ecosystem.as_deref() == Some("cargo")
+                        || host_dir.join("Cargo.toml").exists()
+                        || host_dir.join("src-tauri/Cargo.toml").exists();
+
+                    let is_node = m.ecosystem.as_deref() == Some("node")
+                        || m.ecosystem.as_deref() == Some("npm")
+                        || host_dir.join("package.json").exists();
+
+                    if is_rust {
+                        if host_dir.join("Cargo.toml").exists() {
+                            linked_rust_projects.push(format!("{}/Cargo.toml", folder_name));
+                        }
+                        if host_dir.join("src-tauri/Cargo.toml").exists() {
+                            linked_rust_projects
+                                .push(format!("{}/src-tauri/Cargo.toml", folder_name));
+                        }
+                    }
+
+                    if is_node {
+                        node_bin_unix.push(format!(
+                            "${{workspaceFolder}}/{}/node_modules/.bin",
+                            folder_name
+                        ));
+                        node_bin_win.push(format!(
+                            "${{workspaceFolder}}\\{}\\node_modules\\.bin",
+                            folder_name
+                        ));
+                    }
+
+                    let label = if m.role == MemberRole::Primary {
+                        format!("Primary: {}", folder_name)
+                    } else {
+                        format!("Sidecar: {}", m.id)
+                    };
+
+                    let mut folder_entry = serde_json::json!({
+                        "name": label,
+                        "path": folder_name
+                    });
+
+                    if is_python {
+                        folder_entry["settings"] = serde_json::json!({
+                            "python.defaultInterpreterPath": "${workspaceFolder}/.dmz/toolchains/python/bin/python3",
+                            "python.terminal.activateEnvironment": true
+                        });
+                    }
+
+                    folders.push(folder_entry);
+                }
+
+                if has_docs {
+                    folders.push(serde_json::json!({
+                        "name": "Documentation",
+                        "path": "documentation"
+                    }));
+                }
+
+                let workspace_display_name = if !ws_project.name.is_empty() {
+                    &ws_project.name
+                } else {
+                    "workspace"
+                };
+
+                let unix_node_prefix = if !node_bin_unix.is_empty() {
+                    format!("{}:", node_bin_unix.join(":"))
+                } else {
+                    String::new()
+                };
+
+                let win_node_prefix = if !node_bin_win.is_empty() {
+                    format!("{};", node_bin_win.join(";"))
+                } else {
+                    String::new()
+                };
+
+                let code_workspace_obj = serde_json::json!({
+                    "folders": folders,
+                    "settings": {
+                        "rust-analyzer.linkedProjects": linked_rust_projects,
+                        "terminal.integrated.env.osx": {
+                            "PATH": format!("{}${{workspaceFolder}}/.dmz/toolchains/node/bin:${{workspaceFolder}}/.dmz/toolchains/rust/bin:${{workspaceFolder}}/.dmz/toolchains/python/bin:${{env:PATH}}", unix_node_prefix)
+                        },
+                        "terminal.integrated.env.linux": {
+                            "PATH": format!("{}${{workspaceFolder}}/.dmz/toolchains/node/bin:${{workspaceFolder}}/.dmz/toolchains/rust/bin:${{workspaceFolder}}/.dmz/toolchains/python/bin:${{env:PATH}}", unix_node_prefix)
+                        },
+                        "terminal.integrated.env.windows": {
+                            "PATH": format!("{}${{workspaceFolder}}\\.dmz\\toolchains\\node\\bin;${{workspaceFolder}}\\.dmz\\toolchains\\rust\\bin;${{workspaceFolder}}\\.dmz\\toolchains\\python;${{env:PATH}}", win_node_prefix)
+                        }
+                    }
+                });
+
+                if let Ok(cw_bytes) = serde_json::to_vec_pretty(&code_workspace_obj) {
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(cw_bytes.len() as u64);
+                    header.set_mode(0o644);
+                    header.set_cksum();
+                    let _ = tar_builder.append_data(
+                        &mut header,
+                        format!("{}.code-workspace", workspace_display_name),
+                        cw_bytes.as_slice(),
+                    );
+                }
+
+                // 7. Generate and embed self-contained air-gap quickstart README.md
+                let members_list = normalized_project
+                    .members
+                    .iter()
+                    .filter(|m| m.role != MemberRole::Primary)
+                    .map(|m| format!("- `{}/`: Sidecar member (`{}`)\n", m.path.display(), m.id))
+                    .collect::<Vec<_>>()
+                    .join("");
+
+                let readme_content = format!(
+                    "# {} Air-Gap Workspace Bundle\n\n\
+                    This directory is a self-contained, hermetic multi-workspace bundle generated by DMZ.\n\n\
+                    ## Preserved Project Layout\n\
+                    - `{}/`: Primary application repository.\n\
+                    {}\
+                    - `documentation/`: Project architecture guides and documentation (if packaged).\n\
+                    - `dist/`: Pre-built deliverables and release assets (if packaged).\n\
+                    - `.dmz/`: Offline package store (`.dmz/store`) and hermetic toolchains (`.dmz/toolchains`).\n\
+                    - `dmz-workspace.toml`: Multi-project workspace orchestrator manifest.\n\
+                    - `{}.code-workspace`: VS Code Multi-Root Workspace configuration.\n\n\
+                    ## Opening the Workspace\n\
+                    Open the multi-root workspace file directly in VS Code, Cursor, or your IDE:\n\
+                    ```bash\n\
+                    code {}.code-workspace\n\
+                    ```\n\
+                    Or in VS Code: **File > Open Workspace from File...** and select `{}.code-workspace`.\n\n\
+                    Both repositories will appear as peer folders in your explorer with properly isolated language servers and interpreter paths.\n\n\
+                    ## Running the Application\n\
+                    To run the primary application with its sidecar under the DMZ supervisor:\n\
+                    ```bash\n\
+                    dmz run --workspace .\n\
+                    ```\n",
+                    workspace_display_name,
+                    primary_folder_name,
+                    members_list,
+                    workspace_display_name,
+                    workspace_display_name,
+                    workspace_display_name
+                );
+
+                let mut header = tar::Header::new_gnu();
+                header.set_size(readme_content.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                let _ =
+                    tar_builder.append_data(&mut header, "README.md", readme_content.as_bytes());
+
+                final_ws_project = Some(normalized_project);
+            } else {
+                // --- SINGLE-WORKSPACE FLAT EXPORT (Backward Compatibility) ---
+                info!(path = ?workspace_root, "Appending workspace source code to archive");
+                if workspace_root.is_dir() {
+                    if let Some(ref changed_files) = changed_files_filter {
+                        info!(
+                            changed_count = changed_files.len(),
+                            "Packaging incremental delta workspace files"
+                        );
+                        Self::append_filtered_files(
+                            &mut tar_builder,
+                            &workspace_root,
+                            changed_files,
+                        )?;
+                    } else {
+                        Self::append_dir_all(
+                            &mut tar_builder,
+                            &workspace_root,
+                            Path::new(""),
+                            false,
+                        )?;
+                    }
                 }
             }
         }
@@ -401,7 +761,7 @@ impl AirGapExporter {
             delta_base,
             has_git_history,
             toolchains: toolchain_manifest_entries,
-            workspace_project: config.multi_workspace.clone(),
+            workspace_project: final_ws_project.or_else(|| config.multi_workspace.clone()),
             closure_signature: lockfile.closure_signature.clone(),
             package_count: packed_count,
             created_at_utc: std::time::SystemTime::now()
@@ -486,6 +846,7 @@ impl AirGapExporter {
         tar: &mut TarBuilder<W>,
         src_dir: &Path,
         dest_prefix: &Path,
+        skip_manifest: bool,
     ) -> Result<(), ExportError> {
         let entries = fs::read_dir(src_dir).map_err(|e| {
             ExportError::IoError(format!("Directory read failed {:?}: {}", src_dir, e))
@@ -508,10 +869,14 @@ impl AirGapExporter {
                 continue;
             }
 
+            if skip_manifest && name_str == "dmz-workspace.toml" {
+                continue;
+            }
+
             let rel_dest = dest_prefix.join(name);
 
             if path.is_dir() {
-                Self::append_dir_all(tar, &path, &rel_dest)?;
+                Self::append_dir_all(tar, &path, &rel_dest, skip_manifest)?;
             } else {
                 tar.append_path_with_name(&path, &rel_dest).map_err(|e| {
                     ExportError::ArchiveError(format!("Failed to add file {:?}: {}", path, e))
