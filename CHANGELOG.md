@@ -7,6 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.8](https://github.com/rosetta-dmz/dmz/releases/tag/dmz-gui-v1.2.8) - 2026-11-04
+
+### Added
+
+- *(airgap)* package external sidecars and normalize dual-repo workspace manifests
+
+### Other
+
+- Merge branch 'main' into dual-repo-and-sidecar-support-v1
+- Support for dual repos and sidecars
+- Comments & MD updates
+- Toolchain fixes for each ecosystem
+- release v1.2.8
+
+## [1.2.8](https://github.com/rosetta-dmz/dmz/releases/tag/v1.2.8) - 2026-11-04
+
+### Added
+
+- default toolchain packaging and no-toolchain flag added
+
+### Fixed
+
+- *(cli)* correct Windows AF_UNIX socket path limit and test guard
+
+### Other
+
+- CI, Lib, and CLI sidecar test fixes
+- Merge branch 'main' into dual-repo-and-sidecar-support-v1
+- Support for dual repos and sidecars
+- Comments & MD updates
+- release v1.2.8
+
+## [1.2.8](https://github.com/rosetta-dmz/dmz/releases/tag/dmz-supervisor-v1.2.8) - 2026-11-04
+
+### Fixed
+
+- *(ipc)* handle Windows named pipe kernel lifecycle and test guards
+
+### Other
+
+- Merge branch 'main' into dual-repo-and-sidecar-support-v1
+- Support for dual repos and sidecars
+- Comments & MD updates
+- release v1.2.8
+
+## [1.2.8](https://github.com/rosetta-dmz/dmz/releases/tag/dmz-sandbox-v1.2.8) - 2026-11-04
+
+### Other
+
+- Merge branch 'main' into dual-repo-and-sidecar-support-v1
+- Support for dual repos and sidecars
+- Comments & MD updates
+- release v1.2.8
+
+## [1.2.8](https://github.com/rosetta-dmz/dmz/releases/tag/dmz-core-v1.2.8) - 2026-11-04
+
+### Added
+
+- *(airgap)* package external sidecars and normalize dual-repo workspace manifests
+- enhance toolchain discovery for companion libraries and internal drivers across ecosystems
+- bundle Apple SDK sysroot for hermetic C compilation on macOS
+
+### Fixed
+
+- *(ipc)* handle Windows named pipe kernel lifecycle and test guards
+- *(cli)* correct Windows AF_UNIX socket path limit and test guard
+- *(test)* resolve unclosed delimiter and spliced block in airgap validation test
+
+### Other
+
+- Merge branch 'main' into dual-repo-and-sidecar-support-v1
+- Support for dual repos and sidecars
+- Comments & MD updates
+- Merge branch 'main' into more-toolchain-fixes - resolve binary and toolchain detection conflicts
+- Toolchain fixes
+- Ecosystem toolchain fix
+- Merge branch 'main' into toolchain-discovery-enhancements
+- minor-toolchain-fixes
+- dynamic-lib-update
+- toolchain-link-fix
+- Merge branch 'main' into multi-ecosystem-toolchain-fixes
+- Toolchain fixes for each ecosystem
+- macos-toolchain-fix-update
+- release v1.2.8
+
 ### Refactoring & Architecture
 - **refactor(cli)**: Modularize CLI architecture following SOLID design principles by extracting `command.rs` into 12 dedicated single-responsibility subcommands under `dmz-cli/src/commands/`.
 - **refactor(core)**: Streamline workspace toolchain detection, enforcing strict root manifest dominance.
