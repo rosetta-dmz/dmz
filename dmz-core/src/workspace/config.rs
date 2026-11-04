@@ -189,6 +189,13 @@ pub fn safe_socket_path(workspace: &Path, member_id: &str) -> PathBuf {
 
 /// Automatically removes stale socket files from previous unclean shutdowns.
 pub fn cleanup_stale_socket(socket_path: &Path) -> Result<bool, std::io::Error> {
+    #[cfg(windows)]
+    if socket_path.to_string_lossy().starts_with(r"\\.\pipe\") {
+        // Windows named pipes are in-memory kernel IPC objects managed by NPFS;
+        // they are automatically cleaned up when process handles close, with no disk files.
+        return Ok(false);
+    }
+
     if socket_path.exists() {
         fs::remove_file(socket_path)?;
         Ok(true)

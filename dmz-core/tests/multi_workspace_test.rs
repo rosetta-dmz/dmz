@@ -84,24 +84,42 @@ fn test_safe_socket_path_and_stale_cleanup() {
             sock_str
         );
         assert!(sock_str.contains("dmz_"));
+
+        // Test stale socket cleanup
+        fs::write(&sock_path, b"stale socket mock").unwrap();
+        assert!(sock_path.exists());
+
+        let removed = cleanup_stale_socket(&sock_path).unwrap();
+        assert!(removed);
+        assert!(!sock_path.exists());
+
+        // Clean up when not exists returns false without error
+        let removed_again = cleanup_stale_socket(&sock_path).unwrap();
+        assert!(!removed_again);
     }
 
     #[cfg(windows)]
     {
         assert!(sock_str.starts_with(r"\\.\pipe\dmz_"));
+
+        // Windows named pipes are managed by NPFS in kernel memory and do not create disk files.
+        // Verify cleanup_stale_socket safely returns Ok(false) for named pipes without error.
+        let removed_pipe = cleanup_stale_socket(&sock_path).unwrap();
+        assert!(!removed_pipe);
+
+        // Verify cleanup_stale_socket removes physical stale files on Windows
+        let temp = tempfile::tempdir().unwrap();
+        let mock_sock_file = temp.path().join("dmz_mock.sock");
+        fs::write(&mock_sock_file, b"stale socket mock").unwrap();
+        assert!(mock_sock_file.exists());
+
+        let removed = cleanup_stale_socket(&mock_sock_file).unwrap();
+        assert!(removed);
+        assert!(!mock_sock_file.exists());
+
+        let removed_again = cleanup_stale_socket(&mock_sock_file).unwrap();
+        assert!(!removed_again);
     }
-
-    // Test stale socket cleanup
-    fs::write(&sock_path, b"stale socket mock").unwrap();
-    assert!(sock_path.exists());
-
-    let removed = cleanup_stale_socket(&sock_path).unwrap();
-    assert!(removed);
-    assert!(!sock_path.exists());
-
-    // Clean up when not exists returns false without error
-    let removed_again = cleanup_stale_socket(&sock_path).unwrap();
-    assert!(!removed_again);
 }
 
 #[test]

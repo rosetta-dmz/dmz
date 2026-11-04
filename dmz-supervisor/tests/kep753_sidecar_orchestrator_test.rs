@@ -10,14 +10,25 @@ async fn test_safe_socket_preparation_and_stale_cleanup() {
     let sock_path = SidecarOrchestrator::prepare_safe_socket(&ws_path, "sidecar").unwrap();
     assert!(sock_path.to_string_lossy().contains("dmz_"));
 
-    // Write a mock stale socket file
-    fs::write(&sock_path, b"stale socket").unwrap();
-    assert!(sock_path.exists());
+    #[cfg(unix)]
+    {
+        // Write a mock stale socket file
+        fs::write(&sock_path, b"stale socket").unwrap();
+        assert!(sock_path.exists());
 
-    // Calling prepare_safe_socket again must clean up the stale socket automatically
-    let prepared_again = SidecarOrchestrator::prepare_safe_socket(&ws_path, "sidecar").unwrap();
-    assert_eq!(sock_path, prepared_again);
-    assert!(!prepared_again.exists());
+        // Calling prepare_safe_socket again must clean up the stale socket automatically
+        let prepared_again = SidecarOrchestrator::prepare_safe_socket(&ws_path, "sidecar").unwrap();
+        assert_eq!(sock_path, prepared_again);
+        assert!(!prepared_again.exists());
+    }
+
+    #[cfg(windows)]
+    {
+        assert!(sock_path.to_string_lossy().starts_with(r"\\.\pipe\dmz_"));
+        // Calling prepare_safe_socket again works idempotently on Windows named pipes
+        let prepared_again = SidecarOrchestrator::prepare_safe_socket(&ws_path, "sidecar").unwrap();
+        assert_eq!(sock_path, prepared_again);
+    }
 }
 
 #[tokio::test]

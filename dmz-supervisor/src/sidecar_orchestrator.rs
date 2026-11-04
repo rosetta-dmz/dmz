@@ -69,9 +69,13 @@ impl SidecarOrchestrator {
     pub fn prepare_safe_socket(workspace: &Path, socket_id: &str) -> Result<PathBuf, String> {
         let sock_path = safe_socket_path(workspace, socket_id);
 
-        if let Some(parent) = sock_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create socket directory {:?}: {}", parent, e))?;
+        let is_pipe = sock_path.to_string_lossy().starts_with(r"\\.\pipe\");
+        if !is_pipe {
+            if let Some(parent) = sock_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    format!("Failed to create socket directory {:?}: {}", parent, e)
+                })?;
+            }
         }
 
         let _ = cleanup_stale_socket(&sock_path);
@@ -100,11 +104,40 @@ impl SidecarOrchestrator {
 
             #[cfg(windows)]
             {
-                if socket_path.exists() {
+                let path_str = socket_path.to_string_lossy();
+                if path_str.starts_with(r"\\.\pipe\") {
+                    match std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(socket_path)
+                    {
+                        Ok(_) => {
+                            info!(
+                                path = ?socket_path,
+                                elapsed_ms = start.elapsed().as_millis(),
+                                "Sidecar Named Pipe verified ready"
+                            );
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            if let Some(code) = e.raw_os_error() {
+                                if code == 231 || code == 5 {
+                                    info!(
+                                        path = ?socket_path,
+                                        code = code,
+                                        elapsed_ms = start.elapsed().as_millis(),
+                                        "Sidecar Named Pipe verified ready (active server detected)"
+                                    );
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                } else if socket_path.exists() {
                     info!(
                         path = ?socket_path,
                         elapsed_ms = start.elapsed().as_millis(),
-                        "Sidecar Named Pipe verified ready"
+                        "Sidecar socket file verified ready"
                     );
                     return Ok(());
                 }
