@@ -76,10 +76,11 @@ impl ToolchainDiscoverer for MakeDiscoverer {
                         .to_string();
 
                     let is_non_standalone = is_non_standalone_path(&candidate);
-                    if chosen_make.is_none()
-                        || (!is_non_standalone
-                            && is_non_standalone_path(chosen_make.as_ref().unwrap()))
-                    {
+                    let should_replace = match &chosen_make {
+                        None => true,
+                        Some(prev) => !is_non_standalone && is_non_standalone_path(prev),
+                    };
+                    if should_replace {
                         chosen_make = Some(candidate);
                         chosen_version = Some(version_str);
                         if !is_non_standalone {

@@ -174,12 +174,18 @@ pub(super) fn show(
 
                 let env_vec: Vec<(String, String)> = envs.into_iter().collect();
 
+                let (shell_cmd, shell_arg) = if cfg!(windows) {
+                    ("cmd.exe", "/C")
+                } else {
+                    ("/bin/sh", "-c")
+                };
+
                 if state.sandboxed {
                     let config = SandboxConfig {
                         workspace_path: workspace,
                         closure_path: store,
-                        command: "/bin/sh".to_string(),
-                        args: vec!["-c".to_string(), state.command.clone()],
+                        command: shell_cmd.to_string(),
+                        args: vec![shell_arg.to_string(), state.command.clone()],
                         envs: env_vec,
                         allow_network: state.allow_network,
                         ipc_socket_path: None,
@@ -222,8 +228,8 @@ pub(super) fn show(
                         }
                     }
                 } else {
-                    let mut cmd = std::process::Command::new("/bin/sh");
-                    cmd.args(["-c", &state.command])
+                    let mut cmd = std::process::Command::new(shell_cmd);
+                    cmd.args([shell_arg, &state.command])
                         .current_dir(&workspace)
                         .envs(env_vec);
 
@@ -293,10 +299,11 @@ fn chrono_timestamp() -> String {
 
 fn resolve_dmz_cli_cmd(abs_workspace: &Path, extra_flags: &str) -> String {
     let current_exe = std::env::current_exe().ok();
+    let dmz_bin_name = if cfg!(windows) { "dmz.exe" } else { "dmz" };
     let adjacent_dmz = current_exe
         .as_ref()
         .and_then(|p| p.parent())
-        .map(|p| p.join("dmz"));
+        .map(|p| p.join(dmz_bin_name));
 
     let flags_str = if extra_flags.is_empty() {
         String::new()
@@ -304,7 +311,31 @@ fn resolve_dmz_cli_cmd(abs_workspace: &Path, extra_flags: &str) -> String {
         format!(" {}", extra_flags)
     };
 
-    if let Some(bin) = adjacent_dmz.filter(|p| p.exists()) {
+    if cfg!(windows) {
+        if let Some(bin) = adjacent_dmz.filter(|p| p.exists()) {
+            format!(
+                "cd /d \"{}\" && \"{}\" shell{}",
+                abs_workspace.display(),
+                bin.display(),
+                flags_str
+            )
+        } else if let Ok(path) = which::which("dmz") {
+            format!(
+                "cd /d \"{}\" && \"{}\" shell{}",
+                abs_workspace.display(),
+                path.display(),
+                flags_str
+            )
+        } else if which::which("cargo").is_ok() && std::path::Path::new("Cargo.toml").exists() {
+            format!(
+                "cd /d \"{}\" && cargo run -p dmz-cli -- shell{}",
+                abs_workspace.display(),
+                flags_str
+            )
+        } else {
+            format!("cd /d \"{}\"", abs_workspace.display())
+        }
+    } else if let Some(bin) = adjacent_dmz.filter(|p| p.exists()) {
         format!(
             "cd '{}' && '{}' shell{}",
             abs_workspace.display(),
@@ -362,10 +393,36 @@ fn launch_external_terminal(workspace_path: &str, sandboxed: bool, allow_network
             ""
         };
         let shell_cmd = resolve_dmz_cli_cmd(&abs_workspace, extra_flags);
-        let _ = std::process::Command::new("x-terminal-emulator")
-            .arg("-e")
-            .arg(&shell_cmd)
-            .spawn();
+        let terminals = [
+            std::env::var("TERMINAL").ok(),
+            Some("x-terminal-emulator".to_string()),
+            Some("gnome-terminal".to_string()),
+            Some("konsole".to_string()),
+            Some("alacritty".to_string()),
+            Some("kitty".to_string()),
+            Some("xterm".to_string()),
+        ];
+
+        for term_opt in terminals.into_iter().flatten() {
+            if which::which(&term_opt).is_ok() {
+                let spawned = if term_opt == "gnome-terminal" {
+                    std::process::Command::new(&term_opt)
+                        .arg("--")
+                        .arg("sh")
+                        .arg("-c")
+                        .arg(&shell_cmd)
+                        .spawn()
+                } else {
+                    std::process::Command::new(&term_opt)
+                        .arg("-e")
+                        .arg(&shell_cmd)
+                        .spawn()
+                };
+                if spawned.is_ok() {
+                    break;
+                }
+            }
+        }
     }
 
     #[cfg(target_os = "windows")]

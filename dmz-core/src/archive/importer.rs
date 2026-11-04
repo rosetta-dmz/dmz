@@ -374,6 +374,16 @@ impl AirGapImporter {
                     continue;
                 }
 
+                if rel_path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    return Err(ImportError::ExtractionError(format!(
+                        "Path traversal attempt detected in store archive entry: {:?}",
+                        path
+                    )));
+                }
+
                 let dest_path = effective_store.join(rel_path);
 
                 if let Some(parent) = dest_path.parent() {
@@ -399,6 +409,16 @@ impl AirGapImporter {
                 let rel_path = path.strip_prefix("toolchains").unwrap_or(&path);
                 if rel_path.as_os_str().is_empty() {
                     continue;
+                }
+
+                if rel_path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    return Err(ImportError::ExtractionError(format!(
+                        "Path traversal attempt detected in toolchain archive entry: {:?}",
+                        path
+                    )));
                 }
 
                 let dest_path = effective_workspace.join(".dmz/toolchains").join(rel_path);
@@ -587,7 +607,7 @@ impl AirGapImporter {
     /// - Python: Configures scoped folder settings for virtual environments/wheels without global popups
     pub fn hydrate_offline_dependencies(
         workspace_root: &Path,
-        _store_dir: &Path,
+        store_dir: &Path,
         workspace_project: Option<&crate::workspace::WorkspaceProjectConfig>,
     ) {
         // Collect target directories (either umbrella member folders or workspace root)
@@ -607,17 +627,27 @@ impl AirGapImporter {
             ));
         }
 
+        let effective_target_store = if store_dir.is_relative() {
+            workspace_root.join(store_dir)
+        } else {
+            store_dir.to_path_buf()
+        };
+
         for (dir, _role) in &target_dirs {
             // 1. Cargo vendoring configuration: .cargo/config.toml
             let cargo_toml = dir.join("Cargo.toml");
             let tauri_cargo_toml = dir.join("src-tauri/Cargo.toml");
 
+            let rel_store_root = Self::relative_path_between(dir, &effective_target_store);
+            let rel_store_tauri =
+                Self::relative_path_between(&dir.join("src-tauri"), &effective_target_store);
+
             let cargo_targets = [
-                (cargo_toml.is_file(), dir.join(".cargo"), "../../.dmz/store"),
+                (cargo_toml.is_file(), dir.join(".cargo"), rel_store_root),
                 (
                     tauri_cargo_toml.is_file(),
                     dir.join("src-tauri/.cargo"),
-                    "../../../.dmz/store",
+                    rel_store_tauri,
                 ),
             ];
 
@@ -769,5 +799,134 @@ impl AirGapImporter {
             }
         }
         Ok(())
+    }
+
+    /// Computes the relative POSIX-style path string to navigate from `from` to `to`.
+    pub fn relative_path_between(from: &Path, to: &Path) -> String {
+        let from_canon = fs::canonicalize(from).unwrap_or_else(|_| from.to_path_buf());
+        let to_canon = fs::canonicalize(to).unwrap_or_else(|_| to.to_path_buf());
+        if let Ok(rel) = to_canon.strip_prefix(&from_canon) {
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            return if rel_str.is_empty() {
+                ".".to_string()
+            } else {
+                rel_str
+            };
+        }
+        let mut up_steps = 0;
+        let mut curr = from_canon.as_path();
+        while let Some(parent) = curr.parent() {
+            up_steps += 1;
+            if let Ok(rel) = to_canon.strip_prefix(parent) {
+                let mut prefix = "../".repeat(up_steps);
+                prefix.push_str(&rel.to_string_lossy().replace('\\', "/"));
+                return prefix;
+            }
+            curr = parent;
+        }
+        to.to_string_lossy().replace('\\', "/")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_relative_path_between_arbitrary_depths() {
+        let temp = tempdir().unwrap();
+        let ws = temp.path().join("workspace");
+        let store = ws.join(".dmz/store");
+        let tauri = ws.join("src-tauri");
+        let umbrella_primary = ws.join("workspaces/primary");
+
+        fs::create_dir_all(&store).unwrap();
+        fs::create_dir_all(&tauri).unwrap();
+        fs::create_dir_all(&umbrella_primary).unwrap();
+
+        // 1. Root workspace to store -> ".dmz/store"
+        let rel_root = AirGapImporter::relative_path_between(&ws, &store);
+        assert_eq!(rel_root, ".dmz/store");
+
+        // 2. Tauri to store -> "../.dmz/store"
+        let rel_tauri = AirGapImporter::relative_path_between(&tauri, &store);
+        assert_eq!(rel_tauri, "../.dmz/store");
+
+        // 3. Umbrella member to store -> "../../.dmz/store"
+        let rel_umbrella = AirGapImporter::relative_path_between(&umbrella_primary, &store);
+        assert_eq!(rel_umbrella, "../../.dmz/store");
+    }
+
+    #[test]
+    fn test_archive_importer_rejects_path_traversal() {
+        let temp = tempdir().unwrap();
+        let ws = temp.path().join("ws");
+        let store = temp.path().join("store");
+        let archive_path = temp.path().join("evil.tar.zst");
+
+        fs::create_dir_all(&ws).unwrap();
+        fs::create_dir_all(&store).unwrap();
+
+        // Build evil archive containing store/../../escaped.txt
+        let file = File::create(&archive_path).unwrap();
+        let enc = zstd::stream::Encoder::new(file, 3).unwrap();
+        let mut tar = tar::Builder::new(enc);
+
+        let manifest = crate::archive::AirGapManifest {
+            dmz_version: "1.2.8".to_string(),
+            target_platform: None,
+            vcs: None,
+            delta_base: None,
+            has_git_history: false,
+            toolchains: vec![],
+            workspace_project: None,
+            closure_signature: "mock".to_string(),
+            package_count: 1,
+            created_at_utc: 0,
+            archive_sha256: "mock".to_string(),
+        };
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_size(manifest_bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(
+            &mut header,
+            "airgap_manifest.json",
+            manifest_bytes.as_slice(),
+        )
+        .unwrap();
+
+        let evil_payload = b"evil payload";
+        let mut evil_header = tar::Header::new_gnu();
+        evil_header.set_size(evil_payload.len() as u64);
+        evil_header.set_mode(0o644);
+        let name_bytes = b"store/../../escaped.txt";
+        evil_header.as_mut_bytes()[..name_bytes.len()].copy_from_slice(name_bytes);
+        evil_header.set_cksum();
+        tar.append(&evil_header, &evil_payload[..]).unwrap();
+
+        let enc = tar.into_inner().unwrap();
+        enc.finish().unwrap();
+
+        let config = ImportConfig {
+            archive_path,
+            target_store_dir: store,
+            target_workspace_dir: ws,
+            verify_closure_hash: false,
+        };
+
+        let result = AirGapImporter::import(&config);
+        assert!(
+            result.is_err(),
+            "Import must fail on path traversal attempt"
+        );
+        let err_msg = result.err().unwrap().to_string();
+        assert!(
+            err_msg.contains("Path traversal attempt detected"),
+            "Error message should mention path traversal, got: {}",
+            err_msg
+        );
     }
 }

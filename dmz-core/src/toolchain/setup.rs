@@ -1195,8 +1195,13 @@ echo DMZ bundled toolchains activated.
             });
 
             if is_python {
+                let py_interpreter = if cfg!(windows) {
+                    "${workspaceFolder}/.dmz/toolchains/python/python.exe"
+                } else {
+                    "${workspaceFolder}/.dmz/toolchains/python/bin/python3"
+                };
                 folder_entry["settings"] = serde_json::json!({
-                    "python.defaultInterpreterPath": "${workspaceFolder}/.dmz/toolchains/python/bin/python3",
+                    "python.defaultInterpreterPath": py_interpreter,
                     "python.terminal.activateEnvironment": true
                 });
             }
@@ -1229,18 +1234,60 @@ echo DMZ bundled toolchains activated.
             String::new()
         };
 
+        let toolchains_dir = workspace_root.join(".dmz/toolchains");
+        let mut bin_subpaths: Vec<String> = Vec::new();
+        if let Ok(entries) = fs::read_dir(&toolchains_dir) {
+            for entry in entries.flatten() {
+                let name_os = entry.file_name();
+                if name_os == "applesdk"
+                    && !crate::toolchain::ToolchainEnv::is_genuine_apple_developer_dir(
+                        &entry.path(),
+                    )
+                {
+                    continue;
+                }
+                let bin = entry.path().join("bin");
+                if bin.exists() {
+                    let name = name_os.to_string_lossy().to_string();
+                    bin_subpaths.push(format!("${{workspaceFolder}}/.dmz/toolchains/{}/bin", name));
+                }
+            }
+        }
+
+        let unix_path = if bin_subpaths.is_empty() {
+            format!("{}${{workspaceFolder}}/.dmz/toolchains/node/bin:${{workspaceFolder}}/.dmz/toolchains/rust/bin:${{workspaceFolder}}/.dmz/toolchains/python/bin:${{env:PATH}}", unix_node_prefix)
+        } else {
+            format!(
+                "{}{}:${{env:PATH}}",
+                unix_node_prefix,
+                bin_subpaths.join(":")
+            )
+        };
+
+        let win_path = if bin_subpaths.is_empty() {
+            format!("{}${{workspaceFolder}}\\.dmz\\toolchains\\node\\bin;${{workspaceFolder}}\\.dmz\\toolchains\\rust\\bin;${{workspaceFolder}}\\.dmz\\toolchains\\python;${{env:PATH}}", win_node_prefix)
+        } else {
+            let win_subpaths: Vec<String> =
+                bin_subpaths.iter().map(|p| p.replace('/', "\\")).collect();
+            format!(
+                "{}{};${{env:PATH}}",
+                win_node_prefix,
+                win_subpaths.join(";")
+            )
+        };
+
         let code_workspace_obj = serde_json::json!({
             "folders": folders,
             "settings": {
                 "rust-analyzer.linkedProjects": linked_rust_projects,
                 "terminal.integrated.env.osx": {
-                    "PATH": format!("{}${{workspaceFolder}}/.dmz/toolchains/node/bin:${{workspaceFolder}}/.dmz/toolchains/rust/bin:${{workspaceFolder}}/.dmz/toolchains/python/bin:${{env:PATH}}", unix_node_prefix)
+                    "PATH": unix_path
                 },
                 "terminal.integrated.env.linux": {
-                    "PATH": format!("{}${{workspaceFolder}}/.dmz/toolchains/node/bin:${{workspaceFolder}}/.dmz/toolchains/rust/bin:${{workspaceFolder}}/.dmz/toolchains/python/bin:${{env:PATH}}", unix_node_prefix)
+                    "PATH": unix_path
                 },
                 "terminal.integrated.env.windows": {
-                    "PATH": format!("{}${{workspaceFolder}}\\.dmz\\toolchains\\node\\bin;${{workspaceFolder}}\\.dmz\\toolchains\\rust\\bin;${{workspaceFolder}}\\.dmz\\toolchains\\python;${{env:PATH}}", win_node_prefix)
+                    "PATH": win_path
                 }
             }
         });

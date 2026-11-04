@@ -14,7 +14,7 @@ fn main() {
         Level::INFO
     };
     let subscriber = FmtSubscriber::builder().with_max_level(log_level).finish();
-    tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
+    let _ = tracing::subscriber::set_global_default(subscriber);
 
     // Dispatch parsed CLI command
     commands::dispatch(cli.command);

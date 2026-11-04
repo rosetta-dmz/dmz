@@ -489,6 +489,16 @@ pub fn run_sandbox(
             if let Some(code) = status.code() {
                 exit(code);
             }
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                if let Some(sig) = status.signal() {
+                    exit(128 + sig);
+                }
+            }
+            if !status.success() {
+                exit(1);
+            }
         }
         Err(e) => {
             if diagnose {

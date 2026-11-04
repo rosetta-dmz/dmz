@@ -56,10 +56,11 @@ impl ToolchainDiscoverer for PkgConfigDiscoverer {
                 if output.status.success() {
                     let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     let is_non_standalone = is_non_standalone_path(&candidate);
-                    if chosen_bin.is_none()
-                        || (!is_non_standalone
-                            && is_non_standalone_path(chosen_bin.as_ref().unwrap()))
-                    {
+                    let should_replace = match &chosen_bin {
+                        None => true,
+                        Some(prev) => !is_non_standalone && is_non_standalone_path(prev),
+                    };
+                    if should_replace {
                         chosen_bin = Some(candidate);
                         chosen_version = Some(format!("pkg-config {}", version_str));
                         if !is_non_standalone {

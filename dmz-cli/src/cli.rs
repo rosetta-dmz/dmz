@@ -102,7 +102,7 @@ pub enum Commands {
         sidecar: Option<PathBuf>,
 
         /// Path to dependency closure store (mounted R/O)
-        #[arg(short, long, default_value = "/nix/store")]
+        #[arg(short, long, default_value = ".dmz/store")]
         closure: PathBuf,
 
         /// Permit outbound network connections
@@ -114,7 +114,7 @@ pub enum Commands {
         diagnose: bool,
 
         /// Binary or script command to execute
-        #[arg(default_value = "/bin/sh")]
+        #[arg(default_value = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" })]
         exec_command: String,
 
         /// Command-line arguments passed to the executed process

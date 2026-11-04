@@ -2,7 +2,7 @@ use dmz_sandbox::agent::AgentSandbox;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::process::{Child, Command};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::info;
 
 #[derive(Debug, Clone)]
@@ -18,7 +18,7 @@ pub struct AgentConfig {
 pub struct ActiveAgent {
     pub config: AgentConfig,
     pub sandbox: AgentSandbox,
-    pub child_process: Child,
+    pub child_process: Arc<Mutex<Child>>,
 }
 
 #[derive(Clone, Default)]
@@ -70,10 +70,12 @@ impl AgentRunner {
             .spawn()
             .map_err(|e| format!("Failed to spawn agent process: {}", e))?;
 
+        let child_arc = Arc::new(Mutex::new(child));
+
         let active_agent = ActiveAgent {
             config: config.clone(),
             sandbox,
-            child_process: child,
+            child_process: child_arc.clone(),
         };
 
         {
@@ -86,41 +88,28 @@ impl AgentRunner {
         let agent_id_clone = agent_id.clone();
 
         tokio::spawn(async move {
-            Self::watch_agent(agents_ref, agent_id_clone).await;
+            let mut child_guard = child_arc.lock().await;
+            let _ = child_guard.wait().await;
+            drop(child_guard);
+
+            info!(agent = %agent_id_clone, "Agent process exited; purging volatile scratchpad");
+
+            let mut guard = agents_ref.write().await;
+            if let Some(_removed_agent) = guard.remove(&agent_id_clone) {
+                info!(agent = %agent_id_clone, "AI Agent sandbox memory completely wiped");
+            }
         });
 
         Ok(())
     }
 
-    /// Watcher task that waits for process termination and cleans up the sandbox
-    async fn watch_agent(agents: Arc<RwLock<HashMap<String, ActiveAgent>>>, agent_id: String) {
-        let child_opt: Option<Child> = {
-            let mut guard = agents.write().await;
-            if guard.get_mut(&agent_id).is_some() {
-                None
-            } else {
-                return;
-            }
-        };
-
-        if let Some(mut child) = child_opt {
-            let _ = child.wait().await;
-        }
-
-        info!(agent = %agent_id, "Agent process exited; purging volatile scratchpad");
-
-        let mut guard = agents.write().await;
-        if let Some(_removed_agent) = guard.remove(&agent_id) {
-            info!(agent = %agent_id, "AI Agent sandbox memory completely wiped");
-        }
-    }
-
     /// Terminate an agent explicitly
     pub async fn terminate_agent(&self, agent_id: &str) -> Result<(), String> {
         let mut agents = self.active_agents.write().await;
-        if let Some(mut agent) = agents.remove(agent_id) {
+        if let Some(agent) = agents.remove(agent_id) {
             info!(agent = %agent_id, "Killing active AI agent process tree");
-            let _ = agent.child_process.kill().await;
+            let mut child = agent.child_process.lock().await;
+            let _ = child.kill().await;
             Ok(())
         } else {
             Err(format!("Agent '{}' not found", agent_id))

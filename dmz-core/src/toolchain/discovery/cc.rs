@@ -112,10 +112,11 @@ impl ToolchainDiscoverer for CcDiscoverer {
                         .to_string();
 
                     let is_non_standalone = is_non_standalone_path(&candidate);
-                    if chosen_cc.is_none()
-                        || (!is_non_standalone
-                            && is_non_standalone_path(chosen_cc.as_ref().unwrap()))
-                    {
+                    let should_replace = match &chosen_cc {
+                        None => true,
+                        Some(prev) => !is_non_standalone && is_non_standalone_path(prev),
+                    };
+                    if should_replace {
                         chosen_cc = Some(candidate);
                         chosen_version = Some(version_str);
                         if !is_non_standalone {
