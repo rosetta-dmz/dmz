@@ -232,6 +232,12 @@ pub(super) fn show(
                     return;
                 }
 
+                let multi_workspace =
+                    dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(
+                        &ws_canon,
+                    )
+                    .map(|(cfg, _)| cfg);
+
                 // Export
                 let config = ExportConfig {
                     workspace_path: ws_canon,
@@ -242,15 +248,22 @@ pub(super) fn show(
                     mode: state.export_mode.into(),
                     target_platform: target_opt,
                     with_toolchain: state.with_toolchain,
+                    multi_workspace,
                     ..Default::default()
                 };
 
                 match AirGapExporter::export(&config) {
                     Ok(manifest) => {
+                        let ws_info = if let Some(ref proj) = manifest.workspace_project {
+                            format!(" [Dual-Workspace: {} members]", proj.members.len())
+                        } else {
+                            String::new()
+                        };
                         *status_message = format!(
-                            "Bundle created successfully! Packages: {}, SHA256: {}",
+                            "Bundle created successfully! Packages: {}, SHA256: {}{}",
                             manifest.package_count,
-                            &manifest.archive_sha256[..12.min(manifest.archive_sha256.len())]
+                            &manifest.archive_sha256[..12.min(manifest.archive_sha256.len())],
+                            ws_info
                         );
                     }
                     Err(error) => {
@@ -285,6 +298,12 @@ pub(super) fn show(
                     Some(state.target_platform.trim().to_string())
                 };
 
+                let multi_workspace =
+                    dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(
+                        &ws_canon,
+                    )
+                    .map(|(cfg, _)| cfg);
+
                 let config = ExportConfig {
                     workspace_path: ws_canon,
                     lockfile_path: lockfile,
@@ -294,15 +313,22 @@ pub(super) fn show(
                     mode: state.export_mode.into(),
                     target_platform: target_opt,
                     with_toolchain: state.with_toolchain,
+                    multi_workspace,
                     ..Default::default()
                 };
 
                 match AirGapExporter::export(&config) {
                     Ok(manifest) => {
+                        let ws_info = if let Some(ref proj) = manifest.workspace_project {
+                            format!(" [Dual-Workspace: {} members]", proj.members.len())
+                        } else {
+                            String::new()
+                        };
                         *status_message = format!(
-                            "Exported {} packages to archive (SHA256: {})",
+                            "Exported {} packages to archive (SHA256: {}){}",
                             manifest.package_count,
-                            &manifest.archive_sha256[..12.min(manifest.archive_sha256.len())]
+                            &manifest.archive_sha256[..12.min(manifest.archive_sha256.len())],
+                            ws_info
                         );
                     }
                     Err(error) => {
@@ -416,6 +442,13 @@ pub(super) fn show(
                         result.imported_packages,
                         &result.closure_signature[..12.min(result.closure_signature.len())]
                     );
+                    if let Some(ref proj) = result.workspace_project {
+                        msg.push_str(&format!(
+                            " · Dual-Workspace '{}' ({} members) active",
+                            proj.name,
+                            proj.members.len()
+                        ));
+                    }
 
                     if state.auto_install {
                         let lockfile = result.workspace_path.join("dmz.lock");

@@ -292,7 +292,12 @@ impl AirGapExporter {
                 if pkg_store_path.exists() {
                     let archive_dest = Path::new("store").join(&safe_pkg_name);
                     if pkg_store_path.is_dir() {
-                        Self::append_dir_all(&mut tar_builder, &pkg_store_path, &archive_dest)?;
+                        Self::append_dir_all(
+                            &mut tar_builder,
+                            &pkg_store_path,
+                            &archive_dest,
+                            false,
+                        )?;
                     } else {
                         tar_builder
                             .append_path_with_name(&pkg_store_path, &archive_dest)
@@ -313,9 +318,16 @@ impl AirGapExporter {
             }
         }
 
+        let multi_workspace = config.multi_workspace.clone().or_else(|| {
+            crate::workspace::WorkspaceProjectConfig::discover_workspace_manifest(&workspace_root)
+                .map(|(cfg, _)| cfg)
+        });
+        let mut normalized_project = multi_workspace.clone();
+
         // Append workspace source code (if mode is Unified or CodeOnly)
         if config.mode == ExportMode::Unified || config.mode == ExportMode::CodeOnly {
             info!(path = ?workspace_root, "Appending workspace source code to archive");
+            let has_multi = normalized_project.is_some();
             if workspace_root.is_dir() {
                 if let Some(ref changed_files) = changed_files_filter {
                     info!(
@@ -324,7 +336,69 @@ impl AirGapExporter {
                     );
                     Self::append_filtered_files(&mut tar_builder, &workspace_root, changed_files)?;
                 } else {
-                    Self::append_dir_all(&mut tar_builder, &workspace_root, Path::new(""))?;
+                    Self::append_dir_all(
+                        &mut tar_builder,
+                        &workspace_root,
+                        Path::new(""),
+                        has_multi,
+                    )?;
+                }
+            }
+
+            // Package companion sidecars if configured
+            if let Some(ref mut proj) = normalized_project {
+                let ws_canon =
+                    fs::canonicalize(&workspace_root).unwrap_or_else(|_| workspace_root.clone());
+                for member in &mut proj.members {
+                    if member.role == crate::workspace::MemberRole::Primary {
+                        member.path = PathBuf::from(".");
+                        continue;
+                    }
+
+                    // Resolve member path relative to workspace_root if not absolute
+                    let raw_path = if member.path.is_absolute() {
+                        member.path.clone()
+                    } else {
+                        workspace_root.join(&member.path)
+                    };
+
+                    let member_canon =
+                        fs::canonicalize(&raw_path).unwrap_or_else(|_| raw_path.clone());
+
+                    // Check if member is already inside workspace_root
+                    if member_canon.starts_with(&ws_canon) && member_canon != ws_canon {
+                        // Already within primary tree, preserve relative path inside archive
+                        if let Ok(rel) = member_canon.strip_prefix(&ws_canon) {
+                            member.path = rel.to_path_buf();
+                        }
+                    } else if member_canon.is_dir() {
+                        // Sibling or external directory: package into sidecars/<id>/
+                        let dest_rel = Path::new("sidecars").join(&member.id);
+                        info!(
+                            sidecar_id = %member.id,
+                            src = ?member_canon,
+                            dest = ?dest_rel,
+                            "Packaging companion sidecar source tree into archive"
+                        );
+                        Self::append_dir_all(&mut tar_builder, &member_canon, &dest_rel, false)?;
+                        member.path = PathBuf::from(format!("sidecars/{}", member.id));
+                    }
+                }
+
+                // Embed the normalized dmz-workspace.toml into the archive
+                if let Ok(toml_content) = proj.to_toml_string() {
+                    let mut mhdr = tar::Header::new_gnu();
+                    mhdr.set_size(toml_content.len() as u64);
+                    mhdr.set_mode(0o644);
+                    mhdr.set_cksum();
+                    tar_builder
+                        .append_data(&mut mhdr, "dmz-workspace.toml", toml_content.as_bytes())
+                        .map_err(|e| {
+                            ExportError::ArchiveError(format!(
+                                "Failed to embed normalized dmz-workspace.toml: {}",
+                                e
+                            ))
+                        })?;
                 }
             }
         }
@@ -401,7 +475,7 @@ impl AirGapExporter {
             delta_base,
             has_git_history,
             toolchains: toolchain_manifest_entries,
-            workspace_project: config.multi_workspace.clone(),
+            workspace_project: normalized_project,
             closure_signature: lockfile.closure_signature.clone(),
             package_count: packed_count,
             created_at_utc: std::time::SystemTime::now()
@@ -486,6 +560,7 @@ impl AirGapExporter {
         tar: &mut TarBuilder<W>,
         src_dir: &Path,
         dest_prefix: &Path,
+        skip_manifest: bool,
     ) -> Result<(), ExportError> {
         let entries = fs::read_dir(src_dir).map_err(|e| {
             ExportError::IoError(format!("Directory read failed {:?}: {}", src_dir, e))
@@ -508,10 +583,15 @@ impl AirGapExporter {
                 continue;
             }
 
+            // Skip dmz-workspace.toml if normalized version is being embedded separately
+            if skip_manifest && dest_prefix == Path::new("") && name_str == "dmz-workspace.toml" {
+                continue;
+            }
+
             let rel_dest = dest_prefix.join(name);
 
             if path.is_dir() {
-                Self::append_dir_all(tar, &path, &rel_dest)?;
+                Self::append_dir_all(tar, &path, &rel_dest, false)?;
             } else {
                 tar.append_path_with_name(&path, &rel_dest).map_err(|e| {
                     ExportError::ArchiveError(format!("Failed to add file {:?}: {}", path, e))
