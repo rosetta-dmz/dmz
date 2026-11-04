@@ -638,57 +638,10 @@ impl AirGapImporter {
                 }
             }
 
-            // 2. Node / Tauri CLI shim hydration: node_modules/.bin/tauri
+            // 2. Generic Node / NPM CLI shim hydration: node_modules/.bin/*
             let package_json = dir.join("package.json");
             if package_json.is_file() {
-                let pkg_content = fs::read_to_string(&package_json).unwrap_or_default();
-                let has_tauri =
-                    pkg_content.contains("@tauri-apps/cli") || pkg_content.contains("\"tauri\"");
-                if has_tauri {
-                    let bin_dir = dir.join("node_modules/.bin");
-                    let _ = fs::create_dir_all(&bin_dir);
-
-                    let tauri_bin = bin_dir.join("tauri");
-                    let tauri_cmd = bin_dir.join("tauri.cmd");
-
-                    #[cfg(unix)]
-                    if !tauri_bin.exists() {
-                        use std::os::unix::fs::PermissionsExt;
-                        let sh_shim = r#"#!/bin/sh
-# DMZ Hermetic Tauri CLI shim
-_WS="$(cd "$(dirname "$0")/../.." && pwd)"
-_NODE="${DMZ_NODE:-node}"
-if [ -f "$_WS/.dmz/toolchains/node/bin/node" ]; then
-    _NODE="$_WS/.dmz/toolchains/node/bin/node"
-fi
-if [ -f "$_WS/../.dmz/toolchains/node/bin/node" ]; then
-    _NODE="$_WS/../.dmz/toolchains/node/bin/node"
-fi
-if [ -f "$_WS/node_modules/@tauri-apps/cli/bin/tauri.js" ]; then
-    exec "$_NODE" "$_WS/node_modules/@tauri-apps/cli/bin/tauri.js" "$@"
-fi
-exec cargo tauri "$@" 2>/dev/null || exec npx @tauri-apps/cli "$@"
-"#;
-                        if fs::write(&tauri_bin, sh_shim).is_ok() {
-                            let _ =
-                                fs::set_permissions(&tauri_bin, fs::Permissions::from_mode(0o755));
-                            info!(shim = ?tauri_bin, "Materialized offline Tauri CLI binary shim");
-                        }
-                    }
-
-                    if !tauri_cmd.exists() {
-                        let cmd_shim = r#"@echo off
-setlocal
-set "TAURI_DIR=%~dp0..\.."
-if exist "%TAURI_DIR%\node_modules\@tauri-apps\cli\bin\tauri.js" (
-    node "%TAURI_DIR%\node_modules\@tauri-apps\cli\bin\tauri.js" %*
-) else (
-    cargo tauri %*
-)
-"#;
-                        let _ = fs::write(&tauri_cmd, cmd_shim);
-                    }
-                }
+                crate::install::mappers::NpmMapper::hydrate_workspace_bin_shims(dir);
             }
 
             // 3. Python folder-scoped configuration

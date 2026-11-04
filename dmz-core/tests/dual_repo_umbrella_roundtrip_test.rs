@@ -244,6 +244,20 @@ fn test_dual_repo_umbrella_export_and_import_roundtrip() {
         "Expected tauri CLI shim at {:?}",
         tauri_shim
     );
+    if cfg!(windows) {
+        assert!(
+            target_dir
+                .join("my-tauri-app/node_modules/.bin/tauri.cmd")
+                .is_file(),
+            "Expected tauri.cmd on Windows"
+        );
+        assert!(
+            target_dir
+                .join("my-tauri-app/node_modules/.bin/tauri.ps1")
+                .is_file(),
+            "Expected tauri.ps1 on Windows"
+        );
+    }
 
     // b) Cargo vendoring was configured
     let tauri_cargo_config = target_dir.join("my-tauri-app/src-tauri/.cargo/config.toml");
@@ -394,6 +408,20 @@ fn test_dual_repo_umbrella_export_and_import_reversed_roles_python_primary_node_
         sidecar_tauri_shim.is_file(),
         "Expected Tauri CLI shim in sidecar desktop-ui directory"
     );
+    if cfg!(windows) {
+        assert!(
+            target_dir
+                .join("desktop-ui/node_modules/.bin/tauri.cmd")
+                .is_file(),
+            "Expected tauri.cmd on Windows"
+        );
+        assert!(
+            target_dir
+                .join("desktop-ui/node_modules/.bin/tauri.ps1")
+                .is_file(),
+            "Expected tauri.ps1 on Windows"
+        );
+    }
 
     // c) Cargo vendoring configured in sidecar Tauri crate
     let sidecar_cargo_conf = target_dir.join("desktop-ui/src-tauri/.cargo/config.toml");
