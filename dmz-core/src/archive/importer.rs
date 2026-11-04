@@ -530,6 +530,24 @@ impl AirGapImporter {
             }
         }
 
+        // Automatically discover workspace project manifest if not already populated from airgap_manifest.json
+        if workspace_project.is_none() {
+            if let Some((discovered, _)) =
+                crate::workspace::WorkspaceProjectConfig::discover_workspace_manifest(
+                    effective_workspace,
+                )
+            {
+                workspace_project = Some(discovered);
+            }
+        }
+
+        // Hydrate offline dependencies: Tauri/npm CLI shims, Cargo vendored sources, and scoped Python settings
+        Self::hydrate_offline_dependencies(
+            effective_workspace,
+            effective_store,
+            workspace_project.as_ref(),
+        );
+
         // Run post-import ecosystem validation using the registry
         let registry = EcosystemRegistry::new();
         match registry.process_workspace(effective_workspace) {
@@ -561,6 +579,110 @@ impl AirGapImporter {
             workspace_project,
             vcs: vcs_provenance,
         })
+    }
+
+    /// Automatically hydrates offline developer tooling and configuration:
+    /// - Node/Tauri: Ensures `node_modules/.bin/tauri` CLI shim exists for immediate invocations
+    /// - Cargo: Configures `.cargo/config.toml` vendored source replacement for offline builds
+    /// - Python: Configures scoped folder settings for virtual environments/wheels without global popups
+    pub fn hydrate_offline_dependencies(
+        workspace_root: &Path,
+        _store_dir: &Path,
+        workspace_project: Option<&crate::workspace::WorkspaceProjectConfig>,
+    ) {
+        // Collect target directories (either umbrella member folders or workspace root)
+        let mut target_dirs: Vec<(PathBuf, crate::workspace::MemberRole)> = Vec::new();
+        if let Some(wp) = workspace_project {
+            for member in &wp.members {
+                let member_path = workspace_root.join(&member.path);
+                if member_path.is_dir() {
+                    target_dirs.push((member_path, member.role));
+                }
+            }
+        }
+        if target_dirs.is_empty() {
+            target_dirs.push((
+                workspace_root.to_path_buf(),
+                crate::workspace::MemberRole::Primary,
+            ));
+        }
+
+        for (dir, _role) in &target_dirs {
+            // 1. Cargo vendoring configuration: .cargo/config.toml
+            let cargo_toml = dir.join("Cargo.toml");
+            let tauri_cargo_toml = dir.join("src-tauri/Cargo.toml");
+
+            let cargo_targets = [
+                (cargo_toml.is_file(), dir.join(".cargo"), "../../.dmz/store"),
+                (
+                    tauri_cargo_toml.is_file(),
+                    dir.join("src-tauri/.cargo"),
+                    "../../../.dmz/store",
+                ),
+            ];
+
+            for (exists, cargo_dir, rel_store) in cargo_targets {
+                if exists && fs::create_dir_all(&cargo_dir).is_ok() {
+                    let config_path = cargo_dir.join("config.toml");
+                    if !config_path.exists() {
+                        let cargo_config_content = format!(
+                            "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"{}\"\n",
+                            rel_store
+                        );
+                        let _ = fs::write(&config_path, cargo_config_content);
+                        info!(
+                            config = ?config_path,
+                            "Configured offline Cargo vendoring source replacement"
+                        );
+                    }
+                }
+            }
+
+            // 2. Generic Node / NPM CLI shim hydration: node_modules/.bin/*
+            let package_json = dir.join("package.json");
+            if package_json.is_file() {
+                crate::install::mappers::NpmMapper::hydrate_workspace_bin_shims(dir);
+            }
+
+            // 3. Python folder-scoped configuration
+            let has_python =
+                dir.join("requirements.txt").is_file() || dir.join("pyproject.toml").is_file();
+            let is_umbrella =
+                workspace_project.is_some() || workspace_root.join("dmz-workspace.toml").exists();
+            if has_python && is_umbrella {
+                let vscode_dir = dir.join(".vscode");
+                let _ = fs::create_dir_all(&vscode_dir);
+                let settings_file = vscode_dir.join("settings.json");
+                if !settings_file.exists() {
+                    let mut settings_map = serde_json::Map::new();
+                    let bundled_py = workspace_root.join(".dmz/toolchains/python");
+                    if bundled_py.exists() {
+                        let py_bin = if cfg!(windows) {
+                            "${workspaceFolder}/../.dmz/toolchains/python/python.exe"
+                        } else {
+                            "${workspaceFolder}/../.dmz/toolchains/python/bin/python3"
+                        };
+                        settings_map.insert(
+                            "python.defaultInterpreterPath".into(),
+                            serde_json::Value::String(py_bin.into()),
+                        );
+                    }
+                    settings_map.insert(
+                        "python.terminal.activateEnvironment".into(),
+                        serde_json::Value::Bool(true),
+                    );
+                    if let Ok(content) =
+                        serde_json::to_string_pretty(&serde_json::Value::Object(settings_map))
+                    {
+                        let _ = fs::write(&settings_file, content);
+                        info!(
+                            settings = ?settings_file,
+                            "Wrote scoped Python IDE settings for workspace member"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn create_backup_snapshot(workspace: &Path) -> Result<Option<PathBuf>, ImportError> {

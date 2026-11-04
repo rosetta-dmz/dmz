@@ -1059,7 +1059,9 @@ echo DMZ bundled toolchains activated.
             }
 
             // Configure Python if Python is bundled with a verified interpreter binary
-            if toolchains_dir.join("python").exists() {
+            // Only set at the root level if the root workspace is NOT an umbrella container
+            let is_umbrella = workspace_root.join("dmz-workspace.toml").exists();
+            if !is_umbrella && toolchains_dir.join("python").exists() {
                 let py_dir = toolchains_dir.join("python");
                 let has_py_bin = py_dir.join("bin/python3").exists()
                     || py_dir.join("bin/python").exists()
@@ -1116,6 +1118,138 @@ echo DMZ bundled toolchains activated.
 
         fs::write(&settings_path, json_string)
             .map_err(|e| format!("Failed to write .vscode/settings.json: {}", e))?;
+
+        // If this workspace is an umbrella multi-workspace, generate the .code-workspace file
+        if workspace_root.join("dmz-workspace.toml").exists() {
+            let _ = Self::generate_multi_root_workspace(workspace_root);
+        }
+
+        Ok(())
+    }
+
+    /// Generates or updates `<project>.code-workspace` for multi-root projects
+    pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), String> {
+        let manifest_path = workspace_root.join("dmz-workspace.toml");
+        if !manifest_path.exists() {
+            return Ok(());
+        }
+
+        let ws_project =
+            match crate::workspace::WorkspaceProjectConfig::load_from_file(&manifest_path) {
+                Ok(p) => p,
+                Err(_) => return Ok(()),
+            };
+
+        let mut folders = Vec::new();
+        let mut linked_rust_projects = Vec::new();
+        let mut node_bin_unix = Vec::new();
+        let mut node_bin_win = Vec::new();
+
+        for m in &ws_project.members {
+            let m_path_str = m.path.to_string_lossy().to_string();
+            let member_full_path = workspace_root.join(&m.path);
+
+            let is_python = m.ecosystem.as_deref() == Some("python")
+                || m.ecosystem.as_deref() == Some("pypi")
+                || member_full_path.join("requirements.txt").exists()
+                || member_full_path.join("pyproject.toml").exists();
+
+            let is_rust = m.ecosystem.as_deref() == Some("rust")
+                || m.ecosystem.as_deref() == Some("cargo")
+                || member_full_path.join("Cargo.toml").exists()
+                || member_full_path.join("src-tauri/Cargo.toml").exists();
+
+            let is_node = m.ecosystem.as_deref() == Some("node")
+                || m.ecosystem.as_deref() == Some("npm")
+                || member_full_path.join("package.json").exists();
+
+            if is_rust {
+                if member_full_path.join("Cargo.toml").exists() {
+                    linked_rust_projects.push(format!("{}/Cargo.toml", m_path_str));
+                }
+                if member_full_path.join("src-tauri/Cargo.toml").exists() {
+                    linked_rust_projects.push(format!("{}/src-tauri/Cargo.toml", m_path_str));
+                }
+            }
+
+            if is_node {
+                node_bin_unix.push(format!(
+                    "${{workspaceFolder}}/{}/node_modules/.bin",
+                    m_path_str
+                ));
+                node_bin_win.push(format!(
+                    "${{workspaceFolder}}\\{}\\node_modules\\.bin",
+                    m_path_str
+                ));
+            }
+
+            let label = if m.role == crate::workspace::MemberRole::Primary {
+                format!("Primary: {}", m_path_str)
+            } else {
+                format!("Sidecar: {}", m.id)
+            };
+
+            let mut folder_entry = serde_json::json!({
+                "name": label,
+                "path": m_path_str
+            });
+
+            if is_python {
+                folder_entry["settings"] = serde_json::json!({
+                    "python.defaultInterpreterPath": "${workspaceFolder}/.dmz/toolchains/python/bin/python3",
+                    "python.terminal.activateEnvironment": true
+                });
+            }
+
+            folders.push(folder_entry);
+        }
+
+        if workspace_root.join("documentation").is_dir() {
+            folders.push(serde_json::json!({
+                "name": "Documentation",
+                "path": "documentation"
+            }));
+        }
+
+        let project_name = if !ws_project.name.is_empty() {
+            &ws_project.name
+        } else {
+            "workspace"
+        };
+
+        let unix_node_prefix = if !node_bin_unix.is_empty() {
+            format!("{}:", node_bin_unix.join(":"))
+        } else {
+            String::new()
+        };
+
+        let win_node_prefix = if !node_bin_win.is_empty() {
+            format!("{};", node_bin_win.join(";"))
+        } else {
+            String::new()
+        };
+
+        let code_workspace_obj = serde_json::json!({
+            "folders": folders,
+            "settings": {
+                "rust-analyzer.linkedProjects": linked_rust_projects,
+                "terminal.integrated.env.osx": {
+                    "PATH": format!("{}${{workspaceFolder}}/.dmz/toolchains/node/bin:${{workspaceFolder}}/.dmz/toolchains/rust/bin:${{workspaceFolder}}/.dmz/toolchains/python/bin:${{env:PATH}}", unix_node_prefix)
+                },
+                "terminal.integrated.env.linux": {
+                    "PATH": format!("{}${{workspaceFolder}}/.dmz/toolchains/node/bin:${{workspaceFolder}}/.dmz/toolchains/rust/bin:${{workspaceFolder}}/.dmz/toolchains/python/bin:${{env:PATH}}", unix_node_prefix)
+                },
+                "terminal.integrated.env.windows": {
+                    "PATH": format!("{}${{workspaceFolder}}\\.dmz\\toolchains\\node\\bin;${{workspaceFolder}}\\.dmz\\toolchains\\rust\\bin;${{workspaceFolder}}\\.dmz\\toolchains\\python;${{env:PATH}}", win_node_prefix)
+                }
+            }
+        });
+
+        let cw_path = workspace_root.join(format!("{}.code-workspace", project_name));
+        let content = serde_json::to_string_pretty(&code_workspace_obj)
+            .map_err(|e| format!("Failed to serialize code-workspace: {}", e))?;
+        fs::write(&cw_path, content)
+            .map_err(|e| format!("Failed to write {}: {}", cw_path.display(), e))?;
 
         Ok(())
     }

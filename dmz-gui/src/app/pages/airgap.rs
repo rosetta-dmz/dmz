@@ -450,6 +450,16 @@ pub(super) fn show(
                         ));
                     }
 
+                    if let Some(ref wp) = result.workspace_project {
+                        msg.push_str(&format!(
+                            " · Restored dual-workspace umbrella ({} members: primary='{}'). Open via .code-workspace",
+                            wp.members.len(),
+                            wp.primary_member()
+                                .map(|m| m.path.display().to_string())
+                                .unwrap_or_else(|| "primary".to_string())
+                        ));
+                    }
+
                     if state.auto_install {
                         let lockfile = result.workspace_path.join("dmz.lock");
                         let install_config = InstallConfig {
