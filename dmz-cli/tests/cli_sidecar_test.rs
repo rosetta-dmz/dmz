@@ -147,4 +147,10 @@ fn test_cli_safe_socket_path_length_guard() {
     // Artificial dangerous path should trigger advisory
     let dangerous_path = PathBuf::from(format!("/var/run/dmz/{}.sock", "x".repeat(110)));
     assert!(check_socket_path_length(&dangerous_path).is_some());
+
+    #[cfg(windows)]
+    {
+        let dangerous_pipe = PathBuf::from(format!(r"\\.\pipe\dmz_{}", "x".repeat(260)));
+        assert!(check_socket_path_length(&dangerous_pipe).is_some());
+    }
 }

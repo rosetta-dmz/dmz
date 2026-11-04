@@ -17,6 +17,24 @@ pub fn check_socket_path_length(path: &Path) -> Option<String> {
     let path_str = path.to_string_lossy();
     let len = path_str.len();
 
+    #[cfg(windows)]
+    if path_str.starts_with(r"\\.\pipe\") {
+        let max_pipe_len = 256;
+        if len >= max_pipe_len {
+            return Some(format!(
+                "Named pipe path '{}' length ({} bytes) exceeds Windows limit of {} bytes! Connection may fail.",
+                path_str, len, max_pipe_len
+            ));
+        } else if len >= max_pipe_len.saturating_sub(10) {
+            return Some(format!(
+                "Named pipe path '{}' length ({} bytes) is dangerously close to Windows limit of {} bytes.",
+                path_str, len, max_pipe_len
+            ));
+        } else {
+            return None;
+        }
+    }
+
     #[cfg(any(
         target_os = "macos",
         target_os = "freebsd",
@@ -24,10 +42,13 @@ pub fn check_socket_path_length(path: &Path) -> Option<String> {
         target_os = "netbsd"
     ))]
     let max_len = 104;
-    #[cfg(target_os = "linux")]
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    )))]
     let max_len = 108;
-    #[cfg(not(unix))]
-    let max_len = 260;
 
     if len >= max_len {
         Some(format!(
