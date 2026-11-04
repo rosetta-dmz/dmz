@@ -146,8 +146,12 @@ mod tests {
         if let Ok(Some(tc)) = discoverer.discover() {
             assert_eq!(tc.ecosystem, ToolchainEcosystem::PkgConfig);
             // If ~/.local/bin/pkgconf is installed, it should be selected and not be non-standalone
-            if std::path::Path::new("/Users/rd/.local/bin/pkgconf").exists() {
-                assert!(!is_non_standalone_path(&tc.root_dir));
+            if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+            {
+                let local_pkgconf = std::path::PathBuf::from(home).join(".local/bin/pkgconf");
+                if local_pkgconf.exists() {
+                    assert!(!is_non_standalone_path(&tc.root_dir));
+                }
             }
         }
     }
