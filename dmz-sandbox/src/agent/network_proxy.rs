@@ -9,7 +9,7 @@ pub struct DomainWhitelist {
 }
 
 impl DomainWhitelist {
-    /// Create network rule engine from a list of domain strings
+    /// Create network rule engine from list of domain strings
     pub fn new(rules: Vec<String>) -> Self {
         let mut allowed_domains = HashSet::new();
         let mut allowed_wildcards = Vec::new();
@@ -59,7 +59,7 @@ impl DomainWhitelist {
         false
     }
 
-    /// Intercepts network calls and returns an error if host is blocked
+    /// Intercepts network calls and returns an error when host is blocked
     pub fn authorize_request(&self, target_host: &str) -> Result<(), String> {
         if self.is_allowed(target_host) {
             info!(host = %target_host, "Outbound network request ALLOWED by agent proxy");

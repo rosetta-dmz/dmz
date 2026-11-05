@@ -1,6 +1,6 @@
 # Dual-Repo & Sidecar Workflow in DMZ
 
-> **Guide for orchestrating, sandboxing, and air-gap packaging companion services (Python, Rust, Node, Go) alongside primary applications.**
+> **Guide for orchestrating, sandboxing, and air-gap packaging companion services (Python, Rust, Node, Go, etc.) alongside primary applications.**
 
 ---
 
@@ -157,25 +157,6 @@ Upon import, DMZ automatically hydrates:
 
 For developers using the visual interface (`dmz-gui`), the dual-repo and sidecar workflow spans three dedicated pages: **Resolver**, **Air-Gap Manager**, and **Supervisor IPC**.
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│  Workspace Mode: [ Single Workspace ]  (•) Dual Repo / Sidecar         │
-│                                                                        │
-│  Primary Workspace Directory:                                          │
-│  [ /Users/.../desktop-ui                        ] [ Browse... ]        │
-│  Ecosystem: Node.js (package.json)                                     │
-│                                                                        │
-│  Sidecar Workspace:                                                    │
-│  [ /Users/.../ai-engine                         ] [ Browse... ]        │
-│  Ecosystem: Python (pyproject.toml)                                    │
-│                                                                        │
-│  Sidecar ID:   [ sidecar            ]   Role: [ sidecar              ] │
-│                                                                        │
-│  [ Save as dmz-workspace.toml ]                                        │
-│  [ Scan & Resolve             ]                                        │
-└────────────────────────────────────────────────────────────────────────┘
-```
-
 ### Step 1: Configure Dual Repositories in Dependency Resolver
 1. Open the **Dependency Resolver** page.
 2. In **Workspace Mode**, toggle to **Dual Repo / Sidecar**.
@@ -211,9 +192,9 @@ For developers using the visual interface (`dmz-gui`), the dual-repo and sidecar
    * DMZ automatically fetches dependencies for **both** primary and sidecar workspaces into `.dmz/store`.
    * Packages the unified closure, compiler toolchains, source trees, and manifests into a single self-contained `.tar.zst` file alongside a cryptographic `.sha256` integrity sidecar.
 
-> [!TIP]
-> **Source Tree Colocation Note:**
-> When wanting both source trees bundled physically inside the same archive, placing them under a shared project parent directory or subfolder makes the export completely self-contained. For sibling repositories (e.g., `../sidecar`), all sidecar dependencies, toolchain sysroots, and IPC contracts are fully preserved in the archive via the unified `dmz.lock`.
+
+> **Source Tree Colocation:**
+> When you want both source trees bundled physically inside the same archive, placing them under a shared project parent directory or subfolder makes the export completely self-contained. For sibling repositories (e.g., `../sidecar`), all sidecar dependencies, toolchain sysroots, and IPC contracts are fully preserved in the archive via the unified `dmz.lock`.
 
 ### Step 4: Supervised Execution & Telemetry in Supervisor IPC
 1. Navigate to the **Supervisor IPC** page.
@@ -242,7 +223,7 @@ When arriving on a target machine with zero network access:
 
 ## Security & Best Practices
 
-| Recommendation | Rationale |
+| Recommendation | Reason |
 | :--- | :--- |
 | **Prefer Static Sidecar Binaries (`musl`)** | When building sidecars in Rust, Go, or C++, compile against `musl` (`x86_64-unknown-linux-musl`) to eliminate host dynamic library (`glibc`) mismatches on air-gapped target machines. |
 | **Never Use TCP Loopback for Sidecars** | Loopback networking (`127.0.0.1`) requires opening sandbox network rules and risks port collisions. Always use Unix domain sockets or Windows Named Pipes. |

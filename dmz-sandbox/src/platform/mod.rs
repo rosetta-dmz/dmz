@@ -127,7 +127,7 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
         }
     }
 
-    // Workspace node_modules/.bin in PATH if it exists
+    // Workspace node_modules/.bin in PATH when it exists
     let node_bin = resolved_config
         .workspace_path
         .join("node_modules")
@@ -146,7 +146,7 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
         );
     }
 
-    // Set PYTHONPATH and VIRTUAL_ENV if python environments exist
+    // Set PYTHONPATH and VIRTUAL_ENV when python environments exist
     let venv = resolved_config.workspace_path.join(".venv");
     let dmz_venv = resolved_config.workspace_path.join(".dmz").join("venv");
     if venv.exists() {

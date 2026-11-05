@@ -456,7 +456,7 @@ pub enum AirgapCommands {
         )]
         workspace: PathBuf,
 
-        /// Skip closure hash verification (NOT recommended)
+        /// Skip closure hash verification (not recommended)
         #[arg(long, default_value_t = false)]
         skip_verify: bool,
 
@@ -468,7 +468,7 @@ pub enum AirgapCommands {
         #[arg(long, default_value_t = false)]
         skip_ecosystem_verify: bool,
 
-        /// Run verification without sandbox isolation (NOT recommended)
+        /// Run verification without sandbox isolation (not recommended)
         #[arg(long, default_value_t = false)]
         no_sandbox: bool,
     },

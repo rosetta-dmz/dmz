@@ -1,5 +1,7 @@
 # Code Grading Rubric
 
+Please adhere to this grading rubric when adding new features, bug fixes, feature enhancements, and/or documentation additions.
+
 1. ## _Code Quality (30 Points)_
 
 - Readability (5 Points)

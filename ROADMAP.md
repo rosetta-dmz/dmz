@@ -60,6 +60,7 @@ DMZ is a zero-dependency, daemonless workspace packaging engine and environment 
 * **Linux Namespace Confinement Hardening:**
   * Direct unprivileged Linux User Namespaces (`unshare` with `CLONE_NEWUSER`, `CLONE_NEWNS`, `CLONE_NEWNET`, `CLONE_NEWPID`).
   * Robust fallback handling for locked-down kernel environments (e.g., restricted `kernel.unprivileged_userns_clone`).
+* **Organize Test Suite** 
 
 ### Milestone v2.0 (Long-Term Vision)
 

@@ -2,14 +2,14 @@
 
 ## Contributing to DMZ
 
-Thank you for your interest in contributing to the DMZ platform! We strive to maintain a secure, deterministic, and high-performance daemonless workspace ecosystem.
+Thank you for your interest in contributing to the DMZ platform. We strive to maintain a secure, deterministic, and high-performance daemonless workspace ecosystem.
 
 ---
 
 ## Development Workflow & Standards
 
 1. **Zero Host Dependencies:** All core functionality must remain self-contained. Do not introduce requirements for external toolchains unless strictly isolated via cargo features.
-2. **Code Quality:** All code must compile cleanly without warnings under stable Rust.
+2. **Code Quality:** All code must compile cleanly without warnings under stable Rust. Ensure to manually run `cargo clippy` and `cargo fmt` before every commit. 
 3. **Testing:** Every new feature or bug fix must include corresponding unit or integration tests.
 
 ---
@@ -22,7 +22,7 @@ The workspace is organized into five primary crates:
 
 * `dmz-core:` Core resolution engines, lockfiles (dmz.lock), embedded libgit2 provider, and cryptographic air-gap packaging/verification pipeline.
 
-* `dmz-gui:` egui-based control center for real-time telemetry and dependency version pinning.
+* `dmz-gui:` egui-based control center for button workflows, real-time telemetry, and dependency version pinning.
 
 * `dmz-sandbox:` Secure process isolation and sandbox execution engines.
 

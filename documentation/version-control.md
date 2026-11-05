@@ -1,6 +1,6 @@
 # Version Control & Air-Gap Provenance Guide
 
-DMZ embeds native `libgit2` to provide autonomous repository version control, cryptographic provenance tracking, deterministic Git bundle export/import, and incremental delta packaging without requiring a host Git installation.
+DMZ embeds native `libgit2` to provide autonomous repository version control, cryptographic provenance tracking, deterministic Git bundle export/import, and incremental delta packaging without requiring a host Git installation. When you already have Git installed and available, you can disregard this document.
 
 ---
 

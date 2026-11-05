@@ -1,6 +1,6 @@
-# DMZ Hermetic Toolchain: Capabilities & Clear Constraints
+# DMZ Hermetic Toolchain: Current Capabilities & Constraints
 
-## Capabilities (What Is Fully Supported)
+## Current Capabilities
 
 * **14 Autonomously Discovered Toolchain Ecosystems:**
   - **Languages & Runtimes:** Rust, Go, Python, Node.js, Ruby, PHP.
@@ -31,7 +31,7 @@
 
 ---
 
-## Boundaries & Constraints (What Is Not Supported)
+## Boundaries & Constraints (Unsupported)
 
 ### Constraint 1: Host OS & CPU Architecture Homogeneity
 * **Constraint:** Bundled host toolchain binaries (`clang`, `cmake`, `ninja`, `rustc`, `node`, etc.) execute natively on the target host CPU architecture and operating system kernel.

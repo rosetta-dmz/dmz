@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 #[test]
 fn test_cli_sidecar_flag_parsing() {
-    // 1. Resolve with --sidecar
+    // Resolve with --sidecar
     let args = vec![
         "dmz",
         "resolve",
@@ -32,7 +32,7 @@ fn test_cli_sidecar_flag_parsing() {
         _ => panic!("Expected Commands::Resolve"),
     }
 
-    // 2. Bundle with --sidecar
+    // Bundle with --sidecar
     let args = vec![
         "dmz",
         "bundle",
@@ -58,7 +58,7 @@ fn test_cli_sidecar_flag_parsing() {
         _ => panic!("Expected Commands::Bundle"),
     }
 
-    // 3. Shell with --sidecar
+    // Shell with --sidecar
     let args = vec![
         "dmz",
         "shell",
@@ -83,7 +83,7 @@ fn test_cli_sidecar_flag_parsing() {
         _ => panic!("Expected Commands::Shell"),
     }
 
-    // 4. Sandbox with --sidecar
+    // Sandbox with --sidecar
     let args = vec![
         "dmz",
         "sandbox",
