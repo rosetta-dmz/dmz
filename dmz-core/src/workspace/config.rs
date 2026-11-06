@@ -65,9 +65,9 @@ impl WorkspaceMember {
     /// (the Runfiles pattern: decouples from host sibling paths like `../sidecar`).
     pub fn canonical_virtual_path(&self) -> PathBuf {
         match self.role {
-            MemberRole::Primary => PathBuf::from("workspaces").join("primary"),
+            MemberRole::Primary => PathBuf::from("workspaces/primary"),
             MemberRole::Sidecar | MemberRole::Service => {
-                PathBuf::from("workspaces").join("sidecars").join(&self.id)
+                PathBuf::from(format!("workspaces/sidecars/{}", self.id))
             }
         }
     }

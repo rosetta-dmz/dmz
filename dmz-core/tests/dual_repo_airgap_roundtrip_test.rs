@@ -110,7 +110,7 @@ fn test_dual_repo_airgap_export_and_import_roundtrip() {
     for entry_res in tar_archive.entries().expect("Failed to read tar entries") {
         let mut entry = entry_res.expect("Tar entry error");
         let path = entry.path().expect("Entry path error").to_path_buf();
-        let path_str = path.to_string_lossy().to_string();
+        let path_str = path.to_string_lossy().replace('\\', "/");
         entry_names.push(path_str.clone());
 
         if path_str == "dmz-workspace.toml" {
@@ -147,7 +147,7 @@ fn test_dual_repo_airgap_export_and_import_roundtrip() {
         .find_member("ai-engine")
         .expect("ai-engine member");
     assert_eq!(
-        sidecar_member.path.to_str().unwrap(),
+        sidecar_member.path.to_str().unwrap().replace('\\', "/"),
         "workspaces/ai-engine"
     );
 
@@ -155,7 +155,7 @@ fn test_dual_repo_airgap_export_and_import_roundtrip() {
         .find_member("primary")
         .expect("primary member");
     assert_eq!(
-        primary_member.path.to_str().unwrap(),
+        primary_member.path.to_str().unwrap().replace('\\', "/"),
         "workspaces/primary_app"
     );
 

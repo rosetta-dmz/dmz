@@ -132,7 +132,7 @@ fn test_dual_repo_umbrella_export_and_import_roundtrip() {
     for entry_res in tar_archive.entries().expect("Failed to read tar entries") {
         let mut entry = entry_res.expect("Tar entry error");
         let path = entry.path().expect("Entry path error").to_path_buf();
-        let path_str = path.to_string_lossy().to_string();
+        let path_str = path.to_string_lossy().replace('\\', "/");
         entry_names.push(path_str.clone());
 
         if path_str == "dmz-workspace.toml" {

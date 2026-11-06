@@ -411,7 +411,7 @@ impl AirGapExporter {
                 }
 
                 // 1. Package Primary Repository into its dedicated workspaces/<primary_folder> namespace
-                let primary_dest = Path::new("workspaces").join(&primary_folder_name);
+                let primary_dest = PathBuf::from(format!("workspaces/{}", primary_folder_name));
                 info!(
                     folder = %primary_dest.display(),
                     path = ?workspace_root,
@@ -429,7 +429,8 @@ impl AirGapExporter {
                         if let Some(host_path) = member_host_paths.get(&member.id) {
                             if let Some(folder_name) = member_folder_names.get(&member.id) {
                                 if host_path.is_dir() {
-                                    let sidecar_dest = Path::new("workspaces").join(folder_name);
+                                    let sidecar_dest =
+                                        PathBuf::from(format!("workspaces/{}", folder_name));
                                     info!(
                                         member = %member.id,
                                         src = ?host_path,
@@ -452,7 +453,7 @@ impl AirGapExporter {
                 let mut normalized_project = ws_project.clone();
                 for m in &mut normalized_project.members {
                     if let Some(folder_name) = member_folder_names.get(&m.id) {
-                        m.path = PathBuf::from("workspaces").join(folder_name);
+                        m.path = PathBuf::from(format!("workspaces/{}", folder_name));
                     }
                 }
                 if let Ok(toml_str) = normalized_project.to_toml_string() {
@@ -474,7 +475,7 @@ impl AirGapExporter {
                 let mut node_bin_win = Vec::new();
 
                 for m in &normalized_project.members {
-                    let folder_path = m.path.to_string_lossy().to_string();
+                    let folder_path = m.path.to_string_lossy().replace('\\', "/");
                     let short_folder_name =
                         m.path.file_name().and_then(|n| n.to_str()).unwrap_or(&m.id);
                     let host_dir = member_host_paths.get(&m.id).unwrap_or(&workspace_root);
@@ -589,7 +590,7 @@ impl AirGapExporter {
                     .map(|m| {
                         format!(
                             "- `{}/`: Sidecar companion service (`{}`)\n",
-                            m.path.display(),
+                            m.path.display().to_string().replace('\\', "/"),
                             m.id
                         )
                     })
@@ -598,7 +599,7 @@ impl AirGapExporter {
 
                 let primary_member_path = normalized_project
                     .primary_member()
-                    .map(|m| m.path.display().to_string())
+                    .map(|m| m.path.display().to_string().replace('\\', "/"))
                     .unwrap_or_else(|| format!("workspaces/{}", primary_folder_name));
 
                 let ipc_env_var = &ws_project.ipc.env_var;
@@ -899,9 +900,11 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
             if path.is_dir() {
                 Self::append_dir_all(tar, &path, &rel_dest, skip_manifest)?;
             } else {
-                tar.append_path_with_name(&path, &rel_dest).map_err(|e| {
-                    ExportError::ArchiveError(format!("Failed to add file {:?}: {}", path, e))
-                })?;
+                let normalized_dest = rel_dest.to_string_lossy().replace('\\', "/");
+                tar.append_path_with_name(&path, &normalized_dest)
+                    .map_err(|e| {
+                        ExportError::ArchiveError(format!("Failed to add file {:?}: {}", path, e))
+                    })?;
             }
         }
 
@@ -934,7 +937,8 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
 
             let full_path = workspace_root.join(rel_path);
             if full_path.is_file() {
-                tar.append_path_with_name(&full_path, rel_path)
+                let normalized_path = rel_path.to_string_lossy().replace('\\', "/");
+                tar.append_path_with_name(&full_path, &normalized_path)
                     .map_err(|e| {
                         ExportError::ArchiveError(format!(
                             "Failed to add delta file {:?}: {}",
