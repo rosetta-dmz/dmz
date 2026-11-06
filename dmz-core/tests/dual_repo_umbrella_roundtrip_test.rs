@@ -14,7 +14,7 @@ fn test_dual_repo_umbrella_export_and_import_roundtrip() {
     let temp = tempdir().expect("Failed to create tempdir");
     let base = temp.path();
 
-    // 1. Setup host layout: Primary Tauri App + External Sibling Python Backend
+    // Setup host layout: Primary Tauri App + External Sibling Python Backend
     let primary_dir = base.join("my-tauri-app");
     fs::create_dir_all(primary_dir.join("src")).unwrap();
     fs::create_dir_all(primary_dir.join("src-tauri/src")).unwrap();
@@ -61,7 +61,7 @@ fn test_dual_repo_umbrella_export_and_import_roundtrip() {
     )
     .unwrap();
 
-    // 2. Multi-workspace manifest pointing to sibling sidecar
+    // Multi-workspace manifest pointing to sibling sidecar
     let manifest = WorkspaceProjectConfig::new(
         "my-desktop-suite",
         vec![
@@ -77,7 +77,7 @@ fn test_dual_repo_umbrella_export_and_import_roundtrip() {
         .save_to_file(&primary_dir.join("dmz-workspace.toml"))
         .expect("Failed to write dmz-workspace.toml");
 
-    // 3. Create dummy locked package and store artifact
+    // Create dummy locked package and store artifact
     let store_dir = primary_dir.join(".dmz/store");
     fs::create_dir_all(&store_dir).unwrap();
 
@@ -99,7 +99,7 @@ fn test_dual_repo_umbrella_export_and_import_roundtrip() {
     let lockfile_path = primary_dir.join("dmz.lock");
     lockfile.save(&lockfile_path).unwrap();
 
-    // 4. Export archive using AirGapExporter
+    // Export archive using AirGapExporter
     let archive_path = primary_dir.join("dist/bundle.tar.zst");
     let export_config = ExportConfig {
         workspace_path: primary_dir.clone(),
@@ -119,7 +119,7 @@ fn test_dual_repo_umbrella_export_and_import_roundtrip() {
     assert!(archive_path.exists());
     assert_eq!(manifest_result.package_count, 1);
 
-    // 5. Inspect archive entries to verify Umbrella Master Structure
+    // Inspect archive entries to verify Umbrella Master Structure
     let file = fs::File::open(&archive_path).expect("Failed to open archive");
     let decoder = ZstdDecoder::new(file).expect("Zstd decode error");
     let mut tar_archive = TarArchive::new(decoder);
@@ -225,7 +225,7 @@ fn test_dual_repo_umbrella_export_and_import_roundtrip() {
     assert_eq!(import_res.imported_packages, 1);
     assert!(import_res.workspace_project.is_some());
 
-    // 7. Verify unpacked file tree and offline hydration in target directory
+    // Verify unpacked file tree and offline hydration in target directory
     assert!(target_dir.join("my-tauri-app/package.json").is_file());
     assert!(target_dir
         .join("my-tauri-app/src-tauri/Cargo.toml")

@@ -1,9 +1,9 @@
 # Changelog
 
-All notable changes to the DMZ Platform are documented here.
+All notable changes to the DMZ Platform are documented here. Actual current status may differ, please refer to official Github release for exact real-time status.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Note:
+- Project format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 

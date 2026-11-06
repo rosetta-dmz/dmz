@@ -21,7 +21,7 @@ fn test_multiecosystem_airgap_roundtrip() -> anyhow::Result<()> {
         "{\"name\": \"test-node\", \"version\": \"1.0.0\"}",
     )?;
 
-    // Create a valid JSON mock lockfile with an empty package map required by the exporter
+    // Create valid JSON mock lockfile with an empty package map required by the exporter
     let lockfile_path = workspace_path.join("dmz.lock");
     let mock_lockfile_json = r#"{
         "version": 1,
@@ -30,7 +30,7 @@ fn test_multiecosystem_airgap_roundtrip() -> anyhow::Result<()> {
     }"#;
     fs::write(&lockfile_path, mock_lockfile_json)?;
 
-    // Create a mock cache directory to simulate pre-fetched dependencies
+    // Create mock cache directory to simulate pre-fetched dependencies
     let cargo_cache = workspace_path.join(".cargo");
     fs::create_dir_all(&cargo_cache)?;
     fs::write(cargo_cache.join("config.toml"), "# mock config")?;

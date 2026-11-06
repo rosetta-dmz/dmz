@@ -65,7 +65,7 @@ impl SidecarOrchestrator {
         self.active_socket.read().await.clone()
     }
 
-    /// Prepares POSIX safe socket path and removes stale dead sockets from previous runs
+    /// Prepare POSIX safe socket path and remove stale dead sockets from previous runs
     pub fn prepare_safe_socket(workspace: &Path, socket_id: &str) -> Result<PathBuf, String> {
         let sock_path = safe_socket_path(workspace, socket_id);
 
@@ -82,8 +82,8 @@ impl SidecarOrchestrator {
         Ok(sock_path)
     }
 
-    /// Actively probes socket connectivity with exponential backoff (KEP-753 Gate).
-    /// Prevents the primary app from starting before the sidecar socket is ready.
+    /// Actively probe socket connectivity with exponential backoff (KEP-753 Gate).
+    /// Prevent primary app from starting before the sidecar socket is ready.
     pub async fn poll_socket_readiness(socket_path: &Path, timeout_ms: u64) -> Result<(), String> {
         let start = std::time::Instant::now();
         let timeout = Duration::from_millis(timeout_ms);
@@ -153,7 +153,7 @@ impl SidecarOrchestrator {
         ))
     }
 
-    /// Orchestrates KEP-753 sequential execution of a primary app and companion sidecar.
+    /// Orchestrate KEP-753 sequential execution of primary app and companion sidecar.
     pub async fn start_pair(&self, config: SidecarPairConfig) -> Result<PathBuf, String> {
         let current = self.current_state().await;
         if current == SidecarLifecycleState::Running
@@ -163,13 +163,13 @@ impl SidecarOrchestrator {
             return Err("A sidecar workspace pair is already active".to_string());
         }
 
-        // 1. Prepare safe socket
+        // Prepare safe socket
         *self.state.write().await = SidecarLifecycleState::CleaningStaleSocket;
         let socket_id = &config.project.ipc.socket_id;
         let sock_path = Self::prepare_safe_socket(&config.workspace_root, socket_id)?;
         *self.active_socket.write().await = Some(sock_path.clone());
 
-        // 2. Identify sidecar and primary members
+        // Identify sidecar and primary members
         let sidecar_member = config
             .project
             .sidecars()
@@ -184,7 +184,7 @@ impl SidecarOrchestrator {
             .cloned()
             .ok_or_else(|| "No primary member found in workspace configuration".to_string())?;
 
-        // 3. KEP-753 Phase I: Spawn Sidecar Process
+        // KEP-753 Phase I: Spawn Sidecar Process
         *self.state.write().await = SidecarLifecycleState::SpawningSidecar;
         info!(
             sidecar_id = %sidecar_member.id,
@@ -203,7 +203,7 @@ impl SidecarOrchestrator {
             }
         };
 
-        // 4. KEP-753 Readiness Probe Gate
+        // KEP-753 Readiness Probe Gate
         *self.state.write().await = SidecarLifecycleState::ProbingSocketReadiness;
         let readiness_timeout = config.project.ipc.readiness_timeout_ms;
         let abort_grace =
@@ -220,7 +220,7 @@ impl SidecarOrchestrator {
 
         *self.state.write().await = SidecarLifecycleState::SidecarReady;
 
-        // 5. KEP-753 Phase II: Launch Primary App with socket injected
+        // KEP-753 Phase II: Launch Primary App with socket injected
         *self.state.write().await = SidecarLifecycleState::SpawningPrimary;
         info!(
             primary_id = %primary_member.id,
@@ -242,7 +242,7 @@ impl SidecarOrchestrator {
             }
         };
 
-        // 6. Transition to Running
+        // Transition to Running
         *self.state.write().await = SidecarLifecycleState::Running;
 
         let active = ActivePair {
@@ -277,19 +277,19 @@ impl SidecarOrchestrator {
 
         let drain_timeout = Duration::from_millis(pair.config.project.ipc.drain_timeout_ms);
 
-        // 1. Drain & Terminate Primary App
+        // Drain & Terminate Primary App
         *self.state.write().await = SidecarLifecycleState::DrainingPrimary;
         if let Some(primary_child) = pair.primary_child.take() {
             info!("KEP-753 Phase III: Signaling primary application to drain and terminate");
             Self::terminate_child_process(primary_child, drain_timeout).await;
         }
 
-        // 2. Terminate Sidecar Process
+        // Terminate Sidecar Process
         *self.state.write().await = SidecarLifecycleState::TerminatingSidecar;
         info!("KEP-753 Phase III: Terminating companion sidecar process");
         Self::terminate_child_process(pair.sidecar_child, drain_timeout).await;
 
-        // 3. Unlink socket
+        // Unlink socket
         let _ = cleanup_stale_socket(&pair.socket_path);
         *self.active_socket.write().await = None;
         *self.state.write().await = SidecarLifecycleState::Stopped;
@@ -389,7 +389,7 @@ impl SidecarOrchestrator {
                 break;
             };
 
-            // Check if primary app exited
+            // Check whether primary app exited
             if let Some(ref mut prim) = active.primary_child {
                 if let Ok(Some(status)) = prim.try_wait() {
                     info!(
@@ -412,7 +412,7 @@ impl SidecarOrchestrator {
                 }
             }
 
-            // Check if sidecar crashed unexpectedly
+            // Check whether sidecar crashed unexpectedly
             if let Ok(Some(status)) = active.sidecar_child.try_wait() {
                 error!(
                     exit_code = ?status.code(),

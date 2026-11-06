@@ -1,4 +1,4 @@
-# DMZ Platform Documentation Master Index
+# DMZ Documentation Master Index
 
 Welcome to the official documentation hub for **DMZ**. DMZ is a high-performance, modular platform built in Rust that provides zero-dependency sandboxing, cryptographic air-gapped closure distribution, and secure AI agent supervision.
 
@@ -45,7 +45,7 @@ The DMZ workspace is organized into **five primary crates**:
 
 * **[Contributing Guide](`CONTRIBUTING.md`)** — Developer workflows, local setup instructions, workspace test suites, and pull request standards.
 
-### Feature Implementation Status Matrix
+### Feature Status Matrix
 
 | Feature / Module | Status | Notes |
 | --- | --- | --- |

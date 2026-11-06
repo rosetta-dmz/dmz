@@ -21,7 +21,7 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     if !config.allow_network {
         unsafe {
             cmd.pre_exec(|| {
-                // First try unsharing network namespace directly (works if process has CAP_NET_ADMIN / root)
+                // First try unsharing network namespace directly (works when process has CAP_NET_ADMIN / root)
                 if unshare(CloneFlags::CLONE_NEWNET).is_err() {
                     // Fall back to unprivileged user namespace + network namespace
                     unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNET).map_err(|e| {

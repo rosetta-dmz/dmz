@@ -244,9 +244,9 @@ impl NpmMapper {
     }
 
     /// Writes the full cross-platform cmd-shim triplet:
-    /// 1. POSIX sh wrapper (macOS, Linux, Git Bash, MSYS2)
-    /// 2. Windows Command Prompt .cmd batch wrapper
-    /// 3. Windows PowerShell .ps1 wrapper
+    /// POSIX sh wrapper (macOS, Linux, Git Bash, MSYS2)
+    /// Windows Command Prompt .cmd batch wrapper
+    /// Windows PowerShell .ps1 wrapper
     pub fn write_cmd_shim_triplet(
         bin_dir: &Path,
         cmd_name: &str,

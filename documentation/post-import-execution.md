@@ -10,7 +10,7 @@ You can run your project's commands, compilers, or test suites in any of the fol
 
 Source the generated environment script to prepend bundled toolchain paths to `PATH` and set standard runtime variables (`CARGO_HOME`, `GOROOT`, `PYTHONHOME`) in your current terminal session:
 
-### macOS / Linux:
+### MacOS / Linux:
 ```bash
 source .dmz/env.sh
 <command>

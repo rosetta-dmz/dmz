@@ -3,14 +3,16 @@
 ## Launching the GUI
 
 ```bash
+# When DMZ Not Installed
 cargo run --package dmz-gui
-# Or if installed:
+
+# When DMZ Installed:
 dmz-gui
 ```
 
 ---
 
-## Workspace Selection (Open Location)
+## Workspace Selection
 
 DMZ uses a shared active workspace concept across all operations:
 
@@ -33,7 +35,7 @@ DMZ uses a shared active workspace concept across all operations:
 
 ---
 
-## Exporting an Air-Gap Bundle (Export & Save Location)
+## Exporting an Air-Gap Bundle
 
 1. Select the **Air-Gap Manager** tab.
 2. Confirm the **Workspace directory** is set to the codebase you wish to export.
@@ -50,7 +52,7 @@ DMZ uses a shared active workspace concept across all operations:
 
 ---
 
-## Importing & Restoring a Bundle (Import)
+## Importing & Restoring a Bundle
 
 1. On the isolated or target machine, launch `dmz-gui` and select **Air-Gap Manager**.
 2. Set **Workspace directory** to your destination folder where you want the project unpacked.

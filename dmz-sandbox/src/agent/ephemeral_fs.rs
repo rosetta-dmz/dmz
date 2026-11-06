@@ -121,7 +121,7 @@ impl EphemeralFs {
     }
 }
 
-/// Automatically wipe the scratchpad directory when the handle is dropped
+/// Automatically wipe scratchpad directory when handle is dropped
 impl Drop for EphemeralFs {
     fn drop(&mut self) {
         info!(path = ?self.mount_path, "Tearing down AI agent ephemeral scratchpad");

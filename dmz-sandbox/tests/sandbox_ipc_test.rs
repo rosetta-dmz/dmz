@@ -27,14 +27,14 @@ fn test_macos_seatbelt_profile_ipc_and_zero_network() {
 
     let profile = generate_seatbelt_profile(&config);
 
-    // 1. Strict network denial is enforced
+    // Enforce strict network denial
     assert!(profile.contains("(deny network*)"));
 
-    // 2. Local Unix Domain Sockets are explicitly permitted for IPC under network denial
+    // Explicitly permit local Unix Domain Sockets for IPC under network denial
     assert!(profile.contains("(allow network* (to unix-socket))"));
     assert!(profile.contains("(allow network-bind (to unix-socket))"));
     assert!(profile.contains("(allow network-outbound (to unix-socket))"));
 
-    // 3. Literal path rule for safe socket is present
+    // Literal path rule for safe socket is present
     assert!(profile.contains(&format!("(literal \"{}\")", sock_path.display())));
 }

@@ -52,7 +52,6 @@ async fn test_readiness_probe_gate_success() {
     // Bind a listener simulating a responsive sidecar process
     let listener = std::os::unix::net::UnixListener::bind(&sock_path).unwrap();
 
-    // Probe should succeed immediately
     let res = SidecarOrchestrator::poll_socket_readiness(&sock_path, 2000).await;
     assert!(res.is_ok());
 
