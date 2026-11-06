@@ -333,7 +333,7 @@ impl AirGapExporter {
         if config.mode == ExportMode::Unified || config.mode == ExportMode::CodeOnly {
             if let Some(ref ws_project) = ws_project_opt {
                 // --- MULTI-WORKSPACE UMBRELLA EXPORT ---
-                let primary_folder_name = workspace_root
+                let primary_raw_name = workspace_root
                     .file_name()
                     .and_then(|n| n.to_str())
                     .filter(|n| !n.is_empty())
@@ -345,7 +345,15 @@ impl AirGapExporter {
 
                 for member in &ws_project.members {
                     if member.role == MemberRole::Primary {
-                        member_folder_names.insert(member.id.clone(), primary_folder_name.clone());
+                        let folder_name = if !member.id.is_empty()
+                            && member.id != "primary"
+                            && member.id != "default"
+                        {
+                            member.id.clone()
+                        } else {
+                            primary_raw_name.clone()
+                        };
+                        member_folder_names.insert(member.id.clone(), folder_name);
                         member_host_paths.insert(member.id.clone(), workspace_root.clone());
                     } else {
                         let host_path = if member.path.is_relative() {
@@ -367,8 +375,12 @@ impl AirGapExporter {
                             .filter(|n| !n.is_empty())
                             .unwrap_or(&member.id)
                             .to_string();
-                        let folder_name = if raw_name == primary_folder_name {
-                            format!("{}-sidecar", raw_name)
+                        let folder_name = if !member.id.is_empty()
+                            && member.id != "sidecar"
+                            && member.id != "service"
+                            && member.id != "default"
+                        {
+                            member.id.clone()
                         } else {
                             raw_name
                         };
@@ -377,39 +389,58 @@ impl AirGapExporter {
                     }
                 }
 
-                // 1. Package Primary Repository into its dedicated umbrella subfolder
+                // Disambiguate if primary and sidecar resolve to the same folder name
+                let primary_folder_name = member_folder_names
+                    .get(
+                        ws_project
+                            .primary_member()
+                            .map(|m| m.id.as_str())
+                            .unwrap_or("primary"),
+                    )
+                    .cloned()
+                    .unwrap_or_else(|| primary_raw_name.clone());
+
+                for (id, name) in member_folder_names.iter_mut() {
+                    let is_primary = ws_project
+                        .primary_member()
+                        .map(|m| m.id == *id)
+                        .unwrap_or(false);
+                    if !is_primary && *name == primary_folder_name {
+                        *name = format!("{}-sidecar", name);
+                    }
+                }
+
+                // 1. Package Primary Repository into its dedicated workspaces/<primary_folder> namespace
+                let primary_dest = PathBuf::from(format!("workspaces/{}", primary_folder_name));
                 info!(
-                    folder = %primary_folder_name,
+                    folder = %primary_dest.display(),
                     path = ?workspace_root,
-                    "Packaging primary workspace files into umbrella subfolder"
+                    "Packaging primary workspace files into workspaces namespace"
                 );
                 if let Some(ref changed_files) = changed_files_filter {
                     Self::append_filtered_files(&mut tar_builder, &workspace_root, changed_files)?;
                 } else {
-                    Self::append_dir_all(
-                        &mut tar_builder,
-                        &workspace_root,
-                        Path::new(&primary_folder_name),
-                        true,
-                    )?;
+                    Self::append_dir_all(&mut tar_builder, &workspace_root, &primary_dest, true)?;
                 }
 
-                // 2. Package each Sidecar / Service Member into its dedicated umbrella subfolder
+                // 2. Package each Sidecar / Service Member into its dedicated workspaces/<sidecar_folder> namespace
                 for member in &ws_project.members {
                     if member.role != MemberRole::Primary {
                         if let Some(host_path) = member_host_paths.get(&member.id) {
                             if let Some(folder_name) = member_folder_names.get(&member.id) {
                                 if host_path.is_dir() {
+                                    let sidecar_dest =
+                                        PathBuf::from(format!("workspaces/{}", folder_name));
                                     info!(
                                         member = %member.id,
                                         src = ?host_path,
-                                        dest = %folder_name,
-                                        "Packaging sidecar workspace files into umbrella subfolder"
+                                        dest = %sidecar_dest.display(),
+                                        "Packaging sidecar workspace files into workspaces namespace"
                                     );
                                     Self::append_dir_all(
                                         &mut tar_builder,
                                         host_path,
-                                        Path::new(folder_name),
+                                        &sidecar_dest,
                                         true,
                                     )?;
                                 }
@@ -418,70 +449,11 @@ impl AirGapExporter {
                     }
                 }
 
-                // 3. Package Documentation folder if present
-                let mut has_docs = false;
-                let doc_candidates = [
-                    workspace_root.join("documentation"),
-                    workspace_root.join("docs"),
-                    workspace_root
-                        .parent()
-                        .map(|p| p.join("documentation"))
-                        .unwrap_or_default(),
-                    workspace_root
-                        .parent()
-                        .map(|p| p.join("docs"))
-                        .unwrap_or_default(),
-                ];
-                for candidate in &doc_candidates {
-                    if candidate.is_dir() {
-                        info!(path = ?candidate, "Packaging project documentation into umbrella archive");
-                        let _ = Self::append_dir_all(
-                            &mut tar_builder,
-                            candidate,
-                            Path::new("documentation"),
-                            false,
-                        );
-                        has_docs = true;
-                        break;
-                    }
-                }
-
-                // 4. Package Dist folder if present
-                let dist_candidates = [
-                    workspace_root.join("dist"),
-                    workspace_root
-                        .parent()
-                        .map(|p| p.join("dist"))
-                        .unwrap_or_default(),
-                ];
-                for candidate in &dist_candidates {
-                    if candidate.is_dir() {
-                        let has_files = fs::read_dir(candidate)
-                            .map(|entries| {
-                                entries.flatten().any(|e| {
-                                    let name = e.file_name().to_string_lossy().to_string();
-                                    !name.ends_with(".zst") && !name.ends_with(".sha256")
-                                })
-                            })
-                            .unwrap_or(false);
-                        if has_files {
-                            info!(path = ?candidate, "Packaging distribution assets into umbrella archive");
-                            let _ = Self::append_dir_all(
-                                &mut tar_builder,
-                                candidate,
-                                Path::new("dist"),
-                                false,
-                            );
-                            break;
-                        }
-                    }
-                }
-
-                // 5. Serialize and embed normalized dmz-workspace.toml pointing to umbrella subfolders
+                // 3. Serialize and embed normalized dmz-workspace.toml pointing to workspaces/<folder> subfolders
                 let mut normalized_project = ws_project.clone();
                 for m in &mut normalized_project.members {
                     if let Some(folder_name) = member_folder_names.get(&m.id) {
-                        m.path = PathBuf::from(folder_name);
+                        m.path = PathBuf::from(format!("workspaces/{}", folder_name));
                     }
                 }
                 if let Ok(toml_str) = normalized_project.to_toml_string() {
@@ -496,14 +468,16 @@ impl AirGapExporter {
                     );
                 }
 
-                // 6. Generate and embed VS Code Multi-Root Workspace (.code-workspace)
+                // 4. Generate and embed VS Code Multi-Root Workspace (.code-workspace)
                 let mut folders = Vec::new();
                 let mut linked_rust_projects = Vec::new();
                 let mut node_bin_unix = Vec::new();
                 let mut node_bin_win = Vec::new();
 
                 for m in &normalized_project.members {
-                    let folder_name = m.path.to_string_lossy().to_string();
+                    let folder_path = m.path.to_string_lossy().replace('\\', "/");
+                    let short_folder_name =
+                        m.path.file_name().and_then(|n| n.to_str()).unwrap_or(&m.id);
                     let host_dir = member_host_paths.get(&m.id).unwrap_or(&workspace_root);
 
                     let is_python = m.ecosystem.as_deref() == Some("python")
@@ -522,34 +496,34 @@ impl AirGapExporter {
 
                     if is_rust {
                         if host_dir.join("Cargo.toml").exists() {
-                            linked_rust_projects.push(format!("{}/Cargo.toml", folder_name));
+                            linked_rust_projects.push(format!("{}/Cargo.toml", folder_path));
                         }
                         if host_dir.join("src-tauri/Cargo.toml").exists() {
                             linked_rust_projects
-                                .push(format!("{}/src-tauri/Cargo.toml", folder_name));
+                                .push(format!("{}/src-tauri/Cargo.toml", folder_path));
                         }
                     }
 
                     if is_node {
                         node_bin_unix.push(format!(
                             "${{workspaceFolder}}/{}/node_modules/.bin",
-                            folder_name
+                            folder_path
                         ));
                         node_bin_win.push(format!(
                             "${{workspaceFolder}}\\{}\\node_modules\\.bin",
-                            folder_name
+                            folder_path.replace('/', "\\")
                         ));
                     }
 
                     let label = if m.role == MemberRole::Primary {
-                        format!("Primary: {}", folder_name)
+                        format!("Primary: {}", short_folder_name)
                     } else {
                         format!("Sidecar: {}", m.id)
                     };
 
                     let mut folder_entry = serde_json::json!({
                         "name": label,
-                        "path": folder_name
+                        "path": folder_path
                     });
 
                     if is_python {
@@ -560,13 +534,6 @@ impl AirGapExporter {
                     }
 
                     folders.push(folder_entry);
-                }
-
-                if has_docs {
-                    folders.push(serde_json::json!({
-                        "name": "Documentation",
-                        "path": "documentation"
-                    }));
                 }
 
                 let workspace_display_name = if !ws_project.name.is_empty() {
@@ -615,44 +582,99 @@ impl AirGapExporter {
                     );
                 }
 
-                // 7. Generate and embed self-contained air-gap quickstart README.md
+                // 5. Generate and embed comprehensive self-contained operational README.md
                 let members_list = normalized_project
                     .members
                     .iter()
                     .filter(|m| m.role != MemberRole::Primary)
-                    .map(|m| format!("- `{}/`: Sidecar member (`{}`)\n", m.path.display(), m.id))
+                    .map(|m| {
+                        format!(
+                            "- `{}/`: Sidecar companion service (`{}`)\n",
+                            m.path.display().to_string().replace('\\', "/"),
+                            m.id
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("");
 
+                let primary_member_path = normalized_project
+                    .primary_member()
+                    .map(|m| m.path.display().to_string().replace('\\', "/"))
+                    .unwrap_or_else(|| format!("workspaces/{}", primary_folder_name));
+
+                let ipc_env_var = &ws_project.ipc.env_var;
+                let ipc_sock_id = &ws_project.ipc.socket_id;
+                let readiness_timeout = ws_project.ipc.readiness_timeout_ms;
+
                 let readme_content = format!(
-                    "# {} Air-Gap Workspace Bundle\n\n\
-                    This directory is a self-contained, hermetic multi-workspace bundle generated by DMZ.\n\n\
-                    ## Preserved Project Layout\n\
-                    - `{}/`: Primary application repository.\n\
-                    {}\
-                    - `documentation/`: Project architecture guides and documentation (if packaged).\n\
-                    - `dist/`: Pre-built deliverables and release assets (if packaged).\n\
-                    - `.dmz/`: Offline package store (`.dmz/store`) and hermetic toolchains (`.dmz/toolchains`).\n\
-                    - `dmz-workspace.toml`: Multi-project workspace orchestrator manifest.\n\
-                    - `{}.code-workspace`: VS Code Multi-Root Workspace configuration.\n\n\
-                    ## Opening the Workspace\n\
-                    Open the multi-root workspace file directly in VS Code, Cursor, or your IDE:\n\
-                    ```bash\n\
-                    code {}.code-workspace\n\
-                    ```\n\
-                    Or in VS Code: **File > Open Workspace from File...** and select `{}.code-workspace`.\n\n\
-                    Both repositories will appear as peer folders in your explorer with properly isolated language servers and interpreter paths.\n\n\
-                    ## Running the Application\n\
-                    To run the primary application with its sidecar under the DMZ supervisor:\n\
-                    ```bash\n\
-                    dmz run --workspace .\n\
-                    ```\n",
-                    workspace_display_name,
-                    primary_folder_name,
-                    members_list,
-                    workspace_display_name,
-                    workspace_display_name,
-                    workspace_display_name
+                    r#"# {workspace_name} Air-Gap Workspace Bundle
+
+This directory is a self-contained, hermetic multi-workspace bundle generated by DMZ.
+It provides an isolated, production-grade development environment with zero external network dependencies.
+
+## System Architecture
+
+The project comprises a companion service architecture managed by the DMZ supervisor:
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│                       DMZ SUPERVISOR                        │
+│                                                             │
+│  ┌────────────────────────┐      ┌────────────────────────┐ │
+│  │ {primary_path:<22} │      │ workspaces/<sidecar>   │ │
+│  │  (Primary Application) │      │   (Companion Sidecar)  │ │
+│  └───────────┬────────────┘      └───────────┬────────────┘ │
+│              │                               │              │
+│              │     Unix Domain Socket        │              │
+│              └───────► {ipc_env:<18} ◄────┘              │
+│                   (Zero-Network IPC Gate)                   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Preserved Directory Layout
+
+- `workspaces/`: Dedicated namespace housing all repository source code trees.
+  - `{primary_path}/`: Primary application repository.
+{members_list}- `.dmz/`: Hermetic offline dependencies and toolchains.
+  - `.dmz/store/`: Cryptographically verified package archive store.
+  - `.dmz/toolchains/`: Bundled offline compilers and runtimes.
+- `dmz-workspace.toml`: Multi-project workspace orchestrator and IPC manifest.
+- `dmz.lock`: Cryptographic dependency lockfile verifying complete reproducibility.
+- `{workspace_name}.code-workspace`: VS Code Multi-Root Workspace configuration.
+
+## Developer Quickstart
+
+### 1. Opening in VS Code / Cursor
+Open the unified multi-root workspace file directly in your IDE:
+```bash
+code {workspace_name}.code-workspace
+```
+Or inside your IDE: **File > Open Workspace from File...** and select `{workspace_name}.code-workspace`.
+Both repositories appear as peer folders in your explorer with properly isolated language servers, linters, and toolchain paths.
+
+### 2. Running with the DMZ Supervisor
+Launch both services under coordinated KEP-753 lifecycle supervision:
+```bash
+dmz run --workspace .
+```
+The supervisor orchestrates sequential execution:
+1. Spawns the companion sidecar in its dedicated workspace directory.
+2. Creates and verifies the IPC socket (`{ipc_sock_id}`) within {readiness_timeout}ms via a non-destructive handshake probe.
+3. Injects `{ipc_env}` into the primary application and spawns it.
+4. On shutdown, triggers a reverse graceful drain sequence.
+
+### 3. Offline Build & Parity Commands
+Each repository is pre-configured to build hermetically from the local `.dmz/store`:
+- **Rust / Cargo**: Run `cargo check --offline` inside `{primary_path}/`. Sources are pre-routed via `.cargo/config.toml`.
+- **Python**: Dependencies are materialized in `.dmz/venv/` with `.pth` bridge configured. Run `python3 -m py_compile .`.
+- **Node / Tauri**: CLI shims and modules are populated in `node_modules/.bin/`.
+"#,
+                    workspace_name = workspace_display_name,
+                    primary_path = primary_member_path,
+                    members_list = members_list,
+                    ipc_env = ipc_env_var,
+                    ipc_sock_id = ipc_sock_id,
+                    readiness_timeout = readiness_timeout,
                 );
 
                 let mut header = tar::Header::new_gnu();
@@ -878,9 +900,11 @@ impl AirGapExporter {
             if path.is_dir() {
                 Self::append_dir_all(tar, &path, &rel_dest, skip_manifest)?;
             } else {
-                tar.append_path_with_name(&path, &rel_dest).map_err(|e| {
-                    ExportError::ArchiveError(format!("Failed to add file {:?}: {}", path, e))
-                })?;
+                let normalized_dest = rel_dest.to_string_lossy().replace('\\', "/");
+                tar.append_path_with_name(&path, &normalized_dest)
+                    .map_err(|e| {
+                        ExportError::ArchiveError(format!("Failed to add file {:?}: {}", path, e))
+                    })?;
             }
         }
 
@@ -913,7 +937,8 @@ impl AirGapExporter {
 
             let full_path = workspace_root.join(rel_path);
             if full_path.is_file() {
-                tar.append_path_with_name(&full_path, rel_path)
+                let normalized_path = rel_path.to_string_lossy().replace('\\', "/");
+                tar.append_path_with_name(&full_path, &normalized_path)
                     .map_err(|e| {
                         ExportError::ArchiveError(format!(
                             "Failed to add delta file {:?}: {}",

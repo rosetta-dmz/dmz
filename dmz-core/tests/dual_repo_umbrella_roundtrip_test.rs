@@ -132,7 +132,7 @@ fn test_dual_repo_umbrella_export_and_import_roundtrip() {
     for entry_res in tar_archive.entries().expect("Failed to read tar entries") {
         let mut entry = entry_res.expect("Tar entry error");
         let path = entry.path().expect("Entry path error").to_path_buf();
-        let path_str = path.to_string_lossy().to_string();
+        let path_str = path.to_string_lossy().replace('\\', "/");
         entry_names.push(path_str.clone());
 
         if path_str == "dmz-workspace.toml" {
@@ -144,34 +144,33 @@ fn test_dual_repo_umbrella_export_and_import_roundtrip() {
         }
     }
 
-    // Verify preserved folder names in archive entries:
+    // Verify preserved folder names in archive entries under workspaces/ namespace:
     assert!(
         entry_names
             .iter()
-            .any(|p| p.contains("my-tauri-app/package.json")),
-        "Expected my-tauri-app/package.json in archive, got: {:?}",
+            .any(|p| p.contains("workspaces/frontend/package.json")),
+        "Expected workspaces/frontend/package.json in archive, got: {:?}",
         entry_names
     );
     assert!(
         entry_names
             .iter()
-            .any(|p| p.contains("my-tauri-app/src-tauri/Cargo.toml")),
-        "Expected my-tauri-app/src-tauri/Cargo.toml in archive, got: {:?}",
+            .any(|p| p.contains("workspaces/frontend/src-tauri/Cargo.toml")),
+        "Expected workspaces/frontend/src-tauri/Cargo.toml in archive, got: {:?}",
         entry_names
     );
     assert!(
         entry_names
             .iter()
-            .any(|p| p.contains("auth-py-backend/auth/main.py")),
-        "Expected auth-py-backend/auth/main.py in archive, got: {:?}",
+            .any(|p| p.contains("workspaces/auth-service/auth/main.py")),
+        "Expected workspaces/auth-service/auth/main.py in archive, got: {:?}",
         entry_names
     );
     assert!(
-        entry_names
+        !entry_names
             .iter()
-            .any(|p| p.contains("documentation/architecture.md")),
-        "Expected documentation/architecture.md in archive, got: {:?}",
-        entry_names
+            .any(|p| p == "documentation" || p.starts_with("documentation/")),
+        "Documentation must NOT be synthetically copied to master root level"
     );
     assert!(
         entry_names.contains(&"dmz-workspace.toml".to_string()),
@@ -188,13 +187,13 @@ fn test_dual_repo_umbrella_export_and_import_roundtrip() {
 
     // Verify normalized dmz-workspace.toml content:
     assert!(
-        normalized_manifest_str.contains("my-tauri-app"),
-        "Manifest should reference primary folder 'my-tauri-app':\n{}",
+        normalized_manifest_str.contains("workspaces/frontend"),
+        "Manifest should reference primary folder 'workspaces/frontend':\n{}",
         normalized_manifest_str
     );
     assert!(
-        normalized_manifest_str.contains("auth-py-backend"),
-        "Manifest should reference sidecar folder 'auth-py-backend':\n{}",
+        normalized_manifest_str.contains("workspaces/auth-service"),
+        "Manifest should reference sidecar folder 'workspaces/auth-service':\n{}",
         normalized_manifest_str
     );
 
@@ -204,13 +203,17 @@ fn test_dual_repo_umbrella_export_and_import_roundtrip() {
     let folders = code_workspace_json["folders"]
         .as_array()
         .expect("folders array");
-    assert_eq!(folders.len(), 3); // primary, sidecar, documentation
+    assert_eq!(folders.len(), 2); // primary and sidecar under workspaces/ (no synthetic root docs)
+    assert!(code_workspace_str.contains("workspaces/frontend"));
+    assert!(code_workspace_str.contains("workspaces/auth-service"));
     assert!(code_workspace_str.contains("python.defaultInterpreterPath"));
     assert!(code_workspace_str.contains("node_modules/.bin"));
 
     // Verify README.md quickstart instructions:
     assert!(readme_str.contains("my-desktop-suite.code-workspace"));
     assert!(readme_str.contains("dmz run --workspace ."));
+    assert!(readme_str.contains("DMZ_SIDECAR_SOCK"));
+    assert!(readme_str.contains("workspaces/frontend"));
 
     // 6. Import archive into a clean destination directory
     let target_dir = base.join("extracted-umbrella-suite");
@@ -225,20 +228,27 @@ fn test_dual_repo_umbrella_export_and_import_roundtrip() {
     assert_eq!(import_res.imported_packages, 1);
     assert!(import_res.workspace_project.is_some());
 
-    // Verify unpacked file tree and offline hydration in target directory
-    assert!(target_dir.join("my-tauri-app/package.json").is_file());
+    // Verify unpacked file tree in target directory: clean workspaces/ namespace
     assert!(target_dir
-        .join("my-tauri-app/src-tauri/Cargo.toml")
+        .join("workspaces/frontend/package.json")
         .is_file());
-    assert!(target_dir.join("auth-py-backend/auth/main.py").is_file());
-    assert!(target_dir.join("documentation/architecture.md").is_file());
+    assert!(target_dir
+        .join("workspaces/frontend/src-tauri/Cargo.toml")
+        .is_file());
+    assert!(target_dir
+        .join("workspaces/auth-service/auth/main.py")
+        .is_file());
+    assert!(
+        !target_dir.join("documentation").exists(),
+        "Synthetic documentation must not exist at master root"
+    );
     assert!(target_dir.join("dmz-workspace.toml").is_file());
     assert!(target_dir.join("my-desktop-suite.code-workspace").is_file());
     assert!(target_dir.join("README.md").is_file());
 
     // Verify offline dependency hydration:
     // a) Tauri CLI shim was materialized
-    let tauri_shim = target_dir.join("my-tauri-app/node_modules/.bin/tauri");
+    let tauri_shim = target_dir.join("workspaces/frontend/node_modules/.bin/tauri");
     assert!(
         tauri_shim.is_file(),
         "Expected tauri CLI shim at {:?}",
@@ -247,26 +257,26 @@ fn test_dual_repo_umbrella_export_and_import_roundtrip() {
     if cfg!(windows) {
         assert!(
             target_dir
-                .join("my-tauri-app/node_modules/.bin/tauri.cmd")
+                .join("workspaces/frontend/node_modules/.bin/tauri.cmd")
                 .is_file(),
             "Expected tauri.cmd on Windows"
         );
         assert!(
             target_dir
-                .join("my-tauri-app/node_modules/.bin/tauri.ps1")
+                .join("workspaces/frontend/node_modules/.bin/tauri.ps1")
                 .is_file(),
             "Expected tauri.ps1 on Windows"
         );
     }
 
     // b) Cargo vendoring was configured
-    let tauri_cargo_config = target_dir.join("my-tauri-app/src-tauri/.cargo/config.toml");
+    let tauri_cargo_config = target_dir.join("workspaces/frontend/src-tauri/.cargo/config.toml");
     assert!(tauri_cargo_config.is_file());
     let cargo_conf = fs::read_to_string(&tauri_cargo_config).unwrap();
     assert!(cargo_conf.contains("replace-with = \"vendored-sources\""));
 
     // c) Scoped Python settings were written to sidecar folder (and not at top level)
-    let sidecar_vscode_settings = target_dir.join("auth-py-backend/.vscode/settings.json");
+    let sidecar_vscode_settings = target_dir.join("workspaces/auth-service/.vscode/settings.json");
     assert!(sidecar_vscode_settings.is_file());
     let sidecar_settings_str = fs::read_to_string(&sidecar_vscode_settings).unwrap();
     assert!(sidecar_settings_str.contains("python.terminal.activateEnvironment"));
@@ -386,10 +396,14 @@ fn test_dual_repo_umbrella_export_and_import_reversed_roles_python_primary_node_
     let import_res = AirGapImporter::import(&import_config).expect("Import failed");
     assert_eq!(import_res.imported_packages, 1);
 
-    // Verify file tree with preserved names
-    assert!(target_dir.join("ai-backend-service/src/main.py").is_file());
-    assert!(target_dir.join("desktop-ui/package.json").is_file());
-    assert!(target_dir.join("desktop-ui/src-tauri/Cargo.toml").is_file());
+    // Verify file tree with preserved names under workspaces/ namespace
+    assert!(target_dir.join("workspaces/backend/src/main.py").is_file());
+    assert!(target_dir
+        .join("workspaces/ui-client/package.json")
+        .is_file());
+    assert!(target_dir
+        .join("workspaces/ui-client/src-tauri/Cargo.toml")
+        .is_file());
     assert!(target_dir.join("dmz-workspace.toml").is_file());
     assert!(target_dir
         .join("ai-desktop-system.code-workspace")
@@ -397,13 +411,13 @@ fn test_dual_repo_umbrella_export_and_import_reversed_roles_python_primary_node_
 
     // Verify offline hydration in reversed configuration:
     // a) Python settings written to primary Python folder
-    let primary_py_settings = target_dir.join("ai-backend-service/.vscode/settings.json");
+    let primary_py_settings = target_dir.join("workspaces/backend/.vscode/settings.json");
     assert!(primary_py_settings.is_file());
     let py_settings_content = fs::read_to_string(&primary_py_settings).unwrap();
     assert!(py_settings_content.contains("python.terminal.activateEnvironment"));
 
     // b) Tauri CLI shim materialized in sidecar Node/GUI folder
-    let sidecar_tauri_shim = target_dir.join("desktop-ui/node_modules/.bin/tauri");
+    let sidecar_tauri_shim = target_dir.join("workspaces/ui-client/node_modules/.bin/tauri");
     assert!(
         sidecar_tauri_shim.is_file(),
         "Expected Tauri CLI shim in sidecar desktop-ui directory"
@@ -411,20 +425,20 @@ fn test_dual_repo_umbrella_export_and_import_reversed_roles_python_primary_node_
     if cfg!(windows) {
         assert!(
             target_dir
-                .join("desktop-ui/node_modules/.bin/tauri.cmd")
+                .join("workspaces/ui-client/node_modules/.bin/tauri.cmd")
                 .is_file(),
             "Expected tauri.cmd on Windows"
         );
         assert!(
             target_dir
-                .join("desktop-ui/node_modules/.bin/tauri.ps1")
+                .join("workspaces/ui-client/node_modules/.bin/tauri.ps1")
                 .is_file(),
             "Expected tauri.ps1 on Windows"
         );
     }
 
     // c) Cargo vendoring configured in sidecar Tauri crate
-    let sidecar_cargo_conf = target_dir.join("desktop-ui/src-tauri/.cargo/config.toml");
+    let sidecar_cargo_conf = target_dir.join("workspaces/ui-client/src-tauri/.cargo/config.toml");
     assert!(sidecar_cargo_conf.is_file());
     let cargo_conf_str = fs::read_to_string(&sidecar_cargo_conf).unwrap();
     assert!(cargo_conf_str.contains("replace-with = \"vendored-sources\""));

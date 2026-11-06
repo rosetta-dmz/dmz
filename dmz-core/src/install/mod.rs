@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod mappers;
 pub mod rust_vendor;
 use crate::resolver::lockfile::DmzLockfile;
@@ -67,6 +68,19 @@ impl InstallerEngine {
             )));
         }
 
+        // Discover multi-workspace project manifest (dmz-workspace.toml) if present
+        let workspace_manifest = if config.workspace_path.join("dmz-workspace.toml").is_file() {
+            crate::workspace::WorkspaceProjectConfig::load_from_file(
+                &config.workspace_path.join("dmz-workspace.toml"),
+            )
+            .ok()
+        } else {
+            crate::workspace::WorkspaceProjectConfig::discover_workspace_manifest(
+                &config.workspace_path,
+            )
+            .map(|(p, _)| p)
+        };
+
         let mut installed_count = 0;
 
         for (_key, pkg) in lockfile.packages {
@@ -74,6 +88,26 @@ impl InstallerEngine {
                 info!(name = %pkg.name, "Skipping install for local path dependency");
                 continue;
             }
+
+            // Resolve target workspace: if pkg.member_id points to a member, map to its subfolder
+            let target_workspace = if let Some(ref mid) = pkg.member_id {
+                if let Some(ref manifest) = workspace_manifest {
+                    if let Some(member) = manifest.find_member(mid) {
+                        let member_path = config.workspace_path.join(&member.path);
+                        if member_path.is_dir() {
+                            member_path
+                        } else {
+                            config.workspace_path.clone()
+                        }
+                    } else {
+                        config.workspace_path.clone()
+                    }
+                } else {
+                    config.workspace_path.clone()
+                }
+            } else {
+                config.workspace_path.clone()
+            };
 
             // Handle flattened scoped package names (e.g., @scope__pkg)
             let safe_name = pkg.name.replace('/', "__");
@@ -147,46 +181,30 @@ impl InstallerEngine {
             // Ecosystem-specific deterministic linkage
             match pkg.ecosystem {
                 Ecosystem::Npm => {
-                    let pnpm_lock_exists = config.workspace_path.join("pnpm-lock.yaml").exists();
+                    let pnpm_lock_exists = target_workspace.join("pnpm-lock.yaml").exists();
                     if pnpm_lock_exists {
-                        mappers::PnpmMapper::map_package(
-                            &config.workspace_path,
-                            &pkg,
-                            &archive_path,
-                        )?;
+                        mappers::PnpmMapper::map_package(&target_workspace, &pkg, &archive_path)?;
                     } else {
-                        mappers::NpmMapper::map_package(
-                            &config.workspace_path,
-                            &pkg,
-                            &archive_path,
-                        )?;
+                        mappers::NpmMapper::map_package(&target_workspace, &pkg, &archive_path)?;
                     }
                 }
                 Ecosystem::Cargo => {
-                    mappers::CargoMapper::map_package(&config.workspace_path, &pkg, &archive_path)?;
+                    mappers::CargoMapper::map_package(&target_workspace, &pkg, &archive_path)?;
                 }
                 Ecosystem::PyPI => {
-                    mappers::PyPiMapper::map_package(&config.workspace_path, &pkg, &archive_path)?;
+                    mappers::PyPiMapper::map_package(&target_workspace, &pkg, &archive_path)?;
                 }
                 Ecosystem::Go => {
-                    mappers::GoMapper::map_package(&config.workspace_path, &pkg, &archive_path)?;
+                    mappers::GoMapper::map_package(&target_workspace, &pkg, &archive_path)?;
                 }
                 Ecosystem::Composer => {
-                    mappers::ComposerMapper::map_package(
-                        &config.workspace_path,
-                        &pkg,
-                        &archive_path,
-                    )?;
+                    mappers::ComposerMapper::map_package(&target_workspace, &pkg, &archive_path)?;
                 }
                 Ecosystem::Bundler => {
-                    mappers::BundlerMapper::map_package(
-                        &config.workspace_path,
-                        &pkg,
-                        &archive_path,
-                    )?;
+                    mappers::BundlerMapper::map_package(&target_workspace, &pkg, &archive_path)?;
                 }
                 Ecosystem::MavenGradle => {
-                    mappers::MavenMapper::map_package(&config.workspace_path, &pkg, &archive_path)?;
+                    mappers::MavenMapper::map_package(&target_workspace, &pkg, &archive_path)?;
                 }
                 Ecosystem::Unknown(ref eco) => {
                     return Err(InstallError::UnsupportedEcosystem(eco.clone()));
@@ -206,6 +224,14 @@ impl InstallerEngine {
         // Ensure IDE workspace settings (.vscode/settings.json) exclude vendored directories
         // and suppress false-positive CMake/Makefile extension popups.
         let _ = crate::toolchain::ToolchainSetup::generate_ide_settings(&config.workspace_path);
+        if let Some(ref manifest) = workspace_manifest {
+            for member in &manifest.members {
+                let member_path = config.workspace_path.join(&member.path);
+                if member_path.is_dir() {
+                    let _ = crate::toolchain::ToolchainSetup::generate_ide_settings(&member_path);
+                }
+            }
+        }
 
         info!(
             installed = installed_count,

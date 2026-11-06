@@ -110,7 +110,7 @@ fn test_dual_repo_airgap_export_and_import_roundtrip() {
     for entry_res in tar_archive.entries().expect("Failed to read tar entries") {
         let mut entry = entry_res.expect("Tar entry error");
         let path = entry.path().expect("Entry path error").to_path_buf();
-        let path_str = path.to_string_lossy().to_string();
+        let path_str = path.to_string_lossy().replace('\\', "/");
         entry_names.push(path_str.clone());
 
         if path_str == "dmz-workspace.toml" {
@@ -119,19 +119,19 @@ fn test_dual_repo_airgap_export_and_import_roundtrip() {
         }
     }
 
-    // Verify preserved folder names in archive entries:
+    // Verify preserved folder names in archive entries under workspaces/ namespace:
     assert!(
         entry_names
             .iter()
-            .any(|p| p.contains("primary_app/Cargo.toml")),
-        "Expected primary_app/Cargo.toml in archive, got: {:?}",
+            .any(|p| p.contains("workspaces/primary_app/Cargo.toml")),
+        "Expected workspaces/primary_app/Cargo.toml in archive, got: {:?}",
         entry_names
     );
     assert!(
         entry_names
             .iter()
-            .any(|p| p.contains("sibling_sidecar/src/main.py")),
-        "Expected sibling_sidecar/src/main.py in archive, got: {:?}",
+            .any(|p| p.contains("workspaces/ai-engine/src/main.py")),
+        "Expected workspaces/ai-engine/src/main.py in archive, got: {:?}",
         entry_names
     );
     assert!(
@@ -139,20 +139,25 @@ fn test_dual_repo_airgap_export_and_import_roundtrip() {
         "Expected root dmz-workspace.toml in archive"
     );
 
-    // Verify normalized dmz-workspace.toml references the preserved folder names
+    // Verify normalized dmz-workspace.toml references the workspaces/ namespace
     let (normalized_config, _) = WorkspaceProjectConfig::from_toml_str(&normalized_manifest_str)
         .map(|c| (c, ()))
         .unwrap();
     let sidecar_member = normalized_config
         .find_member("ai-engine")
         .expect("ai-engine member");
-    // Under the Umbrella architecture, exact folder names are preserved:
-    assert_eq!(sidecar_member.path.to_str().unwrap(), "sibling_sidecar");
+    assert_eq!(
+        sidecar_member.path.to_str().unwrap().replace('\\', "/"),
+        "workspaces/ai-engine"
+    );
 
     let primary_member = normalized_config
         .find_member("primary")
         .expect("primary member");
-    assert_eq!(primary_member.path.to_str().unwrap(), "primary_app");
+    assert_eq!(
+        primary_member.path.to_str().unwrap().replace('\\', "/"),
+        "workspaces/primary_app"
+    );
 
     // 6. Import archive into a clean destination directory
     let target_dir = base.join("extracted-dual-project");
@@ -167,17 +172,26 @@ fn test_dual_repo_airgap_export_and_import_roundtrip() {
     assert_eq!(import_res.imported_packages, 1);
     assert!(import_res.workspace_project.is_some());
 
-    // 7. Verify unpacked file tree in target directory
-    assert!(target_dir.join("primary_app/Cargo.toml").is_file());
-    assert!(target_dir.join("sibling_sidecar/src/main.py").is_file());
-    assert!(target_dir.join("sibling_sidecar/pyproject.toml").is_file());
+    // 7. Verify unpacked file tree in target directory under workspaces/
+    assert!(target_dir
+        .join("workspaces/primary_app/Cargo.toml")
+        .is_file());
+    assert!(target_dir
+        .join("workspaces/ai-engine/src/main.py")
+        .is_file());
+    assert!(target_dir
+        .join("workspaces/ai-engine/pyproject.toml")
+        .is_file());
     assert!(target_dir.join("dmz-workspace.toml").is_file());
 
     // Verify normalized dmz-workspace.toml is discovered and points to restored folders
     let (restored_cfg, _) =
         WorkspaceProjectConfig::discover_workspace_manifest(&target_dir).expect("Manifest found");
     let restored_sidecar = restored_cfg.find_member("ai-engine").unwrap();
-    assert_eq!(restored_sidecar.path.to_str().unwrap(), "sibling_sidecar");
+    assert_eq!(
+        restored_sidecar.path.to_str().unwrap(),
+        "workspaces/ai-engine"
+    );
     assert!(target_dir
         .join(&restored_sidecar.path)
         .join("src/main.py")

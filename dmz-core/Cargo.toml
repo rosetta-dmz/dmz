@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 git2.workspace = true
 tar.workspace = true
+zip.workspace = true
 zstd.workspace = true
 flate2.workspace = true
 anyhow = "1.0"

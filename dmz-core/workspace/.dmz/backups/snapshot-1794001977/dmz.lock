@@ -1,0 +1,13 @@
+{
+        "closure_signature": "9ab6c6dbe61cc71e9274a3981cad4468c314a86f8693c7724c23c24c84113c99",
+        "version": 1,
+        "packages": {
+            "serde": {
+                "name": "serde",
+                "version": "1.0.0",
+                "sha256": "dummy_hash_serde",
+                "ecosystem": "Cargo",
+                "dependencies": []
+            }
+        }
+    }
