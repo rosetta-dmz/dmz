@@ -1,0 +1,31 @@
+{
+  "cmake.autoSelectActiveFolder": false,
+  "cmake.configureOnEdit": false,
+  "cmake.configureOnOpen": false,
+  "cmake.enableAutomaticKitScan": false,
+  "cmake.ignoreCMakeListsMissing": true,
+  "cmake.sourceDirectory": "${workspaceFolder}",
+  "cmake.useCMakePresets": "never",
+  "files.exclude": {
+    "**/.cargo/vendor/**": true,
+    "**/.dmz/**": true,
+    "**/.m2/**": true,
+    "**/.venv/**": true,
+    "**/node_modules/**": true
+  },
+  "files.watcherExclude": {
+    "**/.cargo/vendor/**": true,
+    "**/.dmz/**": true,
+    "**/.m2/**": true,
+    "**/.venv/**": true,
+    "**/node_modules/**": true
+  },
+  "makefile.configureOnOpen": false,
+  "search.exclude": {
+    "**/.cargo/vendor/**": true,
+    "**/.dmz/**": true,
+    "**/.m2/**": true,
+    "**/.venv/**": true,
+    "**/node_modules/**": true
+  }
+}
