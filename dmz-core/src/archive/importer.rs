@@ -687,14 +687,15 @@ impl AirGapImporter {
                     let mut settings_map = serde_json::Map::new();
                     let bundled_py = workspace_root.join(".dmz/toolchains/python");
                     if bundled_py.exists() {
+                        let rel_py = Self::relative_path_between(dir, &bundled_py);
                         let py_bin = if cfg!(windows) {
-                            "${workspaceFolder}/../.dmz/toolchains/python/python.exe"
+                            format!("${{workspaceFolder}}/{}/python.exe", rel_py)
                         } else {
-                            "${workspaceFolder}/../.dmz/toolchains/python/bin/python3"
+                            format!("${{workspaceFolder}}/{}/bin/python3", rel_py)
                         };
                         settings_map.insert(
                             "python.defaultInterpreterPath".into(),
-                            serde_json::Value::String(py_bin.into()),
+                            serde_json::Value::String(py_bin),
                         );
                     }
                     settings_map.insert(

@@ -1,9 +1,7 @@
 use crate::resolver::lockfile::LockedPackage;
-use flate2::read::GzDecoder;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use tar::Archive;
 
 /// Standard npm and Yarn classic mapper (Flat/nested node_modules)
 pub struct NpmMapper;
@@ -382,24 +380,12 @@ if (Test-Path $appTarget) {{
         target_dir: &Path,
         pkg_name: &str,
     ) -> Result<(), super::InstallError> {
-        let file = fs::File::open(archive_path)
-            .map_err(|e| super::InstallError::IoError(format!("Failed to open archive: {}", e)))?;
-
-        let decompressed = GzDecoder::new(file);
-        let mut archive = Archive::new(decompressed);
-
-        if archive.unpack(target_dir).is_err() {
-            let file_retry = fs::File::open(archive_path).map_err(|e| {
-                super::InstallError::IoError(format!("Failed to open archive retry: {}", e))
-            })?;
-            let mut plain_archive = Archive::new(file_retry);
-            plain_archive.unpack(target_dir).map_err(|e| {
-                super::InstallError::MapperError(format!(
-                    "Failed to unpack package {}: {}",
-                    pkg_name, e
-                ))
-            })?;
-        }
+        super::archive::SafeArchiveExtractor::extract(archive_path, target_dir).map_err(|e| {
+            super::InstallError::MapperError(format!(
+                "Failed to unpack package {}: {}",
+                pkg_name, e
+            ))
+        })?;
 
         // If unpacked archive contains a top-level "package" directory (standard npm tarball structure),
         // flatten its contents into target_dir so that package.json is directly in target_dir.
@@ -508,13 +494,6 @@ impl CargoMapper {
             super::InstallError::IoError(format!("Failed to create cargo vendor dir: {}", e))
         })?;
 
-        let file = fs::File::open(archive_path).map_err(|e| {
-            super::InstallError::IoError(format!("Failed to open cargo archive: {}", e))
-        })?;
-
-        let decompressed = GzDecoder::new(file);
-        let mut archive = Archive::new(decompressed);
-
         // Unpack into a temporary staging directory to handle archive nesting
         let temp_extract_dir = cargo_dir
             .join("vendor")
@@ -526,12 +505,14 @@ impl CargoMapper {
             super::InstallError::IoError(format!("Failed to create temp extract dir: {}", e))
         })?;
 
-        archive.unpack(&temp_extract_dir).map_err(|e| {
-            super::InstallError::MapperError(format!(
-                "Failed to unpack Cargo package {}: {}",
-                pkg.name, e
-            ))
-        })?;
+        super::archive::SafeArchiveExtractor::extract(archive_path, &temp_extract_dir).map_err(
+            |e| {
+                super::InstallError::MapperError(format!(
+                    "Failed to unpack Cargo package {}: {}",
+                    pkg.name, e
+                ))
+            },
+        )?;
 
         // Locate Cargo.toml (either at root or inside top-level archive directory)
         let source_dir = if temp_extract_dir.join("Cargo.toml").exists() {
@@ -632,16 +613,219 @@ directory = ".cargo/vendor"
 pub struct PyPiMapper;
 
 impl PyPiMapper {
+    /// Detects the target Python version from existing environments or bundled toolchains,
+    /// defaulting to `python3.11` for backward compatibility.
+    pub fn detect_python_version(workspace_path: &Path) -> String {
+        // 1. Check existing .dmz/venv/lib/python3.X
+        let dmz_venv_lib = workspace_path.join(".dmz").join("venv").join("lib");
+        if let Ok(entries) = fs::read_dir(&dmz_venv_lib) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let s = name.to_string_lossy();
+                if s.starts_with("python3.") && entry.path().is_dir() {
+                    return s.to_string();
+                }
+            }
+        }
+
+        // 2. Check existing .venv/lib/python3.X
+        let venv_lib = workspace_path.join(".venv").join("lib");
+        if let Ok(entries) = fs::read_dir(&venv_lib) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let s = name.to_string_lossy();
+                if s.starts_with("python3.") && entry.path().is_dir() {
+                    return s.to_string();
+                }
+            }
+        }
+
+        // 3. Check bundled toolchain .dmz/toolchains/python/lib/python3.X
+        let tc_lib = workspace_path
+            .join(".dmz")
+            .join("toolchains")
+            .join("python")
+            .join("lib");
+        if let Ok(entries) = fs::read_dir(&tc_lib) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let s = name.to_string_lossy();
+                if s.starts_with("python3.") && entry.path().is_dir() {
+                    return s.to_string();
+                }
+            }
+        }
+
+        "python3.11".to_string()
+    }
+
+    /// Writes PEP 376 INSTALLER metadata attribution (`dmz\n`) into any `.dist-info` directories.
+    fn write_installer_attribution(site_packages: &Path) {
+        if let Ok(entries) = fs::read_dir(site_packages) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir()
+                    && path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|s| s.ends_with(".dist-info"))
+                {
+                    let installer_file = path.join("INSTALLER");
+                    let _ = fs::write(installer_file, "dmz\n");
+                }
+            }
+        }
+    }
+
+    /// Hydrates cross-platform CLI console script shims declared in `*.dist-info/entry_points.txt`.
+    fn hydrate_console_scripts(workspace_path: &Path, site_packages: &Path, py_ver: &str) {
+        let entries = match fs::read_dir(site_packages) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        let venv_bin = workspace_path.join(".venv").join("bin");
+        let dmz_venv_bin = workspace_path.join(".dmz").join("venv").join("bin");
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if !name_str.ends_with(".dist-info") {
+                continue;
+            }
+
+            let entry_points_file = path.join("entry_points.txt");
+            if !entry_points_file.is_file() {
+                continue;
+            }
+
+            if let Ok(content) = fs::read_to_string(&entry_points_file) {
+                let mut in_console_scripts = false;
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                        in_console_scripts =
+                            trimmed == "[console_scripts]" || trimmed == "[gui_scripts]";
+                        continue;
+                    }
+                    if in_console_scripts && !trimmed.is_empty() && !trimmed.starts_with('#') {
+                        if let Some((cmd_raw, target_raw)) = trimmed.split_once('=') {
+                            let cmd_name = cmd_raw.trim();
+                            let target = target_raw.trim();
+                            if let Some((module_raw, func_raw)) = target.split_once(':') {
+                                let module = module_raw.trim();
+                                let func_clean = func_raw
+                                    .split(|c: char| c.is_whitespace() || c == '[')
+                                    .next()
+                                    .unwrap_or("main")
+                                    .trim();
+                                if !cmd_name.is_empty() && !module.is_empty() {
+                                    Self::write_python_cmd_shim_triplet(
+                                        &venv_bin, cmd_name, module, func_clean, py_ver,
+                                    );
+                                    Self::write_python_cmd_shim_triplet(
+                                        &dmz_venv_bin,
+                                        cmd_name,
+                                        module,
+                                        func_clean,
+                                        py_ver,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Writes the cross-platform cmd-shim triplet for a Python console script:
+    /// 1. POSIX sh wrapper (macOS, Linux)
+    /// 2. Windows Command Prompt .cmd batch wrapper
+    /// 3. Windows PowerShell .ps1 wrapper
+    fn write_python_cmd_shim_triplet(
+        bin_dir: &Path,
+        cmd_name: &str,
+        module: &str,
+        func: &str,
+        py_ver: &str,
+    ) {
+        let _ = fs::create_dir_all(bin_dir);
+
+        // 1. POSIX shell wrapper (macOS, Linux)
+        #[cfg(unix)]
+        {
+            let sh_path = bin_dir.join(cmd_name);
+            let sh_content = format!(
+                r#"#!/bin/sh
+VENV_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="$VENV_DIR/lib/{py_ver}/site-packages:$PYTHONPATH"
+if [ -x "$VENV_DIR/bin/python3" ]; then
+  exec "$VENV_DIR/bin/python3" -c "import sys; from {module} import {func}; sys.exit({func}())" "$@"
+elif [ -x "$VENV_DIR/../.dmz/toolchains/python/bin/python3" ]; then
+  exec "$VENV_DIR/../.dmz/toolchains/python/bin/python3" -c "import sys; from {module} import {func}; sys.exit({func}())" "$@"
+else
+  exec python3 -c "import sys; from {module} import {func}; sys.exit({func}())" "$@"
+fi
+"#,
+                py_ver = py_ver,
+                module = module,
+                func = func,
+            );
+            if fs::write(&sh_path, sh_content).is_ok() {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&sh_path, fs::Permissions::from_mode(0o755));
+            }
+        }
+
+        // 2. Windows Command Prompt .cmd batch wrapper
+        let cmd_path = bin_dir.join(format!("{}.cmd", cmd_name));
+        let cmd_content = format!(
+            r#"@echo off
+setlocal
+set "VENV_DIR=%~dp0.."
+set "PYTHONPATH=%VENV_DIR%\lib\{py_ver}\site-packages;%PYTHONPATH%"
+if exist "%VENV_DIR%\Scripts\python.exe" (
+  "%VENV_DIR%\Scripts\python.exe" -c "import sys; from {module} import {func}; sys.exit({func}())" %*
+) else (
+  python -c "import sys; from {module} import {func}; sys.exit({func}())" %*
+)
+"#,
+            py_ver = py_ver,
+            module = module,
+            func = func,
+        );
+        let _ = fs::write(&cmd_path, cmd_content);
+
+        // 3. Windows PowerShell .ps1 wrapper
+        let ps1_path = bin_dir.join(format!("{}.ps1", cmd_name));
+        let ps1_content = format!(
+            r#"$VenvDir = Split-Path (Split-Path $PSScriptRoot -Parent)
+$env:PYTHONPATH = "$VenvDir/lib/{py_ver}/site-packages;$env:PYTHONPATH"
+python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
+"#,
+            py_ver = py_ver,
+            module = module,
+            func = func,
+        );
+        let _ = fs::write(&ps1_path, ps1_content);
+    }
+
     pub fn map_package(
         workspace_path: &Path,
         pkg: &LockedPackage,
         archive_path: &Path,
     ) -> Result<(), super::InstallError> {
+        let py_ver = Self::detect_python_version(workspace_path);
         let venv_site_packages = workspace_path
             .join(".dmz")
             .join("venv")
             .join("lib")
-            .join("python3.11")
+            .join(&py_ver)
             .join("site-packages");
 
         fs::create_dir_all(&venv_site_packages).map_err(|e| {
@@ -651,27 +835,24 @@ impl PyPiMapper {
             ))
         })?;
 
-        let file = fs::File::open(archive_path).map_err(|e| {
-            super::InstallError::IoError(format!("Failed to open Python package archive: {}", e))
-        })?;
+        super::archive::SafeArchiveExtractor::extract(archive_path, &venv_site_packages).map_err(
+            |e| {
+                super::InstallError::MapperError(format!(
+                    "Failed to unpack Python package {}: {}",
+                    pkg.name, e
+                ))
+            },
+        )?;
 
-        let decompressed = GzDecoder::new(file);
-        let mut archive = Archive::new(decompressed);
+        // Write PEP 376 INSTALLER metadata attribution
+        Self::write_installer_attribution(&venv_site_packages);
 
-        // Unpacking fully preserves .dist-info and .egg-info metadata directories for importlib.metadata
-        archive.unpack(&venv_site_packages).map_err(|e| {
-            super::InstallError::MapperError(format!(
-                "Failed to unpack Python package {}: {}",
-                pkg.name, e
-            ))
-        })?;
+        // Hydrate console scripts (e.g., uvicorn, flask, pytest, jinja2)
+        Self::hydrate_console_scripts(workspace_path, &venv_site_packages, &py_ver);
 
         // Mirror/link into workspace .venv so virtual environment commands can locate dependencies directly
         let root_venv = workspace_path.join(".venv");
-        let root_site_packages = root_venv
-            .join("lib")
-            .join("python3.11")
-            .join("site-packages");
+        let root_site_packages = root_venv.join("lib").join(&py_ver).join("site-packages");
         let _ = fs::create_dir_all(&root_site_packages);
         let pth_file = root_site_packages.join("dmz_store.pth");
         let _ = fs::write(pth_file, format!("{}\n", venv_site_packages.display()));
@@ -694,13 +875,7 @@ impl GoMapper {
             super::InstallError::IoError(format!("Failed to create go vendor dir: {}", e))
         })?;
 
-        let file = fs::File::open(archive_path).map_err(|e| {
-            super::InstallError::IoError(format!("Failed to open go package archive: {}", e))
-        })?;
-
-        let decompressed = GzDecoder::new(file);
-        let mut archive = Archive::new(decompressed);
-        archive.unpack(&vendor_dir).map_err(|e| {
+        super::archive::SafeArchiveExtractor::extract(archive_path, &vendor_dir).map_err(|e| {
             super::InstallError::MapperError(format!(
                 "Failed to unpack Go package {}: {}",
                 pkg.name, e
@@ -736,12 +911,7 @@ impl ComposerMapper {
             super::InstallError::IoError(format!("Failed to create composer vendor dir: {}", e))
         })?;
 
-        let file = fs::File::open(archive_path).map_err(|e| {
-            super::InstallError::IoError(format!("Failed to open composer archive: {}", e))
-        })?;
-        let decompressed = GzDecoder::new(file);
-        let mut archive = Archive::new(decompressed);
-        archive.unpack(&vendor_dir).map_err(|e| {
+        super::archive::SafeArchiveExtractor::extract(archive_path, &vendor_dir).map_err(|e| {
             super::InstallError::MapperError(format!(
                 "Failed to unpack Composer package {}: {}",
                 pkg.name, e
@@ -765,13 +935,7 @@ impl BundlerMapper {
             super::InstallError::IoError(format!("Failed to create bundle dir: {}", e))
         })?;
 
-        let file = fs::File::open(archive_path).map_err(|e| {
-            super::InstallError::IoError(format!("Failed to open gem archive: {}", e))
-        })?;
-
-        let decompressed = GzDecoder::new(file);
-        let mut archive = Archive::new(decompressed);
-        archive.unpack(&bundle_dir).map_err(|e| {
+        super::archive::SafeArchiveExtractor::extract(archive_path, &bundle_dir).map_err(|e| {
             super::InstallError::MapperError(format!(
                 "Failed to unpack Ruby gem {}: {}",
                 pkg.name, e
