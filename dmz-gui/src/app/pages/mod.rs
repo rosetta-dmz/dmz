@@ -81,7 +81,9 @@ impl Pages {
                 lockfile_path,
                 status_message,
             ),
-            Tab::Supervisor => supervisor::show(&mut self.supervisor, ui, status_message),
+            Tab::Supervisor => {
+                supervisor::show(&mut self.supervisor, ui, status_message, workspace_path)
+            }
             Tab::Settings => self.appearance.show(ui, ctx, status_message),
         }
     }

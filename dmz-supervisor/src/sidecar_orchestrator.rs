@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::RwLock;
 use tokio::time::sleep;
@@ -85,11 +86,30 @@ impl SidecarOrchestrator {
     /// Actively probe socket connectivity with exponential backoff (KEP-753 Gate).
     /// Prevent primary app from starting before the sidecar socket is ready.
     pub async fn poll_socket_readiness(socket_path: &Path, timeout_ms: u64) -> Result<(), String> {
+        Self::poll_socket_readiness_with_child(socket_path, timeout_ms, None).await
+    }
+
+    /// Fail-fast probe: polls socket readiness while monitoring companion child process status.
+    pub async fn poll_socket_readiness_with_child(
+        socket_path: &Path,
+        timeout_ms: u64,
+        mut child: Option<&mut Child>,
+    ) -> Result<(), String> {
         let start = std::time::Instant::now();
         let timeout = Duration::from_millis(timeout_ms);
         let mut backoff = Duration::from_millis(25);
 
         while start.elapsed() < timeout {
+            // Fail-fast check: if the companion process crashed, abort immediately
+            if let Some(ref mut c) = child {
+                if let Ok(Some(exit_status)) = c.try_wait() {
+                    return Err(format!(
+                        "Companion service process exited prematurely with status {}",
+                        exit_status
+                    ));
+                }
+            }
+
             #[cfg(unix)]
             {
                 if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
@@ -192,7 +212,7 @@ impl SidecarOrchestrator {
             "KEP-753 Phase I: Spawning companion sidecar process"
         );
 
-        let sidecar_child = match self
+        let mut sidecar_child = match self
             .spawn_member_process(&config.workspace_root, &sidecar_member, &sock_path, &config)
             .await
         {
@@ -203,13 +223,19 @@ impl SidecarOrchestrator {
             }
         };
 
-        // KEP-753 Readiness Probe Gate
+        // KEP-753 Readiness Probe Gate (Fail-fast with child process monitoring)
         *self.state.write().await = SidecarLifecycleState::ProbingSocketReadiness;
         let readiness_timeout = config.project.ipc.readiness_timeout_ms;
         let abort_grace =
             Duration::from_millis(config.project.ipc.drain_timeout_ms.clamp(500, 2000));
 
-        if let Err(err) = Self::poll_socket_readiness(&sock_path, readiness_timeout).await {
+        if let Err(err) = Self::poll_socket_readiness_with_child(
+            &sock_path,
+            readiness_timeout,
+            Some(&mut sidecar_child),
+        )
+        .await
+        {
             warn!(error = %err, "Readiness probe failed; aborting startup");
             *self.state.write().await = SidecarLifecycleState::Failed;
             // Clean up sidecar process
@@ -329,6 +355,13 @@ impl SidecarOrchestrator {
                         "python3".to_string()
                     }
                 }
+                MemberRole::Member => {
+                    if cfg!(windows) {
+                        "cmd.exe".to_string()
+                    } else {
+                        "/bin/sh".to_string()
+                    }
+                }
             });
 
         let mut cmd = Command::new(&exec_cmd);
@@ -337,14 +370,49 @@ impl SidecarOrchestrator {
             cmd.args(args);
         }
 
+        // Put process in its own process group on Unix so children don't become zombies
+        #[cfg(unix)]
+        cmd.process_group(0);
+
         // Inject socket environment variable
         cmd.env(&config.project.ipc.env_var, sock_path);
         cmd.env("DMZ_SIDECAR_SOCK", sock_path);
         cmd.current_dir(&member_dir);
 
-        let child = cmd
+        // Pipe stdout and stderr for multiplexed logging
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("Process spawn failed for '{}': {}", member.id, e))?;
+
+        let member_id = member.id.clone();
+        let color_code = match member.role {
+            MemberRole::Primary => "\x1b[36m",                       // Cyan
+            MemberRole::Sidecar | MemberRole::Service => "\x1b[35m", // Magenta
+            MemberRole::Member => "\x1b[33m",                        // Yellow
+        };
+
+        if let Some(stdout) = child.stdout.take() {
+            let id = member_id.clone();
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    println!("{}[{}]\x1b[0m\t{}", color_code, id, line);
+                }
+            });
+        }
+
+        if let Some(stderr) = child.stderr.take() {
+            let id = member_id.clone();
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    eprintln!("\x1b[31m[{}]\x1b[0m\t{}", id, line);
+                }
+            });
+        }
 
         Ok(child)
     }
@@ -354,7 +422,8 @@ impl SidecarOrchestrator {
         {
             if let Some(pid) = child.id() {
                 unsafe {
-                    libc::kill(pid as i32, libc::SIGTERM);
+                    // Send SIGTERM to entire process group
+                    libc::killpg(pid as i32, libc::SIGTERM);
                 }
             }
         }
@@ -370,9 +439,35 @@ impl SidecarOrchestrator {
                 info!("Process exited gracefully");
             }
             _ = sleep(grace_period) => {
-                warn!("Process failed to exit gracefully within {:?}; sending SIGKILL", grace_period);
+                warn!("Process failed to exit gracefully within {:?}; sending SIGKILL to process group", grace_period);
+                #[cfg(unix)]
+                {
+                    if let Some(pid) = child.id() {
+                        unsafe {
+                            libc::killpg(pid as i32, libc::SIGKILL);
+                        }
+                    }
+                }
                 let _ = child.kill().await;
             }
+        }
+    }
+
+    /// Awaits termination of the primary child process if active
+    pub async fn wait_for_exit(&self) -> Result<std::process::ExitStatus, String> {
+        let mut child_to_wait = {
+            let mut guard = self.active_pair.write().await;
+            if let Some(ref mut pair) = *guard {
+                pair.primary_child.take()
+            } else {
+                None
+            }
+        };
+
+        if let Some(ref mut child) = child_to_wait {
+            child.wait().await.map_err(|e| format!("Wait error: {}", e))
+        } else {
+            Err("No active primary child to wait on".to_string())
         }
     }
 

@@ -175,3 +175,58 @@ fn test_cli_sandbox_defaults_to_local_store() {
         _ => panic!("Expected Commands::Sandbox"),
     }
 }
+
+#[test]
+fn test_cli_run_subcommand_parsing() {
+    // 1. Basic dmz run --workspace .
+    let args = vec!["dmz", "run", "--workspace", "."];
+    let parsed = Cli::try_parse_from(args).expect("Failed to parse run command");
+    match parsed.command {
+        Commands::Run {
+            workspace,
+            sidecar,
+            allow_network,
+            no_sandbox,
+            command,
+            args,
+        } => {
+            assert_eq!(workspace, PathBuf::from("."));
+            assert_eq!(sidecar, None);
+            assert!(!allow_network);
+            assert!(!no_sandbox);
+            assert_eq!(command, None);
+            assert!(args.is_empty());
+        }
+        _ => panic!("Expected Commands::Run"),
+    }
+
+    // 2. dmz run with companion sidecar and custom command
+    let args = vec![
+        "dmz",
+        "run",
+        "--workspace",
+        "./client",
+        "--sidecar",
+        "./server",
+        "--allow-network",
+        "-c",
+        "npm run tauri dev",
+    ];
+    let parsed =
+        Cli::try_parse_from(args).expect("Failed to parse run command with custom command");
+    match parsed.command {
+        Commands::Run {
+            workspace,
+            sidecar,
+            allow_network,
+            command,
+            ..
+        } => {
+            assert_eq!(workspace, PathBuf::from("./client"));
+            assert_eq!(sidecar, Some(PathBuf::from("./server")));
+            assert!(allow_network);
+            assert_eq!(command, Some("npm run tauri dev".to_string()));
+        }
+        _ => panic!("Expected Commands::Run"),
+    }
+}

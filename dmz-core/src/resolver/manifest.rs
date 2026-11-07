@@ -135,6 +135,25 @@ impl ManifestScanner {
             }
         }
 
+        let tauri_cargo_path = root_path.join("src-tauri").join("Cargo.toml");
+        if tauri_cargo_path.exists() && !results.iter().any(|m| m.path == tauri_cargo_path) {
+            let tauri_content = fs::read_to_string(&tauri_cargo_path).map_err(|e| {
+                ManifestError::IoError(format!("Failed to read src-tauri/Cargo.toml: {}", e))
+            })?;
+            let tauri_val: toml::Value = toml::from_str(&tauri_content).map_err(|e| {
+                ManifestError::ParseError(format!("Invalid src-tauri/Cargo.toml: {}", e))
+            })?;
+            let tauri_deps =
+                Self::extract_dependencies(tauri_val.get("dependencies"), &HashMap::new());
+            if !tauri_deps.is_empty() {
+                results.push(ManifestInfo {
+                    ecosystem: Ecosystem::Cargo,
+                    path: tauri_cargo_path,
+                    dependencies: tauri_deps,
+                });
+            }
+        }
+
         let package_json_path = root_path.join("package.json");
         if package_json_path.exists() {
             results.extend(Self::parse_package_json(&package_json_path)?);
@@ -143,6 +162,15 @@ impl ManifestScanner {
         let req_path = root_path.join("requirements.txt");
         if req_path.exists() {
             results.push(Self::parse_requirements_txt(&req_path)?);
+        }
+
+        let pyproject_path = root_path.join("pyproject.toml");
+        if pyproject_path.exists() {
+            if let Ok(pyproject_info) = Self::parse_pyproject_toml(&pyproject_path) {
+                if !pyproject_info.dependencies.is_empty() {
+                    results.push(pyproject_info);
+                }
+            }
         }
 
         // --- PHP Composer ---
@@ -361,6 +389,93 @@ impl ManifestScanner {
                 ecosystem: Ecosystem::PyPI,
                 is_dev: false,
             });
+        }
+
+        Ok(ManifestInfo {
+            ecosystem: Ecosystem::PyPI,
+            path: path.to_path_buf(),
+            dependencies,
+        })
+    }
+
+    fn parse_pyproject_toml(path: &Path) -> Result<ManifestInfo, ManifestError> {
+        let content = fs::read_to_string(path)
+            .map_err(|e| ManifestError::IoError(format!("Failed to read pyproject.toml: {}", e)))?;
+
+        let toml_val: toml::Value = toml::from_str(&content)
+            .map_err(|e| ManifestError::ParseError(format!("Invalid pyproject.toml: {}", e)))?;
+
+        let mut dependencies = Vec::new();
+
+        // 1. PEP 621 [project.dependencies]
+        if let Some(deps_arr) = toml_val
+            .get("project")
+            .and_then(|p| p.get("dependencies"))
+            .and_then(|d| d.as_array())
+        {
+            for dep in deps_arr {
+                if let Some(line) = dep.as_str() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+
+                    let mut name = line.to_string();
+                    let mut version_req = "*".to_string();
+
+                    for op in &["==", ">=", "<=", "~=", ">", "<", "!="] {
+                        if let Some(idx) = line.find(op) {
+                            name = line[..idx].trim().to_string();
+                            version_req = line[idx + op.len()..].trim().to_string();
+                            break;
+                        }
+                    }
+
+                    dependencies.push(DependencySpec {
+                        name,
+                        version_req,
+                        ecosystem: Ecosystem::PyPI,
+                        is_dev: false,
+                    });
+                }
+            }
+        }
+
+        // 2. Poetry [tool.poetry.dependencies]
+        if let Some(poetry_deps) = toml_val
+            .get("tool")
+            .and_then(|t| t.get("poetry"))
+            .and_then(|p| p.get("dependencies"))
+            .and_then(|d| d.as_table())
+        {
+            for (name, val) in poetry_deps {
+                if name.to_lowercase() == "python" {
+                    continue;
+                }
+                let version_req = match val {
+                    toml::Value::String(s) => s
+                        .trim_start_matches('^')
+                        .trim_start_matches('~')
+                        .to_string(),
+                    toml::Value::Table(t) => t
+                        .get("version")
+                        .and_then(|v| v.as_str())
+                        .map(|s| {
+                            s.trim_start_matches('^')
+                                .trim_start_matches('~')
+                                .to_string()
+                        })
+                        .unwrap_or_else(|| "*".to_string()),
+                    _ => "*".to_string(),
+                };
+
+                dependencies.push(DependencySpec {
+                    name: name.clone(),
+                    version_req,
+                    ecosystem: Ecosystem::PyPI,
+                    is_dev: false,
+                });
+            }
         }
 
         Ok(ManifestInfo {

@@ -206,7 +206,7 @@ fn test_dual_repo_umbrella_export_and_import_roundtrip() {
     assert_eq!(folders.len(), 2); // primary and sidecar under workspaces/ (no synthetic root docs)
     assert!(code_workspace_str.contains("workspaces/frontend"));
     assert!(code_workspace_str.contains("workspaces/auth-service"));
-    assert!(code_workspace_str.contains("python.defaultInterpreterPath"));
+    assert!(code_workspace_str.contains("python.terminal.activateEnvironment"));
     assert!(code_workspace_str.contains("node_modules/.bin"));
 
     // Verify README.md quickstart instructions:

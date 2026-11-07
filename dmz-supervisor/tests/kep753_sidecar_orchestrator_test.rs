@@ -68,3 +68,38 @@ async fn test_orchestrator_initial_state_and_queries() {
     );
     assert_eq!(orchestrator.current_socket_path().await, None);
 }
+
+#[tokio::test]
+async fn test_fail_fast_readiness_on_premature_exit() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let sock_path = temp_dir.path().join("crashing_service.sock");
+
+    // Spawn a child process that immediately exits with error code 42
+    let mut child = if cfg!(windows) {
+        tokio::process::Command::new("cmd.exe")
+            .args(["/c", "exit 42"])
+            .spawn()
+            .unwrap()
+    } else {
+        tokio::process::Command::new("/bin/sh")
+            .args(["-c", "exit 42"])
+            .spawn()
+            .unwrap()
+    };
+
+    // The probe should fail fast in <100ms instead of waiting for a 10s timeout
+    let start = std::time::Instant::now();
+    let res =
+        SidecarOrchestrator::poll_socket_readiness_with_child(&sock_path, 10000, Some(&mut child))
+            .await;
+    let elapsed = start.elapsed();
+
+    assert!(res.is_err());
+    let err_msg = res.unwrap_err();
+    assert!(err_msg.contains("Companion service process exited prematurely"));
+    assert!(
+        elapsed.as_millis() < 500,
+        "Probe took {}ms, expected fail-fast under 500ms",
+        elapsed.as_millis()
+    );
+}

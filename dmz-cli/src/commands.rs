@@ -6,7 +6,7 @@ use dmz_core::resolver::ResolverEngine;
 use dmz_sandbox::platform::{run_sandboxed, SandboxConfig};
 use std::path::{Path, PathBuf};
 use std::process::exit;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Central entrypoint to dispatch any parsed CLI command to its runner
 pub fn dispatch(command: Commands) {
@@ -222,6 +222,24 @@ pub fn dispatch(command: Commands) {
 
         Commands::Ecosystem { action } => {
             run_ecosystem(action);
+        }
+
+        Commands::Run {
+            workspace,
+            sidecar,
+            allow_network,
+            no_sandbox,
+            command,
+            args,
+        } => {
+            run_run(RunArgs {
+                workspace,
+                sidecar,
+                allow_network,
+                no_sandbox,
+                command,
+                args,
+            });
         }
     }
 }
@@ -1229,4 +1247,164 @@ pub fn run_ecosystem(action: EcosystemAction) {
             info!("All ecosystem verifications passed successfully!");
         }
     }
+}
+
+pub struct RunArgs {
+    pub workspace: PathBuf,
+    pub sidecar: Option<PathBuf>,
+    pub allow_network: bool,
+    pub no_sandbox: bool,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+}
+
+pub fn run_run(args: RunArgs) {
+    info!(
+        workspace = ?args.workspace,
+        "Initializing workspace execution under supervisor orchestration"
+    );
+
+    let (mut project_config, effective_workspace_root) = if let Some((cfg, manifest_file)) =
+        dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(&args.workspace)
+    {
+        let root = manifest_file
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
+        info!(
+            manifest = ?manifest_file,
+            "Loaded workspace project configuration"
+        );
+        (cfg, root)
+    } else {
+        let ws_name = args
+            .workspace
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "workspace".to_string());
+
+        let mut members = Vec::new();
+        members.push(dmz_core::workspace::WorkspaceMember::new(
+            "primary",
+            Path::new("."),
+            dmz_core::workspace::MemberRole::Primary,
+        ));
+
+        if let Some(ref sc) = args.sidecar {
+            let sc_name = sc
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "companion".to_string());
+            members.push(dmz_core::workspace::WorkspaceMember::new(
+                sc_name,
+                sc.clone(),
+                dmz_core::workspace::MemberRole::Sidecar,
+            ));
+        }
+
+        let cfg = dmz_core::workspace::WorkspaceProjectConfig::new(ws_name, members);
+        (cfg, args.workspace.clone())
+    };
+
+    // Auto-detect or apply command override for primary member
+    if let Some(primary) = project_config
+        .members
+        .iter_mut()
+        .find(|m| m.role == dmz_core::workspace::MemberRole::Primary)
+    {
+        if let Some(cmd) = args.command {
+            primary.exec_command = Some(cmd);
+            if !args.args.is_empty() {
+                primary.exec_args = Some(args.args);
+            }
+        } else if primary.exec_command.is_none() {
+            let primary_dir = if primary.path.is_absolute() {
+                primary.path.clone()
+            } else {
+                effective_workspace_root.join(&primary.path)
+            };
+
+            let pkg_json_path = primary_dir.join("package.json");
+            let cargo_toml_path = primary_dir.join("Cargo.toml");
+            let tauri_cargo_path = primary_dir.join("src-tauri/Cargo.toml");
+
+            if pkg_json_path.is_file() {
+                if let Ok(content) = std::fs::read_to_string(&pkg_json_path) {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                        let scripts = val.get("scripts").and_then(|s| s.as_object());
+                        if let Some(sc) = scripts {
+                            if sc.contains_key("tauri") {
+                                primary.exec_command = Some("npm".to_string());
+                                primary.exec_args = Some(vec![
+                                    "run".to_string(),
+                                    "tauri".to_string(),
+                                    "dev".to_string(),
+                                ]);
+                            } else if sc.contains_key("dev") {
+                                primary.exec_command = Some("npm".to_string());
+                                primary.exec_args =
+                                    Some(vec!["run".to_string(), "dev".to_string()]);
+                            } else if sc.contains_key("start") {
+                                primary.exec_command = Some("npm".to_string());
+                                primary.exec_args =
+                                    Some(vec!["run".to_string(), "start".to_string()]);
+                            }
+                        }
+                    }
+                }
+            } else if tauri_cargo_path.is_file() || cargo_toml_path.is_file() {
+                primary.exec_command = Some("cargo".to_string());
+                primary.exec_args = Some(vec!["run".to_string()]);
+            }
+        }
+    }
+
+    let orchestrator = dmz_supervisor::SidecarOrchestrator::new();
+    let pair_config = dmz_supervisor::SidecarPairConfig {
+        workspace_root: effective_workspace_root,
+        project: project_config,
+        allow_network: args.allow_network,
+    };
+
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            error!("Failed to initialize Tokio runtime: {}", e);
+            exit(1);
+        }
+    };
+
+    rt.block_on(async {
+        info!("Launching workspace pair with supervisor lifecycle management...");
+        match orchestrator.start_pair(pair_config).await {
+            Ok(sock) => {
+                info!(
+                    socket = ?sock,
+                    "Workspace pair active; socket ready. Press Ctrl+C to terminate."
+                );
+            }
+            Err(e) => {
+                error!("Supervisor startup failed: {}", e);
+                exit(1);
+            }
+        }
+
+        tokio::select! {
+            exit_res = orchestrator.wait_for_exit() => {
+                match exit_res {
+                    Ok(status) => info!("Primary process exited with status: {}", status),
+                    Err(e) => warn!("Wait error: {}", e),
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                info!("Interrupt received (SIGINT); draining workspace pair gracefully...");
+            }
+        }
+
+        let _ = orchestrator.stop_pair().await;
+        info!("Workspace supervision terminated cleanly");
+    });
 }
