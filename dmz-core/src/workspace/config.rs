@@ -12,9 +12,11 @@ pub struct WorkspaceProjectConfig {
     pub ipc: IpcBridgeConfig,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MemberRole {
+    #[default]
+    Member,
     Primary,
     Sidecar,
     Service,
@@ -23,6 +25,7 @@ pub enum MemberRole {
 impl std::fmt::Display for MemberRole {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Member => write!(f, "member"),
             Self::Primary => write!(f, "primary"),
             Self::Sidecar => write!(f, "sidecar"),
             Self::Service => write!(f, "service"),
@@ -34,6 +37,7 @@ impl std::fmt::Display for MemberRole {
 pub struct WorkspaceMember {
     pub id: String,
     pub path: PathBuf,
+    #[serde(default)]
     pub role: MemberRole,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ecosystem: Option<String>,
@@ -69,6 +73,7 @@ impl WorkspaceMember {
             MemberRole::Sidecar | MemberRole::Service => {
                 PathBuf::from(format!("workspaces/sidecars/{}", self.id))
             }
+            MemberRole::Member => PathBuf::from(format!("workspaces/{}", self.id)),
         }
     }
 }
@@ -103,14 +108,23 @@ impl WorkspaceProjectConfig {
     }
 
     pub fn primary_member(&self) -> Option<&WorkspaceMember> {
-        self.members.iter().find(|m| m.role == MemberRole::Primary)
+        self.members
+            .iter()
+            .find(|m| m.role == MemberRole::Primary)
+            .or_else(|| self.members.first())
     }
 
     pub fn sidecars(&self) -> Vec<&WorkspaceMember> {
-        self.members
+        let sc: Vec<&WorkspaceMember> = self
+            .members
             .iter()
-            .filter(|m| m.role == MemberRole::Sidecar)
-            .collect()
+            .filter(|m| m.role == MemberRole::Sidecar || m.role == MemberRole::Service)
+            .collect();
+        if sc.is_empty() && self.members.len() > 1 {
+            self.members.iter().skip(1).collect()
+        } else {
+            sc
+        }
     }
 
     pub fn find_member(&self, id: &str) -> Option<&WorkspaceMember> {

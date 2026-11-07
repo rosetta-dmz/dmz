@@ -1183,10 +1183,10 @@ echo DMZ bundled toolchains activated.
                 ));
             }
 
-            let label = if m.role == crate::workspace::MemberRole::Primary {
-                format!("Primary: {}", m_path_str)
+            let label = if !m.id.is_empty() {
+                m.id.clone()
             } else {
-                format!("Sidecar: {}", m.id)
+                m_path_str.to_string()
             };
 
             let mut folder_entry = serde_json::json!({
@@ -1195,15 +1195,38 @@ echo DMZ bundled toolchains activated.
             });
 
             if is_python {
-                let py_interpreter = if cfg!(windows) {
-                    "${workspaceFolder}/.dmz/toolchains/python/python.exe"
-                } else {
-                    "${workspaceFolder}/.dmz/toolchains/python/bin/python3"
-                };
-                folder_entry["settings"] = serde_json::json!({
-                    "python.defaultInterpreterPath": py_interpreter,
+                let mut py_settings = serde_json::json!({
                     "python.terminal.activateEnvironment": true
                 });
+
+                let has_bundled_py = workspace_root.join(".dmz/toolchains/python").exists();
+                let member_venv = member_full_path.join(".venv");
+
+                if member_venv.exists() {
+                    let py_bin = if cfg!(windows) {
+                        "${workspaceFolder}/.venv/Scripts/python.exe"
+                    } else {
+                        "${workspaceFolder}/.venv/bin/python"
+                    };
+                    py_settings["python.defaultInterpreterPath"] =
+                        serde_json::Value::String(py_bin.to_string());
+                } else if has_bundled_py {
+                    let py_bin = if m_path_str == "." {
+                        if cfg!(windows) {
+                            "${workspaceFolder}/.dmz/toolchains/python/python.exe"
+                        } else {
+                            "${workspaceFolder}/.dmz/toolchains/python/bin/python3"
+                        }
+                    } else if cfg!(windows) {
+                        "${workspaceFolder}/../.dmz/toolchains/python/python.exe"
+                    } else {
+                        "${workspaceFolder}/../.dmz/toolchains/python/bin/python3"
+                    };
+                    py_settings["python.defaultInterpreterPath"] =
+                        serde_json::Value::String(py_bin.to_string());
+                }
+
+                folder_entry["settings"] = py_settings;
             }
 
             folders.push(folder_entry);

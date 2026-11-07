@@ -1,4 +1,6 @@
 use eframe::egui;
+use std::sync::Arc;
+use tokio::runtime::Runtime;
 
 use super::super::components;
 use dmz_supervisor::{IpcServerConfig, SidecarLifecycleState};
@@ -11,12 +13,20 @@ pub(super) struct SupervisorState {
     pub(super) sidecar_socket: String,
     pub(super) readiness_timeout_ms: u64,
     pub(super) drain_timeout_ms: u64,
+    pub(super) orchestrator: Arc<dmz_supervisor::SidecarOrchestrator>,
+    pub(super) tokio_rt: Option<Arc<Runtime>>,
 }
 
 impl Default for SupervisorState {
     fn default() -> Self {
         let default_sock =
             dmz_core::workspace::safe_socket_path(std::path::Path::new("."), "sidecar");
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .ok()
+            .map(Arc::new);
+        let orchestrator = Arc::new(dmz_supervisor::SidecarOrchestrator::new());
         Self {
             active: false,
             postgres_service: false,
@@ -25,11 +35,27 @@ impl Default for SupervisorState {
             sidecar_socket: default_sock.display().to_string(),
             readiness_timeout_ms: 5000,
             drain_timeout_ms: 2000,
+            orchestrator,
+            tokio_rt: rt,
         }
     }
 }
 
-pub(super) fn show(state: &mut SupervisorState, ui: &mut egui::Ui, status_message: &mut String) {
+pub(super) fn show(
+    state: &mut SupervisorState,
+    ui: &mut egui::Ui,
+    status_message: &mut String,
+    workspace_path: &str,
+) {
+    // Synchronize live orchestrator state if runtime is present
+    if let Some(ref rt) = state.tokio_rt {
+        let orch = state.orchestrator.clone();
+        state.sidecar_state = rt.block_on(async { orch.current_state().await });
+        if let Some(sock) = rt.block_on(async { orch.current_socket_path().await }) {
+            state.sidecar_socket = sock.display().to_string();
+        }
+    }
+
     let ipc_config = IpcServerConfig::default();
     let socket_str = ipc_config.socket_path.display().to_string();
 
@@ -65,7 +91,7 @@ pub(super) fn show(state: &mut SupervisorState, ui: &mut egui::Ui, status_messag
 
     ui.add_space(16.0);
     components::section(ui, |ui| {
-        components::section_header(ui, "Dual-Repo Sidecar Orchestration (KEP-753)");
+        components::section_header(ui, "Multi-Repo Workspace Orchestration (KEP-753)");
 
         ui.horizontal_wrapped(|ui| {
             let current = &state.sidecar_state;
@@ -76,7 +102,7 @@ pub(super) fn show(state: &mut SupervisorState, ui: &mut egui::Ui, status_messag
                     matches!(current, SidecarLifecycleState::CleaningStaleSocket),
                 ),
                 (
-                    "Sidecar Spawning",
+                    "Spawning Services",
                     matches!(current, SidecarLifecycleState::SpawningSidecar),
                 ),
                 (
@@ -84,11 +110,11 @@ pub(super) fn show(state: &mut SupervisorState, ui: &mut egui::Ui, status_messag
                     matches!(current, SidecarLifecycleState::ProbingSocketReadiness),
                 ),
                 (
-                    "Sidecar Ready",
+                    "Services Ready",
                     matches!(current, SidecarLifecycleState::SidecarReady),
                 ),
                 (
-                    "Primary Running",
+                    "Active Bridge",
                     matches!(
                         current,
                         SidecarLifecycleState::SpawningPrimary | SidecarLifecycleState::Running
@@ -197,18 +223,61 @@ pub(super) fn show(state: &mut SupervisorState, ui: &mut egui::Ui, status_messag
                     | SidecarLifecycleState::Stopped
                     | SidecarLifecycleState::Failed
             ) {
-                if components::action_button(ui, "Launch Supervised Pair", true).clicked() {
-                    state.sidecar_state = SidecarLifecycleState::Running;
-                    *status_message = format!(
-                        "Sidecar socket verified at {}. Primary process launched with DMZ_SIDECAR_SOCK.",
-                        state.sidecar_socket
-                    );
+                if components::action_button(ui, "Launch Workspace Pair", true).clicked() {
+                    let ws_path = std::path::PathBuf::from(workspace_path);
+                    let (project_config, root) = if let Some((cfg, manifest_file)) =
+                        dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(&ws_path)
+                    {
+                        let r = manifest_file
+                            .parent()
+                            .unwrap_or(std::path::Path::new("."))
+                            .to_path_buf();
+                        (cfg, r)
+                    } else {
+                        let ws_name = ws_path
+                            .file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "workspace".to_string());
+                        let members = vec![dmz_core::workspace::WorkspaceMember::new(
+                            "primary",
+                            std::path::Path::new("."),
+                            dmz_core::workspace::MemberRole::Primary,
+                        )];
+                        (
+                            dmz_core::workspace::WorkspaceProjectConfig::new(ws_name, members),
+                            ws_path.clone(),
+                        )
+                    };
+
+                    let pair_config = dmz_supervisor::SidecarPairConfig {
+                        workspace_root: root,
+                        project: project_config,
+                        allow_network: false,
+                    };
+
+                    let orch = state.orchestrator.clone();
+                    if let Some(ref rt) = state.tokio_rt {
+                        rt.spawn(async move {
+                            if let Err(e) = orch.start_pair(pair_config).await {
+                                tracing::error!("Workspace launch error: {}", e);
+                            }
+                        });
+                        *status_message = format!(
+                            "Spawning workspace pair under KEP-753 supervision at {}",
+                            state.sidecar_socket
+                        );
+                    }
                 }
             } else if components::action_button(ui, "Stop Pair (Graceful Drain)", false).clicked() {
-                state.sidecar_state = SidecarLifecycleState::Stopped;
-                *status_message = String::from(
-                    "Executed KEP-753 reverse graceful drain: Primary stopped -> Sidecar drained -> Socket unlinked.",
-                );
+                let orch = state.orchestrator.clone();
+                if let Some(ref rt) = state.tokio_rt {
+                    rt.spawn(async move {
+                        let _ = orch.stop_pair().await;
+                    });
+                    *status_message = String::from(
+                        "Executed KEP-753 reverse graceful drain: stopping workspace pair and unlinking socket.",
+                    );
+                }
             }
         });
     });

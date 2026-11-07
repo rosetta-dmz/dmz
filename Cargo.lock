@@ -975,6 +975,7 @@ dependencies = [
  "dmz-core",
  "dmz-sandbox",
  "dmz-supervisor",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

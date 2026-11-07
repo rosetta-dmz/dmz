@@ -25,17 +25,27 @@ impl ResolverEngine {
 
         let mut locked_packages = Vec::new();
 
-        // Native Cargo Auto-Resolution
+        // Native Cargo Auto-Resolution (Root Cargo.toml or nested src-tauri/Cargo.toml)
         let cargo_toml_path = workspace_dir.join("Cargo.toml");
-        if cargo_toml_path.exists() {
+        let tauri_cargo_path = workspace_dir.join("src-tauri/Cargo.toml");
+        let effective_cargo_dir = if cargo_toml_path.exists() {
+            Some(workspace_dir.to_path_buf())
+        } else if tauri_cargo_path.exists() {
+            Some(workspace_dir.join("src-tauri"))
+        } else {
+            None
+        };
+
+        if let Some(ref cargo_dir) = effective_cargo_dir {
             info!(
+                cargo_dir = ?cargo_dir,
                 "Cargo.toml detected; invoking `cargo metadata` for full graph auto-resolution..."
             );
             let output = std::process::Command::new("cargo")
                 .arg("metadata")
                 .arg("--format-version")
                 .arg("1")
-                .current_dir(workspace_dir)
+                .current_dir(cargo_dir)
                 .output()
                 .map_err(|e| format!("Failed to execute `cargo metadata`: {}", e))?;
 
@@ -143,6 +153,52 @@ impl ResolverEngine {
                     .to_string(),
             );
         }
+
+        // Auto-resolve companion native binary package for @tauri-apps/cli
+        let mut companion_pkgs = Vec::new();
+        for pkg in &locked_packages {
+            if pkg.name == "@tauri-apps/cli" {
+                let platform_suffix = match (std::env::consts::OS, std::env::consts::ARCH) {
+                    ("macos", "aarch64") => "darwin-arm64".to_string(),
+                    ("macos", "x86_64") => "darwin-x64".to_string(),
+                    ("linux", "x86_64") => "linux-x64-gnu".to_string(),
+                    ("linux", "aarch64") => "linux-arm64-gnu".to_string(),
+                    ("windows", "x86_64") => "win32-x64-msvc".to_string(),
+                    ("windows", "aarch64") => "win32-arm64-msvc".to_string(),
+                    (other_os, other_arch) => {
+                        let os_str = if other_os == "macos" {
+                            "darwin"
+                        } else {
+                            other_os
+                        };
+                        let arch_str = if other_arch == "aarch64" {
+                            "arm64"
+                        } else if other_arch == "x86_64" {
+                            "x64"
+                        } else {
+                            other_arch
+                        };
+                        format!("{}-{}", os_str, arch_str)
+                    }
+                };
+                let companion_name = format!("@tauri-apps/cli-{}", platform_suffix);
+                let dummy_hash = DmzLockfile::hash_bytes(
+                    format!("{}:{}:{:?}", companion_name, pkg.version, Ecosystem::Npm).as_bytes(),
+                );
+                if !locked_packages.iter().any(|p| p.name == companion_name) {
+                    companion_pkgs.push(LockedPackage {
+                        name: companion_name,
+                        version: pkg.version.clone(),
+                        ecosystem: Ecosystem::Npm,
+                        sha256: dummy_hash,
+                        source_url: None,
+                        dependencies: Vec::new(),
+                        member_id: pkg.member_id.clone(),
+                    });
+                }
+            }
+        }
+        locked_packages.extend(companion_pkgs);
 
         let mut lockfile = DmzLockfile::with_platform(locked_packages, target_platform);
         if let Ok(Some(prov)) = crate::vcs::GitProvider::get_provenance(workspace_dir) {

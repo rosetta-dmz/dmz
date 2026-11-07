@@ -55,7 +55,7 @@ pub(super) fn show(
                 state.is_dual_repo = false;
             }
             if ui
-                .selectable_label(state.is_dual_repo, "Dual Repo / Sidecar")
+                .selectable_label(state.is_dual_repo, "Multi-Repo / Companion")
                 .clicked()
             {
                 state.is_dual_repo = true;
@@ -69,7 +69,7 @@ pub(super) fn show(
             .min_col_width(120.0)
             .show(ui, |ui| {
                 ui.label(if state.is_dual_repo {
-                    "Primary Workspace"
+                    "Workspace 1 (Anchor Root)"
                 } else {
                     "Workspace Directory"
                 });
@@ -81,7 +81,7 @@ pub(super) fn show(
                 ui.end_row();
 
                 if state.is_dual_repo {
-                    ui.label("Sidecar Workspace");
+                    ui.label("Workspace 2 (Companion)");
                     if components::path_browse_row(ui, &mut state.sidecar_path, None) {
                         let mut dialog = rfd::FileDialog::new();
                         let ws_path = PathBuf::from(&*workspace_path);
@@ -90,11 +90,14 @@ pub(super) fn show(
                         }
                         if let Some(path) = dialog.pick_folder() {
                             state.sidecar_path = path.display().to_string();
+                            if let Some(folder_name) = path.file_name().and_then(|n| n.to_str()) {
+                                state.sidecar_id = folder_name.to_string();
+                            }
                         }
                     }
                     ui.end_row();
 
-                    ui.label("Sidecar ID");
+                    ui.label("Member ID");
                     ui.add_sized(
                         egui::vec2(ui.available_width(), 32.0),
                         egui::TextEdit::singleline(&mut state.sidecar_id)
@@ -103,13 +106,13 @@ pub(super) fn show(
                     );
                     ui.end_row();
 
-                    ui.label("Sidecar Role");
+                    ui.label("Member Role / Tag");
                     ui.add_sized(
                         egui::vec2(ui.available_width(), 32.0),
                         egui::TextEdit::singleline(&mut state.sidecar_role)
                             .vertical_align(egui::Align::Center)
                             .margin(egui::Margin::symmetric(8, 0))
-                            .hint_text("sidecar or service"),
+                            .hint_text("member, sidecar, or service"),
                     );
                     ui.end_row();
                 }
@@ -157,15 +160,21 @@ pub(super) fn show(
                 } else if !sc_path.exists() {
                     *status_message = String::from("Sidecar workspace directory does not exist.");
                 } else {
+                    let primary_name = ws_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("primary");
                     let primary_m = dmz_core::workspace::WorkspaceMember::new(
-                        "primary",
+                        primary_name,
                         &ws_path,
                         dmz_core::workspace::MemberRole::Primary,
                     );
                     let sc_role = if state.sidecar_role.trim().eq_ignore_ascii_case("service") {
                         dmz_core::workspace::MemberRole::Service
-                    } else {
+                    } else if state.sidecar_role.trim().eq_ignore_ascii_case("sidecar") {
                         dmz_core::workspace::MemberRole::Sidecar
+                    } else {
+                        dmz_core::workspace::MemberRole::Member
                     };
                     let sidecar_m = dmz_core::workspace::WorkspaceMember::new(
                         &state.sidecar_id,

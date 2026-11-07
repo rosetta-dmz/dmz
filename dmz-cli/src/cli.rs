@@ -270,6 +270,33 @@ pub enum Commands {
         #[command(subcommand)]
         action: EcosystemAction,
     },
+
+    /// Launch workspace members under coordinated supervisor execution
+    Run {
+        /// Path to project workspace root or umbrella directory
+        #[arg(short, long, default_value = ".")]
+        workspace: PathBuf,
+
+        /// Path to companion workspace root (optional override)
+        #[arg(long)]
+        sidecar: Option<PathBuf>,
+
+        /// Permit outbound network connections inside sandboxes
+        #[arg(long, default_value_t = false)]
+        allow_network: bool,
+
+        /// Disable sandbox isolation and execute directly on host
+        #[arg(long, default_value_t = false)]
+        no_sandbox: bool,
+
+        /// Custom primary command override (e.g., "npm run tauri dev")
+        #[arg(short = 'c', long = "command")]
+        command: Option<String>,
+
+        /// Arguments passed to the primary command
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
