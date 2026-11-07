@@ -6,9 +6,9 @@
 
 ## Overview & Architecture
 
-Modern desktop and full-stack applications often pair two or more cooperating codebases—such as a desktop client (Tauri / Electron / Node) and a companion backend (Python AI worker, Rust/C++ computation engine, or IPC daemon).
+Modern desktop and full-stack applications often pair two or more cooperating codebases, such as a desktop client (Tauri / Electron / Node) and a companion backend (Python AI worker, Rust/C++ computation engine, or IPC daemon).
 
-Instead of forcing a rigid "Primary application vs. Secondary sidecar" mold, **DMZ treats all codebases as first-class, dynamic workspace members**. Each repository maintains its own isolated toolchains and offline package store, verified with zero host dependencies, and bridged over **daemonless local IPC**:
+DMZ treats all codebases as first-class, dynamic workspace members. Each repository maintains its own isolated toolchains and offline package store, verified with zero host dependencies, and bridged over **daemonless local IPC**:
 
 ```
 ┌────────────────────────────────────────────────────────┐
@@ -197,7 +197,18 @@ For developers using the visual desktop interface (`dmz-gui`), the multi-repo wo
    * Fetches dependencies for all members into `.dmz/store` (including `@tauri-apps/cli` companion binary packages).
    * Bundles closures, toolchains, source trees, and manifests into a self-contained archive with a `.sha256` integrity sidecar.
 
-### Step 4: Live Supervised Execution in Supervisor IPC
+### Step 4: Import & Hydrate in Air-Gap Manager (Air-Gapped Host)
+1. On the air-gapped machine, open the **Air-Gap Manager** page.
+2. Under **Import Air-Gap Archive**, click **Open Archive...** to select your `.tar.zst` bundle.
+3. Set your target **Workspace Directory**.
+4. Keep **"Install offline dependencies into workspace"** and **"Cryptographically verify closure hash"** checked.
+5. Click **Import & Verify Archive**:
+   * **Integrity Verification:** Validates the archive signature and packages against the closure manifest.
+   * **Source & Store Unpack:** Restores all member source trees, `.dmz/store`, and offline toolchains.
+   * **Automatic Hydration:** Auto-configures offline `.cargo/config.toml` vendoring (root and `src-tauri`), links native CLI binaries (`node_modules/.bin/tauri`), and generates `<project>.code-workspace` with smart Python interpreter paths.
+   * **Ready to Work:** Open `<project>.code-workspace` in VS Code / Cursor or proceed to supervised execution.
+
+### Step 5: Live Supervised Execution in Supervisor IPC
 1. Navigate to the **Supervisor IPC** page.
 2. Click **Launch Workspace Pair**:
    * Wires directly into real `SidecarOrchestrator` execution on background Tokio runtime.

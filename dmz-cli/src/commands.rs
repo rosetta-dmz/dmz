@@ -1306,27 +1306,31 @@ pub fn run_run(args: RunArgs) {
         (cfg, args.workspace.clone())
     };
 
-    // Auto-detect or apply command override for primary member
-    if let Some(primary) = project_config
-        .members
-        .iter_mut()
-        .find(|m| m.role == dmz_core::workspace::MemberRole::Primary)
-    {
-        if let Some(cmd) = args.command {
-            primary.exec_command = Some(cmd);
-            if !args.args.is_empty() {
-                primary.exec_args = Some(args.args);
+    // Auto-detect or apply command override for all members without an explicit command
+    for member in &mut project_config.members {
+        if member.role == dmz_core::workspace::MemberRole::Primary {
+            if let Some(ref cmd) = args.command {
+                member.exec_command = Some(cmd.clone());
+                if !args.args.is_empty() {
+                    member.exec_args = Some(args.args.clone());
+                }
+                continue;
             }
-        } else if primary.exec_command.is_none() {
-            let primary_dir = if primary.path.is_absolute() {
-                primary.path.clone()
-            } else {
-                effective_workspace_root.join(&primary.path)
-            };
+        }
 
-            let pkg_json_path = primary_dir.join("package.json");
-            let cargo_toml_path = primary_dir.join("Cargo.toml");
-            let tauri_cargo_path = primary_dir.join("src-tauri/Cargo.toml");
+        if member.exec_command.is_none() {
+            let member_dir = if member.path.is_absolute() {
+                member.path.clone()
+            } else {
+                effective_workspace_root.join(&member.path)
+            };
+            let member_dir = std::fs::canonicalize(&member_dir).unwrap_or(member_dir);
+
+            let pkg_json_path = member_dir.join("package.json");
+            let cargo_toml_path = member_dir.join("Cargo.toml");
+            let tauri_cargo_path = member_dir.join("src-tauri/Cargo.toml");
+            let py_req_path = member_dir.join("requirements.txt");
+            let pyproject_path = member_dir.join("pyproject.toml");
 
             if pkg_json_path.is_file() {
                 if let Ok(content) = std::fs::read_to_string(&pkg_json_path) {
@@ -1334,27 +1338,39 @@ pub fn run_run(args: RunArgs) {
                         let scripts = val.get("scripts").and_then(|s| s.as_object());
                         if let Some(sc) = scripts {
                             if sc.contains_key("tauri") {
-                                primary.exec_command = Some("npm".to_string());
-                                primary.exec_args = Some(vec![
+                                member.exec_command = Some("npm".to_string());
+                                member.exec_args = Some(vec![
                                     "run".to_string(),
                                     "tauri".to_string(),
                                     "dev".to_string(),
                                 ]);
                             } else if sc.contains_key("dev") {
-                                primary.exec_command = Some("npm".to_string());
-                                primary.exec_args =
-                                    Some(vec!["run".to_string(), "dev".to_string()]);
+                                member.exec_command = Some("npm".to_string());
+                                member.exec_args = Some(vec!["run".to_string(), "dev".to_string()]);
                             } else if sc.contains_key("start") {
-                                primary.exec_command = Some("npm".to_string());
-                                primary.exec_args =
+                                member.exec_command = Some("npm".to_string());
+                                member.exec_args =
                                     Some(vec!["run".to_string(), "start".to_string()]);
                             }
                         }
                     }
                 }
             } else if tauri_cargo_path.is_file() || cargo_toml_path.is_file() {
-                primary.exec_command = Some("cargo".to_string());
-                primary.exec_args = Some(vec!["run".to_string()]);
+                member.exec_command = Some("cargo".to_string());
+                member.exec_args = Some(vec!["run".to_string()]);
+            } else if py_req_path.is_file() || pyproject_path.is_file() {
+                member.exec_command = Some(if cfg!(windows) {
+                    "python".to_string()
+                } else {
+                    "python3".to_string()
+                });
+                if member_dir.join("server.py").is_file() {
+                    member.exec_args = Some(vec!["server.py".to_string()]);
+                } else if member_dir.join("main.py").is_file() {
+                    member.exec_args = Some(vec!["main.py".to_string()]);
+                } else if member_dir.join("app.py").is_file() {
+                    member.exec_args = Some(vec!["app.py".to_string()]);
+                }
             }
         }
     }

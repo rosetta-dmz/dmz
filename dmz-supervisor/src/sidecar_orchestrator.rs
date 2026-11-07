@@ -337,32 +337,40 @@ impl SidecarOrchestrator {
             workspace_root.join(&member.path)
         };
 
-        let exec_cmd = member
-            .exec_command
-            .clone()
-            .unwrap_or_else(|| match member.role {
-                MemberRole::Primary => {
-                    if cfg!(windows) {
-                        "cmd.exe".to_string()
-                    } else {
-                        "/bin/sh".to_string()
+        let exec_cmd = member.exec_command.clone().unwrap_or_else(|| {
+            if member_dir.join("package.json").is_file() {
+                "npm".to_string()
+            } else if member_dir.join("src-tauri/Cargo.toml").is_file()
+                || member_dir.join("Cargo.toml").is_file()
+            {
+                "cargo".to_string()
+            } else if member_dir.join("requirements.txt").is_file()
+                || member_dir.join("pyproject.toml").is_file()
+            {
+                if cfg!(windows) {
+                    "python".to_string()
+                } else {
+                    "python3".to_string()
+                }
+            } else {
+                match member.role {
+                    MemberRole::Primary | MemberRole::Member => {
+                        if cfg!(windows) {
+                            "cmd.exe".to_string()
+                        } else {
+                            "/bin/sh".to_string()
+                        }
+                    }
+                    MemberRole::Sidecar | MemberRole::Service => {
+                        if cfg!(windows) {
+                            "python".to_string()
+                        } else {
+                            "python3".to_string()
+                        }
                     }
                 }
-                MemberRole::Sidecar | MemberRole::Service => {
-                    if cfg!(windows) {
-                        "python".to_string()
-                    } else {
-                        "python3".to_string()
-                    }
-                }
-                MemberRole::Member => {
-                    if cfg!(windows) {
-                        "cmd.exe".to_string()
-                    } else {
-                        "/bin/sh".to_string()
-                    }
-                }
-            });
+            }
+        });
 
         let mut cmd = Command::new(&exec_cmd);
 
