@@ -7,12 +7,12 @@ edition.workspace = true
 dmz-core.workspace = true
 dmz-sandbox.workspace = true
 dmz-supervisor.workspace = true
-eframe = { version = "0.35", features = ["persistence"] }
-rfd = "0.15"
+eframe.workspace = true
+rfd.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-tracing-subscriber = "0.3"
+tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-which = "6.0"
-image = { version = "0.25", default-features = false, features = ["png"] }
+which.workspace = true
+image.workspace = true

@@ -7,7 +7,7 @@ edition.workspace = true
 dmz-core.workspace = true
 tracing.workspace = true
 tokio.workspace = true
-which = "6.0"
+which.workspace = true
 libc.workspace = true
 windows-sys.workspace = true
 

@@ -77,7 +77,7 @@ impl GitProvider {
             }
         };
 
-        let branch = head.shorthand().map(|s| s.to_string());
+        let branch = head.shorthand().ok().map(|s| s.to_string());
 
         let mut status_opts = StatusOptions::new();
         status_opts.include_untracked(true);
@@ -91,7 +91,7 @@ impl GitProvider {
         if let Ok(statuses) = repo.statuses(Some(&mut status_opts)) {
             for entry in statuses.iter() {
                 let st = entry.status();
-                if let Some(path) = entry.path() {
+                if let Ok(path) = entry.path() {
                     if st.intersects(
                         git2::Status::INDEX_NEW
                             | git2::Status::INDEX_MODIFIED
@@ -146,7 +146,7 @@ impl GitProvider {
         let head = repo.head()?;
         let head_commit = head.peel_to_commit()?;
         let head_oid = head_commit.id();
-        let branch = head.shorthand().map(|s| s.to_string());
+        let branch = head.shorthand().ok().map(|s| s.to_string());
 
         let mut packbuilder = repo.packbuilder()?;
 
