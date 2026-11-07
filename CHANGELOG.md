@@ -7,6 +7,126 @@ Note:
 
 ## [Unreleased]
 
+## [1.2.8](https://github.com/rosetta-dmz/dmz/releases/tag/dmz-gui-v1.2.8) - 2026-11-07
+
+### Added
+
+- *(airgap)* package external sidecars and normalize dual-repo workspace manifests
+
+### Other
+
+- Dual repo export/import bug fixes
+- Security patches & dependency version updates
+- Bug fixes and improvements
+- Merge branch 'main' into multi-workspace-enhancements
+- Umbrella archive topology for multi-workspace air-gap packaging and import
+- Merge branch 'main' into dual-repo-and-sidecar-support-v1
+- Support for dual repos and sidecars
+- Comments & MD updates
+- Toolchain fixes for each ecosystem
+- release v1.2.8
+
+## [1.2.8](https://github.com/rosetta-dmz/dmz/releases/tag/v1.2.8) - 2026-11-07
+
+### Added
+
+- default toolchain packaging and no-toolchain flag added
+
+### Fixed
+
+- *(cli)* correct Windows AF_UNIX socket path limit and test guard
+
+### Other
+
+- Dual repo bug fix
+- Dual repo export/import bug fixes
+- Security patches & dependency version updates
+- Merge pull request #96 from rosetta-dmz/minor-md-updates
+- Minor MD updates
+- Bug fixes and improvements
+- CI, Lib, and CLI sidecar test fixes
+- Merge branch 'main' into dual-repo-and-sidecar-support-v1
+- Support for dual repos and sidecars
+- Comments & MD updates
+- release v1.2.8
+
+## [1.2.8](https://github.com/rosetta-dmz/dmz/releases/tag/dmz-supervisor-v1.2.8) - 2026-11-07
+
+### Fixed
+
+- *(ipc)* handle Windows named pipe kernel lifecycle and test guards
+
+### Other
+
+- Dual repo bug fix
+- Dual repo export/import bug fixes
+- Security patches & dependency version updates
+- Merge pull request #96 from rosetta-dmz/minor-md-updates
+- Minor MD updates
+- Bug fixes and improvements
+- Merge branch 'main' into dual-repo-and-sidecar-support-v1
+- Support for dual repos and sidecars
+- Comments & MD updates
+- release v1.2.8
+
+## [1.2.8](https://github.com/rosetta-dmz/dmz/releases/tag/dmz-sandbox-v1.2.8) - 2026-11-07
+
+### Other
+
+- Security patches & dependency version updates
+- Merge pull request #96 from rosetta-dmz/minor-md-updates
+- Minor MD updates
+- Bug fixes and improvements
+- Merge branch 'main' into dual-repo-and-sidecar-support-v1
+- Support for dual repos and sidecars
+- Comments & MD updates
+- release v1.2.8
+
+## [1.2.8](https://github.com/rosetta-dmz/dmz/releases/tag/dmz-core-v1.2.8) - 2026-11-07
+
+### Added
+
+- *(install)* generic cross-platform cli shim hydration and dynamic bin discovery
+- *(airgap)* package external sidecars and normalize dual-repo workspace manifests
+- enhance toolchain discovery for companion libraries and internal drivers across ecosystems
+- bundle Apple SDK sysroot for hermetic C compilation on macOS
+
+### Fixed
+
+- *(airgap)* align test assertions with umbrella preserved folder names and role symmetry
+- *(ipc)* handle Windows named pipe kernel lifecycle and test guards
+- *(cli)* correct Windows AF_UNIX socket path limit and test guard
+- *(test)* resolve unclosed delimiter and spliced block in airgap validation test
+
+### Other
+
+- Dual repo bug fix
+- Merge pull request #103 from rosetta-dmz/dual-repo-bug-fixes
+- Dual repo export/import bug fixes
+- remove test backup snapshots and add backups to .gitignore
+- Security patches & dependency version updates
+- Normalize Windows path separators in workspace manifests and tar archive headers
+- Dual repo and sidecar fixes
+- Merge pull request #96 from rosetta-dmz/minor-md-updates
+- Minor MD updates
+- Bug fixes and improvements
+- Merge branch 'main' into multi-workspace-enhancements
+- Umbrella archive topology for multi-workspace air-gap packaging and import
+- Merge branch 'main' into dual-repo-and-sidecar-support-v1
+- Support for dual repos and sidecars
+- Comments & MD updates
+- Merge branch 'main' into more-toolchain-fixes - resolve binary and toolchain detection conflicts
+- Toolchain fixes
+- Ecosystem toolchain fix
+- Merge branch 'main' into toolchain-discovery-enhancements
+- minor-toolchain-fixes
+- dynamic-lib-update
+- toolchain-link-fix
+- Merge branch 'main' into multi-ecosystem-toolchain-fixes
+- Toolchain fixes for each ecosystem
+- macos-toolchain-fix-update
+- release v1.2.8
+
 ### Refactoring & Architecture
 - **refactor(cli)**: Modularize CLI architecture following SOLID design principles by extracting `command.rs` into 12 dedicated single-responsibility subcommands under `dmz-cli/src/commands/`.
 - **refactor(core)**: Streamline workspace toolchain detection, enforcing strict root manifest dominance.
