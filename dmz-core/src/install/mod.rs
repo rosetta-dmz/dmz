@@ -90,20 +90,74 @@ impl InstallerEngine {
             }
 
             // Resolve target workspace: if pkg.member_id points to a member, map to its subfolder
-            let target_workspace = if let Some(ref mid) = pkg.member_id {
-                if let Some(ref manifest) = workspace_manifest {
-                    if let Some(member) = manifest.find_member(mid) {
-                        let member_path = config.workspace_path.join(&member.path);
-                        if member_path.is_dir() {
-                            member_path
+            let target_workspace = if let Some(ref manifest) = workspace_manifest {
+                // 1. Try matching by member ID or role alias
+                let member_opt = if let Some(ref mid) = pkg.member_id {
+                    manifest.find_member(mid).or_else(|| {
+                        if mid == "primary" || mid == "default" {
+                            manifest.primary_member()
+                        } else if mid == "sidecar"
+                            || mid == "secondary"
+                            || mid == "companion"
+                            || mid == "service"
+                        {
+                            manifest.sidecars().first().copied()
                         } else {
-                            config.workspace_path.clone()
+                            None
                         }
+                    })
+                } else {
+                    None
+                };
+
+                if let Some(member) = member_opt {
+                    let member_dir = if member.path.is_absolute() {
+                        member.path.clone()
+                    } else {
+                        config.workspace_path.join(&member.path)
+                    };
+                    let member_dir = std::fs::canonicalize(&member_dir).unwrap_or(member_dir);
+                    if member_dir.is_dir() {
+                        member_dir
                     } else {
                         config.workspace_path.clone()
                     }
                 } else {
-                    config.workspace_path.clone()
+                    // 2. Intelligent Ecosystem Fallback:
+                    // Route the package to the workspace member that actually owns the matching manifest
+                    let ecosystem_match = manifest.members.iter().find(|m| {
+                        let m_dir = if m.path.is_absolute() {
+                            m.path.clone()
+                        } else {
+                            config.workspace_path.join(&m.path)
+                        };
+                        let m_dir = std::fs::canonicalize(&m_dir).unwrap_or(m_dir);
+                        match pkg.ecosystem {
+                            Ecosystem::Npm => m_dir.join("package.json").is_file(),
+                            Ecosystem::Cargo => {
+                                m_dir.join("Cargo.toml").is_file()
+                                    || m_dir.join("src-tauri/Cargo.toml").is_file()
+                            }
+                            Ecosystem::PyPI => {
+                                m_dir.join("requirements.txt").is_file()
+                                    || m_dir.join("pyproject.toml").is_file()
+                            }
+                            Ecosystem::Go => m_dir.join("go.mod").is_file(),
+                            Ecosystem::Composer => m_dir.join("composer.json").is_file(),
+                            _ => false,
+                        }
+                    });
+
+                    if let Some(member) = ecosystem_match {
+                        let m_dir = if member.path.is_absolute() {
+                            member.path.clone()
+                        } else {
+                            config.workspace_path.join(&member.path)
+                        };
+                        std::fs::canonicalize(&m_dir).unwrap_or(m_dir)
+                    } else {
+                        config.workspace_path.clone()
+                    }
                 }
             } else {
                 config.workspace_path.clone()
@@ -229,6 +283,22 @@ impl InstallerEngine {
                 let member_path = config.workspace_path.join(&member.path);
                 if member_path.is_dir() {
                     let _ = crate::toolchain::ToolchainSetup::generate_ide_settings(&member_path);
+                }
+            }
+        }
+
+        // Hydrate CLI binary shims (e.g. node_modules/.bin/tauri) for root and all member layouts
+        mappers::NpmMapper::hydrate_workspace_bin_shims(&config.workspace_path);
+        if let Some(ref manifest) = workspace_manifest {
+            for member in &manifest.members {
+                let member_path = if member.path.is_absolute() {
+                    member.path.clone()
+                } else {
+                    config.workspace_path.join(&member.path)
+                };
+                let member_path = std::fs::canonicalize(&member_path).unwrap_or(member_path);
+                if member_path.is_dir() {
+                    mappers::NpmMapper::hydrate_workspace_bin_shims(&member_path);
                 }
             }
         }
