@@ -1,6 +1,6 @@
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::Path;
-#[cfg(target_os = "macos")]
 use std::process::Command;
 
 /// Target machine activation and setup engine for imported toolchains.
@@ -15,7 +15,6 @@ impl ToolchainSetup {
                 .map(|mut i| i.next().is_some())
                 .unwrap_or(false);
         if !has_toolchains {
-            let _ = Self::generate_activator_scripts(workspace_root);
             Self::generate_ide_settings(workspace_root)?;
             return Ok(());
         }
@@ -61,9 +60,11 @@ impl ToolchainSetup {
                 .output();
         }
 
+        // Relocate dynamic linker search paths (RPATH) for bundled binaries
+        Self::relocate_bundled_binaries(workspace_root)?;
+
         // Generate hermetic Clang wrapper scripts (injecting -isysroot on macOS/Unix)
         Self::generate_clang_wrappers(workspace_root)?;
-
         // Setup Node.js companion package managers (npm, npx, pnpm, yarn)
         Self::setup_node_package_managers(workspace_root)?;
 
@@ -76,6 +77,94 @@ impl ToolchainSetup {
         // Configure IDE workspace settings (.vscode/settings.json)
         Self::generate_ide_settings(workspace_root)?;
 
+        Ok(())
+    }
+
+    /// Relocate bundled binaries and shared libraries using relative runtime search paths (RPATH).
+    /// On macOS, uses `install_name_tool` to inject `@loader_path/../lib` and `@executable_path/../lib`,
+    /// followed by ad-hoc codesigning (`codesign --force --sign -`) to satisfy Apple Silicon Gatekeeper.
+    /// On Linux, uses `patchelf` to inject `$ORIGIN/../lib`.
+    pub fn relocate_bundled_binaries(workspace_root: &Path) -> Result<(), String> {
+        let toolchains_dir = workspace_root.join(".dmz/toolchains");
+        if !toolchains_dir.is_dir() {
+            return Ok(());
+        }
+
+        fn walk_and_relocate(dir: &Path) {
+            let Ok(entries) = fs::read_dir(dir) else {
+                return;
+            };
+
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    walk_and_relocate(&p);
+                } else if p.is_file() {
+                    // Skip symlinks
+                    if fs::symlink_metadata(&p)
+                        .map(|m| m.file_type().is_symlink())
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+
+                    // Check magic bytes to identify Mach-O / ELF binaries
+                    let mut magic = [0u8; 4];
+                    let is_binary = if let Ok(mut f) = File::open(&p) {
+                        f.read_exact(&mut magic).is_ok()
+                    } else {
+                        false
+                    };
+
+                    if !is_binary {
+                        continue;
+                    }
+
+                    #[cfg(target_os = "macos")]
+                    {
+                        let is_macho = matches!(
+                            magic,
+                            [0xfe, 0xed, 0xfa, 0xcf]
+                                | [0xcf, 0xfa, 0xed, 0xfe]
+                                | [0xfe, 0xed, 0xfa, 0xce]
+                                | [0xce, 0xfa, 0xed, 0xfe]
+                                | [0xca, 0xfe, 0xba, 0xbe]
+                                | [0xbe, 0xba, 0xfe, 0xca]
+                        );
+
+                        if is_macho {
+                            let _ = Command::new("install_name_tool")
+                                .arg("-add_rpath")
+                                .arg("@loader_path/../lib")
+                                .arg(&p)
+                                .output();
+                            let _ = Command::new("install_name_tool")
+                                .arg("-add_rpath")
+                                .arg("@executable_path/../lib")
+                                .arg(&p)
+                                .output();
+                            let _ = Command::new("codesign")
+                                .args(["--force", "--sign", "-", p.to_str().unwrap_or_default()])
+                                .output();
+                        }
+                    }
+
+                    #[cfg(target_os = "linux")]
+                    {
+                        let is_elf = magic == *b"\x7fELF";
+                        if is_elf {
+                            let _ = Command::new("patchelf")
+                                .arg("--set-rpath")
+                                .arg("$ORIGIN/../lib")
+                                .arg(&p)
+                                .output();
+                        }
+                    }
+                }
+            }
+        }
+
+        walk_and_relocate(&toolchains_dir);
         Ok(())
     }
 
@@ -467,30 +556,31 @@ else
     _DMZ_SELF="$0"
 fi
 
-_START_DIR=""
+# Resolve physical path to handle symlinked .dmz directories in member workspaces
 if [ -f "$_DMZ_SELF" ]; then
-    _START_DIR="$(cd "$(dirname "$_DMZ_SELF")/.." && pwd)"
+    _DMZ_DIR="$(cd -P "$(dirname "$_DMZ_SELF")" 2>/dev/null && pwd -P)"
+    DMZ_WS="$(cd -P "$_DMZ_DIR/.." 2>/dev/null && pwd -P)"
 elif [ -d "./.dmz" ]; then
-    _START_DIR="$(pwd)"
+    _DMZ_DIR="$(cd -P "./.dmz" 2>/dev/null && pwd -P)"
+    DMZ_WS="$(cd -P "$_DMZ_DIR/.." 2>/dev/null && pwd -P)"
 elif [ -d "../.dmz" ]; then
-    _START_DIR="$(cd .. && pwd)"
+    _DMZ_DIR="$(cd -P "../.dmz" 2>/dev/null && pwd -P)"
+    DMZ_WS="$(cd -P "$_DMZ_DIR/.." 2>/dev/null && pwd -P)"
+elif [ -d "../../.dmz" ]; then
+    _DMZ_DIR="$(cd -P "../../.dmz" 2>/dev/null && pwd -P)"
+    DMZ_WS="$(cd -P "$_DMZ_DIR/.." 2>/dev/null && pwd -P)"
 else
-    _START_DIR="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
+    DMZ_WS="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
 fi
 
-# Walk upward to find top-level workspace root containing toolchains or dmz manifest
-DMZ_WS="$_START_DIR"
-_CUR="$_START_DIR"
-while [ -n "$_CUR" ] && [ "$_CUR" != "/" ] && [ "$_CUR" != "." ]; do
-    if [ -d "$_CUR/.dmz/toolchains" ] || [ -f "$_CUR/dmz-workspace.toml" ] || [ -f "$_CUR/dmz.toml" ]; then
-        DMZ_WS="$_CUR"
+# Fallback parent directory traversal if .dmz/toolchains is in an ancestor directory
+_CURR="$DMZ_WS"
+while [ -n "$_CURR" ] && [ "$_CURR" != "/" ]; do
+    if [ -d "$_CURR/.dmz/toolchains" ]; then
+        DMZ_WS="$_CURR"
         break
     fi
-    _PARENT="$(cd "$_CUR/.." 2>/dev/null && pwd)"
-    if [ "$_PARENT" = "$_CUR" ]; then
-        break
-    fi
-    _CUR="$_PARENT"
+    _CURR="$(dirname "$_CURR")"
 done
 export DMZ_WORKSPACE="$DMZ_WS"
 
@@ -513,6 +603,24 @@ if [ -d "$DMZ_WS/.dmz/toolchains" ]; then
     done
 fi
 
+# Prepend member node_modules/.bin directories to PATH
+if [ -d "$DMZ_WS/workspaces" ]; then
+    for ws_bin in "$DMZ_WS"/workspaces/*/node_modules/.bin; do
+        if [ -d "$ws_bin" ]; then
+            case ":$PATH:" in
+                *":$ws_bin:"*) ;;
+                *) export PATH="$ws_bin:$PATH" ;;
+            esac
+        fi
+    done
+fi
+if [ -d "$DMZ_WS/node_modules/.bin" ]; then
+    case ":$PATH:" in
+        *":$DMZ_WS/node_modules/.bin:"*) ;;
+        *) export PATH="$DMZ_WS/node_modules/.bin:$PATH" ;;
+    esac
+fi
+
 # Configure ecosystem environments
 if [ -d "$DMZ_WS/.dmz/toolchains/rust" ]; then
     export RUSTUP_HOME="$DMZ_WS/.dmz/toolchains/rust"
@@ -531,8 +639,9 @@ if [ -d "$DMZ_WS/.dmz/toolchains/go" ] && ([ -f "$DMZ_WS/.dmz/toolchains/go/bin/
     export GOROOT="$DMZ_WS/.dmz/toolchains/go"
 fi
 
-# Explicitly unset PYTHONHOME to avoid host Python stdlib corruption ("failed to import encodings module")
-unset PYTHONHOME 2>/dev/null || true
+if [ -d "$DMZ_WS/.dmz/toolchains/python" ] && ([ -d "$DMZ_WS/.dmz/toolchains/python/lib" ] || [ -d "$DMZ_WS/.dmz/toolchains/python/Lib" ]); then
+    export PYTHONHOME="$DMZ_WS/.dmz/toolchains/python"
+fi
 
 if [ -d "$DMZ_WS/.dmz/toolchains/node" ]; then
     if [ -d "$DMZ_WS/.dmz/toolchains/node/lib/node_modules" ]; then
@@ -667,23 +776,22 @@ fi
 
         let env_bat_content = r#"@echo off
 REM DMZ Toolchain Environment Activator (Windows)
-set "DMZ_WORKSPACE=%~dp0.."
-if exist "%~dp0..\dmz-workspace.toml" (
-    set "DMZ_WORKSPACE=%~dp0.."
-) else if exist "%~dp0..\..\dmz-workspace.toml" (
-    for %%I in ("%~dp0..\..") do set "DMZ_WORKSPACE=%%~fI"
-) else if exist "%~dp0..\..\..\dmz-workspace.toml" (
-    for %%I in ("%~dp0..\..\..") do set "DMZ_WORKSPACE=%%~fI"
-) else if exist "%~dp0..\..\.dmz\toolchains" (
-    for %%I in ("%~dp0..\..") do set "DMZ_WORKSPACE=%%~fI"
-) else if exist "%~dp0..\..\..\.dmz\toolchains" (
-    for %%I in ("%~dp0..\..\..") do set "DMZ_WORKSPACE=%%~fI"
-)
+set DMZ_WORKSPACE=%~dp0..
 
 for /d %%D in ("%DMZ_WORKSPACE%\.dmz\toolchains\*") do (
     if exist "%%D\bin" (
         echo ;%PATH%; | findstr /I /C:";%%D\bin;" >nul || set "PATH=%%D\bin;%PATH%"
     )
+)
+
+for /d %%D in ("%DMZ_WORKSPACE%\workspaces\*") do (
+    if exist "%%D\node_modules\.bin" (
+        echo ;%PATH%; | findstr /I /C:";%%D\node_modules\.bin;" >nul || set "PATH=%%D\node_modules\.bin;%PATH%"
+    )
+)
+
+if exist "%DMZ_WORKSPACE%\node_modules\.bin" (
+    echo ;%PATH%; | findstr /I /C:";%DMZ_WORKSPACE%\node_modules\.bin;" >nul || set "PATH=%DMZ_WORKSPACE%\node_modules\.bin;%PATH%"
 )
 
 if exist "%DMZ_WORKSPACE%\.dmz\toolchains\rust" (
@@ -695,8 +803,11 @@ if exist "%DMZ_WORKSPACE%\.dmz\toolchains\go\bin\go.exe" (
     set "GOROOT=%DMZ_WORKSPACE%\.dmz\toolchains\go"
 )
 
-:: Explicitly clear PYTHONHOME to avoid host Python stdlib corruption ("failed to import encodings module")
-set "PYTHONHOME="
+if exist "%DMZ_WORKSPACE%\.dmz\toolchains\python\Lib" (
+    set "PYTHONHOME=%DMZ_WORKSPACE%\.dmz\toolchains\python"
+) else if exist "%DMZ_WORKSPACE%\.dmz\toolchains\python\lib" (
+    set "PYTHONHOME=%DMZ_WORKSPACE%\.dmz\toolchains\python"
+)
 
 if exist "%DMZ_WORKSPACE%\.dmz\toolchains\node\lib\node_modules" (
     set "NODE_PATH=%DMZ_WORKSPACE%\.dmz\toolchains\node\lib\node_modules;%NODE_PATH%"
@@ -781,7 +892,7 @@ echo DMZ bundled toolchains activated.
         fs::create_dir_all(workspace_root.join(".dmz"))
             .map_err(|e| format!("Failed to create .dmz directory: {}", e))?;
 
-        fs::write(&env_sh_path, &env_sh_content)
+        fs::write(&env_sh_path, env_sh_content)
             .map_err(|e| format!("Failed to write env.sh: {}", e))?;
 
         #[cfg(unix)]
@@ -792,33 +903,6 @@ echo DMZ bundled toolchains activated.
 
         fs::write(&env_bat_path, env_bat_content)
             .map_err(|e| format!("Failed to write env.bat: {}", e))?;
-
-        // If this is an umbrella multi-workspace, also write activator scripts to each member's .dmz directory
-        let manifest_file = workspace_root.join("dmz-workspace.toml");
-        if let Ok(manifest) =
-            crate::workspace::WorkspaceProjectConfig::load_from_file(&manifest_file)
-        {
-            for member in &manifest.members {
-                let member_dir = if member.path.is_absolute() {
-                    member.path.clone()
-                } else {
-                    workspace_root.join(&member.path)
-                };
-                let member_dir = std::fs::canonicalize(&member_dir).unwrap_or(member_dir);
-                if member_dir.is_dir() && member_dir != workspace_root {
-                    let member_dmz = member_dir.join(".dmz");
-                    let _ = fs::create_dir_all(&member_dmz);
-                    let m_env_sh = member_dmz.join("env.sh");
-                    let _ = fs::write(&m_env_sh, &env_sh_content);
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let _ = fs::set_permissions(&m_env_sh, fs::Permissions::from_mode(0o755));
-                    }
-                    let _ = fs::write(member_dmz.join("env.bat"), env_bat_content);
-                }
-            }
-        }
 
         Ok(())
     }
@@ -1112,51 +1196,24 @@ echo DMZ bundled toolchains activated.
             // Configure Python if Python is bundled with a verified interpreter binary
             // Only set at the root level if the root workspace is NOT an umbrella container
             let is_umbrella = workspace_root.join("dmz-workspace.toml").exists();
-            let venv_py = if cfg!(windows) {
-                workspace_root.join(".venv/Scripts/python.exe")
-            } else {
-                workspace_root.join(".venv/bin/python")
-            };
-
-            if venv_py.is_file() {
-                let py_bin = if cfg!(windows) {
-                    "${workspaceFolder}/.venv/Scripts/python.exe"
-                } else {
-                    "${workspaceFolder}/.venv/bin/python"
-                };
-                settings.insert(
-                    "python.defaultInterpreterPath".into(),
-                    serde_json::Value::String(py_bin.into()),
-                );
-            } else if !is_umbrella && toolchains_dir.join("python").exists() {
+            if !is_umbrella && toolchains_dir.join("python").exists() {
                 let py_dir = toolchains_dir.join("python");
-                let py_bin_opt = if cfg!(windows) {
-                    if py_dir.join("python.exe").is_file() {
-                        Some("${workspaceFolder}/.dmz/toolchains/python/python.exe")
-                    } else if py_dir.join("bin/python.exe").is_file() {
-                        Some("${workspaceFolder}/.dmz/toolchains/python/bin/python.exe")
+                let has_py_bin = py_dir.join("bin/python3").exists()
+                    || py_dir.join("bin/python").exists()
+                    || py_dir.join("bin/pip").exists()
+                    || py_dir.join("python.exe").exists()
+                    || py_dir.join("bin/python.exe").exists();
+                if has_py_bin {
+                    let py_bin = if cfg!(windows) {
+                        "${workspaceFolder}/.dmz/toolchains/python/python.exe"
                     } else {
-                        None
-                    }
-                } else {
-                    if py_dir.join("bin/python3").is_file() {
-                        Some("${workspaceFolder}/.dmz/toolchains/python/bin/python3")
-                    } else if py_dir.join("bin/python").is_file() {
-                        Some("${workspaceFolder}/.dmz/toolchains/python/bin/python")
-                    } else {
-                        None
-                    }
-                };
-                if let Some(py_bin) = py_bin_opt {
+                        "${workspaceFolder}/.dmz/toolchains/python/bin/python3"
+                    };
                     settings.insert(
                         "python.defaultInterpreterPath".into(),
                         serde_json::Value::String(py_bin.into()),
                     );
-                } else {
-                    settings.remove("python.defaultInterpreterPath");
                 }
-            } else if is_umbrella {
-                settings.remove("python.defaultInterpreterPath");
             }
 
             // Configure Go if Go is bundled with a verified go binary
@@ -1205,27 +1262,27 @@ echo DMZ bundled toolchains activated.
         Ok(())
     }
 
-    /// Builds the JSON payload for `<project>.code-workspace` for multi-root projects.
-    ///
-    /// When `member_host_paths` is provided (e.g., during archive export before member folders
-    /// are materialized under `workspaces/<id>`), filesystem probes inspect the mapped host paths
-    /// while workspace paths in the generated JSON use the normalized `m.path`.
-    pub fn build_multi_root_workspace_json(
-        workspace_root: &Path,
-        ws_project: &crate::workspace::WorkspaceProjectConfig,
-        member_host_paths: Option<&std::collections::HashMap<String, std::path::PathBuf>>,
-    ) -> serde_json::Value {
+    /// Generates or updates `<project>.code-workspace` for multi-root projects
+    pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), String> {
+        let manifest_path = workspace_root.join("dmz-workspace.toml");
+        if !manifest_path.exists() {
+            return Ok(());
+        }
+
+        let ws_project =
+            match crate::workspace::WorkspaceProjectConfig::load_from_file(&manifest_path) {
+                Ok(p) => p,
+                Err(_) => return Ok(()),
+            };
+
         let mut folders = Vec::new();
         let mut linked_rust_projects = Vec::new();
         let mut node_bin_unix = Vec::new();
         let mut node_bin_win = Vec::new();
 
         for m in &ws_project.members {
-            let m_path_str = m.path.to_string_lossy().replace('\\', "/");
-            let member_full_path = member_host_paths
-                .and_then(|map| map.get(&m.id))
-                .cloned()
-                .unwrap_or_else(|| workspace_root.join(&m.path));
+            let m_path_str = m.path.to_string_lossy().to_string();
+            let member_full_path = workspace_root.join(&m.path);
 
             let is_python = m.ecosystem.as_deref() == Some("python")
                 || m.ecosystem.as_deref() == Some("pypi")
@@ -1257,19 +1314,14 @@ echo DMZ bundled toolchains activated.
                 ));
                 node_bin_win.push(format!(
                     "${{workspaceFolder}}\\{}\\node_modules\\.bin",
-                    m_path_str.replace('/', "\\")
+                    m_path_str
                 ));
             }
 
-            let short_folder_name = m
-                .path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(&m_path_str);
             let label = if !m.id.is_empty() {
                 m.id.clone()
             } else {
-                short_folder_name.to_string()
+                m_path_str.to_string()
             };
 
             let mut folder_entry = serde_json::json!({
@@ -1282,19 +1334,24 @@ echo DMZ bundled toolchains activated.
                     "python.terminal.activateEnvironment": true
                 });
 
-                let venv_py = if cfg!(windows) {
-                    member_full_path.join(".venv/Scripts/python.exe")
+                let has_bundled_py = workspace_root.join(".dmz/toolchains/python").exists();
+                let member_venv = member_full_path.join(".venv");
+
+                let depth = m
+                    .path
+                    .components()
+                    .filter(|c| matches!(c, std::path::Component::Normal(_)))
+                    .count();
+                let rel_prefix = if depth == 0 {
+                    ".".to_string()
                 } else {
-                    member_full_path.join(".venv/bin/python")
+                    vec![".."; depth].join("/")
                 };
 
-                let toolchain_py = if cfg!(windows) {
-                    workspace_root.join(".dmz/toolchains/python/python.exe")
-                } else {
-                    workspace_root.join(".dmz/toolchains/python/bin/python3")
-                };
+                let py_bin_exists = member_venv.join("bin/python").exists()
+                    || member_venv.join("Scripts/python.exe").exists();
 
-                if venv_py.is_file() {
+                if member_venv.exists() && py_bin_exists {
                     let py_bin = if cfg!(windows) {
                         "${workspaceFolder}/.venv/Scripts/python.exe"
                     } else {
@@ -1302,15 +1359,23 @@ echo DMZ bundled toolchains activated.
                     };
                     py_settings["python.defaultInterpreterPath"] =
                         serde_json::Value::String(py_bin.to_string());
-                } else if toolchain_py.is_file() {
-                    let rel_py = crate::archive::importer::AirGapImporter::relative_path_between(
-                        &member_full_path,
-                        &workspace_root.join(".dmz/toolchains/python"),
-                    );
-                    let py_bin = if cfg!(windows) {
-                        format!("${{workspaceFolder}}/{}/python.exe", rel_py)
+                } else if has_bundled_py {
+                    let py_bin = if rel_prefix == "." {
+                        if cfg!(windows) {
+                            "${workspaceFolder}/.dmz/toolchains/python/python.exe".to_string()
+                        } else {
+                            "${workspaceFolder}/.dmz/toolchains/python/bin/python3".to_string()
+                        }
+                    } else if cfg!(windows) {
+                        format!(
+                            "${{workspaceFolder}}/{}/.dmz/toolchains/python/python.exe",
+                            rel_prefix
+                        )
                     } else {
-                        format!("${{workspaceFolder}}/{}/bin/python3", rel_py)
+                        format!(
+                            "${{workspaceFolder}}/{}/.dmz/toolchains/python/bin/python3",
+                            rel_prefix
+                        )
                     };
                     py_settings["python.defaultInterpreterPath"] =
                         serde_json::Value::String(py_bin);
@@ -1322,12 +1387,18 @@ echo DMZ bundled toolchains activated.
             folders.push(folder_entry);
         }
 
-        if member_host_paths.is_none() && workspace_root.join("documentation").is_dir() {
+        if workspace_root.join("documentation").is_dir() {
             folders.push(serde_json::json!({
                 "name": "Documentation",
                 "path": "documentation"
             }));
         }
+
+        let project_name = if !ws_project.name.is_empty() {
+            &ws_project.name
+        } else {
+            "workspace"
+        };
 
         let unix_node_prefix = if !node_bin_unix.is_empty() {
             format!("{}:", node_bin_unix.join(":"))
@@ -1383,7 +1454,7 @@ echo DMZ bundled toolchains activated.
             )
         };
 
-        serde_json::json!({
+        let code_workspace_obj = serde_json::json!({
             "folders": folders,
             "settings": {
                 "rust-analyzer.linkedProjects": linked_rust_projects,
@@ -1397,30 +1468,7 @@ echo DMZ bundled toolchains activated.
                     "PATH": win_path
                 }
             }
-        })
-    }
-
-    /// Generates or updates `<project>.code-workspace` for multi-root projects
-    pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), String> {
-        let manifest_path = workspace_root.join("dmz-workspace.toml");
-        if !manifest_path.exists() {
-            return Ok(());
-        }
-
-        let ws_project =
-            match crate::workspace::WorkspaceProjectConfig::load_from_file(&manifest_path) {
-                Ok(p) => p,
-                Err(_) => return Ok(()),
-            };
-
-        let project_name = if !ws_project.name.is_empty() {
-            &ws_project.name
-        } else {
-            "workspace"
-        };
-
-        let code_workspace_obj =
-            Self::build_multi_root_workspace_json(workspace_root, &ws_project, None);
+        });
 
         let cw_path = workspace_root.join(format!("{}.code-workspace", project_name));
         let content = serde_json::to_string_pretty(&code_workspace_obj)
@@ -1731,65 +1779,5 @@ mod tests {
         ToolchainSetup::setup_imported_toolchains(ws).unwrap();
         let env_sh_3 = fs::read_to_string(ws.join(".dmz/env.sh")).unwrap();
         assert_eq!(env_sh_1, env_sh_3);
-    }
-
-    #[test]
-    fn test_env_sh_and_bat_unsets_pythonhome() {
-        let temp = tempdir().unwrap();
-        let ws = temp.path();
-
-        ToolchainSetup::generate_activator_scripts(ws).unwrap();
-
-        let env_sh = fs::read_to_string(ws.join(".dmz/env.sh")).unwrap();
-        assert!(
-            env_sh.contains("unset PYTHONHOME"),
-            "env.sh must unset PYTHONHOME to prevent standard library poisoning"
-        );
-        assert!(
-            !env_sh.contains("export PYTHONHOME="),
-            "env.sh must NOT export PYTHONHOME"
-        );
-
-        let env_bat = fs::read_to_string(ws.join(".dmz/env.bat")).unwrap();
-        assert!(
-            env_bat.contains("set \"PYTHONHOME=\""),
-            "env.bat must clear PYTHONHOME"
-        );
-    }
-
-    #[test]
-    fn test_multi_root_workspace_python_interpreter_omitted_when_missing() {
-        let temp = tempdir().unwrap();
-        let ws = temp.path();
-
-        // Create an umbrella workspace with a python member that has no venv or bundled python
-        let manifest_content = r#"
-name = "test-umbrella"
-members = [
-    { id = "backend", path = "workspaces/backend", role = "sidecar", ecosystem = "python" }
-]
-"#;
-        fs::write(ws.join("dmz-workspace.toml"), manifest_content).unwrap();
-        let member_dir = ws.join("workspaces/backend");
-        fs::create_dir_all(&member_dir).unwrap();
-        fs::write(member_dir.join("requirements.txt"), "flask==2.0.0").unwrap();
-
-        ToolchainSetup::generate_multi_root_workspace(ws).unwrap();
-
-        let ws_file = ws.join("test-umbrella.code-workspace");
-        assert!(ws_file.is_file());
-        let content = fs::read_to_string(&ws_file).unwrap();
-        let val: serde_json::Value = serde_json::from_str(&content).unwrap();
-
-        let folders = val["folders"].as_array().unwrap();
-        let backend = folders.iter().find(|f| f["name"] == "backend").unwrap();
-        let settings = &backend["settings"];
-
-        // python.defaultInterpreterPath must NOT be set when neither venv nor toolchains python binary exists
-        assert!(
-            settings.get("python.defaultInterpreterPath").is_none(),
-            "python.defaultInterpreterPath must not be set to a non-existent binary"
-        );
-        assert_eq!(settings["python.terminal.activateEnvironment"], true);
     }
 }

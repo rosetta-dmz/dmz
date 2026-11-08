@@ -17,6 +17,33 @@ pub use packager::ToolchainArchivePackager;
 pub use setup::ToolchainSetup;
 pub use types::{DiscoveredToolchain, ToolchainEcosystem, ToolchainManifestEntry};
 
+#[derive(Debug)]
+pub enum ToolchainError {
+    Io(String),
+    SetupFailed(String),
+    DiscoveryFailed(String),
+    PackagingFailed(String),
+}
+
+impl std::fmt::Display for ToolchainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(msg) => write!(f, "Toolchain IO Error: {}", msg),
+            Self::SetupFailed(msg) => write!(f, "Toolchain Setup Error: {}", msg),
+            Self::DiscoveryFailed(msg) => write!(f, "Toolchain Discovery Error: {}", msg),
+            Self::PackagingFailed(msg) => write!(f, "Toolchain Packaging Error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for ToolchainError {}
+
+impl From<ToolchainError> for String {
+    fn from(err: ToolchainError) -> Self {
+        err.to_string()
+    }
+}
+
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tar::Builder as TarBuilder;
@@ -206,8 +233,18 @@ impl ToolchainPackager {
         lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
         tar_builder: &mut TarBuilder<W>,
     ) -> Result<Vec<ToolchainManifestEntry>, String> {
+        Self::package_toolchains_with_epoch(workspace_root, lockfile, tar_builder, 315_532_800)
+    }
+
+    /// Package discovered toolchains scoped to the workspace, lockfile, and deterministic epoch.
+    pub fn package_toolchains_with_epoch<W: std::io::Write>(
+        workspace_root: &Path,
+        lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
+        tar_builder: &mut TarBuilder<W>,
+        deterministic_epoch: u64,
+    ) -> Result<Vec<ToolchainManifestEntry>, String> {
         let toolchains = ToolchainProvider::discover_for_workspace(workspace_root, lockfile);
-        ToolchainArchivePackager::package(tar_builder, &toolchains)
+        ToolchainArchivePackager::package_with_epoch(tar_builder, &toolchains, deterministic_epoch)
     }
 
     /// Set up imported toolchain directory: execution permissions, quarantine clearance, and activator scripts.

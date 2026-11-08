@@ -6,46 +6,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use tar::Builder as TarBuilder;
 use tracing::{info, warn};
 use zstd::stream::write::Encoder as ZstdEncoder;
-
-/// Single-pass streaming writer that updates a SHA-256 digest and byte counter on every write.
-pub(crate) struct HashingWriter<W: Write> {
-    inner: W,
-    hasher: Sha256,
-    bytes_written: u64,
-}
-
-impl<W: Write> HashingWriter<W> {
-    pub(crate) fn new(inner: W) -> Self {
-        Self {
-            inner,
-            hasher: Sha256::new(),
-            bytes_written: 0,
-        }
-    }
-
-    pub(crate) fn finalize(mut self) -> std::io::Result<(String, u64)> {
-        self.inner.flush()?;
-        Ok((format!("{:x}", self.hasher.finalize()), self.bytes_written))
-    }
-}
-
-impl<W: Write> Write for HashingWriter<W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let n = self.inner.write(buf)?;
-        self.hasher.update(&buf[..n]);
-        self.bytes_written += n as u64;
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportMode {
@@ -136,6 +101,51 @@ impl std::fmt::Display for ExportError {
 }
 
 impl std::error::Error for ExportError {}
+
+/// Transparent streaming writer calculating cryptographic SHA-256 in a single pass
+/// without intermediate memory buffering or post-compression disk re-reading.
+pub struct HashingWriter<W: Write> {
+    inner: W,
+    hasher: Sha256,
+    bytes_written: u64,
+}
+
+impl<W: Write> HashingWriter<W> {
+    pub fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+            bytes_written: 0,
+        }
+    }
+
+    pub fn finalize(mut self) -> std::io::Result<(String, u64)> {
+        self.inner.flush()?;
+        Ok((format!("{:x}", self.hasher.finalize()), self.bytes_written))
+    }
+
+    pub fn finalize_hash(self) -> (W, String) {
+        let hash = format!("{:x}", self.hasher.finalize());
+        (self.inner, hash)
+    }
+
+    pub fn bytes_written(&self) -> u64 {
+        self.bytes_written
+    }
+}
+
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        self.bytes_written += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
 
 pub struct AirGapExporter;
 
@@ -299,27 +309,45 @@ impl AirGapExporter {
             }
         }
 
-        // Prepare archive output stream with 64 KB buffered single-pass SHA-256 hashing writer
+        // Compute reproducible timestamp (SOURCE_DATE_EPOCH -> git commit time -> 1980-01-01 DOS epoch)
+        let deterministic_epoch =
+            Self::resolve_deterministic_epoch(&workspace_root, vcs_provenance.as_ref());
+        info!(
+            epoch = deterministic_epoch,
+            "Configured reproducible archive timestamp"
+        );
+
+        // Prepare archive output stream with buffered I/O, streaming SHA-256 calculation, and multithreaded zstd
         let file = File::create(&effective_output)
             .map_err(|e| ExportError::IoError(format!("Failed to create export archive: {}", e)))?;
-        let hashing_writer = HashingWriter::new(BufWriter::with_capacity(64 * 1024, file));
+        let buf_file = BufWriter::with_capacity(128 * 1024, file);
+        let hashing_writer = HashingWriter::new(buf_file);
 
-        let zstd_encoder = ZstdEncoder::new(hashing_writer, config.zstd_level)
+        let mut zstd_encoder = ZstdEncoder::new(hashing_writer, config.zstd_level)
             .map_err(|e| ExportError::ArchiveError(format!("Failed to initialize zstd: {}", e)))?;
+
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get() as u32)
+            .unwrap_or(4)
+            .clamp(1, 16);
+        let _ = zstd_encoder.multithread(workers);
 
         let mut tar_builder = TarBuilder::new(zstd_encoder);
 
-        // Append lockfile
-        tar_builder
-            .append_path_with_name(&effective_lockfile, "dmz.lock")
-            .map_err(|e| ExportError::ArchiveError(format!("Failed to pack dmz.lock: {}", e)))?;
+        // Append lockfile with normalized header
+        Self::append_file_normalized(
+            &mut tar_builder,
+            &effective_lockfile,
+            "dmz.lock",
+            deterministic_epoch,
+        )?;
 
         // Append store items (if mode is Unified or DepsOnly)
         let mut packed_count = 0;
         if config.mode == ExportMode::Unified || config.mode == ExportMode::DepsOnly {
             for pkg_info in lockfile.packages.values() {
                 // Skip local path dependencies/workspace members since they are in the workspace source
-                if pkg_info.version.starts_with("path:") {
+                if pkg_info.version.starts_with("path:") || pkg_info.version.contains("path") {
                     continue;
                 }
 
@@ -334,16 +362,16 @@ impl AirGapExporter {
                             &pkg_store_path,
                             &archive_dest,
                             false,
+                            deterministic_epoch,
                         )?;
                     } else {
-                        tar_builder
-                            .append_path_with_name(&pkg_store_path, &archive_dest)
-                            .map_err(|e| {
-                                ExportError::ArchiveError(format!(
-                                    "Failed to pack package {}: {}",
-                                    pkg_info.name, e
-                                ))
-                            })?;
+                        let normalized_dest = archive_dest.to_string_lossy().replace('\\', "/");
+                        Self::append_file_normalized(
+                            &mut tar_builder,
+                            &pkg_store_path,
+                            &normalized_dest,
+                            deterministic_epoch,
+                        )?;
                     }
                     packed_count += 1;
                 } else {
@@ -369,69 +397,150 @@ impl AirGapExporter {
         if config.mode == ExportMode::Unified || config.mode == ExportMode::CodeOnly {
             if let Some(ref ws_project) = ws_project_opt {
                 // --- MULTI-WORKSPACE UMBRELLA EXPORT ---
-                let layouts = ws_project
-                    .resolve_member_layouts(&workspace_root, manifest_path_opt.as_deref());
+                let primary_raw_name = workspace_root
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or("primary")
+                    .to_string();
+
+                let mut member_folder_names = HashMap::new();
                 let mut member_host_paths = HashMap::new();
-                let mut member_archive_paths = HashMap::new();
 
-                for layout in &layouts {
-                    member_host_paths.insert(layout.member.id.clone(), layout.host_path.clone());
-                    member_archive_paths
-                        .insert(layout.member.id.clone(), layout.archive_path.clone());
-
-                    if layout.member.role == MemberRole::Primary {
-                        info!(
-                            folder = %layout.archive_path.display(),
-                            path = ?layout.host_path,
-                            "Packaging primary workspace files into workspaces namespace"
-                        );
-                        if let Some(ref changed_files) = changed_files_filter {
-                            Self::append_filtered_files(
-                                &mut tar_builder,
-                                &layout.host_path,
-                                changed_files,
-                            )?;
+                for member in &ws_project.members {
+                    if member.role == MemberRole::Primary {
+                        let folder_name = if !member.id.is_empty()
+                            && member.id != "primary"
+                            && member.id != "default"
+                        {
+                            member.id.clone()
                         } else {
-                            Self::append_dir_all(
-                                &mut tar_builder,
-                                &layout.host_path,
-                                &layout.archive_path,
-                                true,
-                            )?;
-                        }
-                    } else if layout.host_path.is_dir() {
-                        info!(
-                            member = %layout.member.id,
-                            src = ?layout.host_path,
-                            dest = %layout.archive_path.display(),
-                            "Packaging sidecar workspace files into workspaces namespace"
-                        );
-                        Self::append_dir_all(
-                            &mut tar_builder,
-                            &layout.host_path,
-                            &layout.archive_path,
-                            true,
-                        )?;
+                            primary_raw_name.clone()
+                        };
+                        member_folder_names.insert(member.id.clone(), folder_name);
+                        member_host_paths.insert(member.id.clone(), workspace_root.clone());
+                    } else {
+                        let host_path = if member.path.is_relative() {
+                            if let Some(ref m_path) = manifest_path_opt {
+                                m_path
+                                    .parent()
+                                    .unwrap_or(&workspace_root)
+                                    .join(&member.path)
+                            } else {
+                                workspace_root.join(&member.path)
+                            }
+                        } else {
+                            member.path.clone()
+                        };
+                        let host_path = fs::canonicalize(&host_path).unwrap_or(host_path);
+                        let raw_name = host_path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .filter(|n| !n.is_empty())
+                            .unwrap_or(&member.id)
+                            .to_string();
+                        let folder_name = if !member.id.is_empty()
+                            && member.id != "sidecar"
+                            && member.id != "service"
+                            && member.id != "default"
+                        {
+                            member.id.clone()
+                        } else {
+                            raw_name
+                        };
+                        member_folder_names.insert(member.id.clone(), folder_name);
+                        member_host_paths.insert(member.id.clone(), host_path);
                     }
                 }
 
-                let primary_folder_name = layouts
-                    .iter()
-                    .find(|l| l.member.role == MemberRole::Primary)
-                    .map(|l| l.folder_name.clone())
-                    .unwrap_or_else(|| "primary".to_string());
+                // Disambiguate if primary and sidecar resolve to the same folder name
+                let primary_folder_name = member_folder_names
+                    .get(
+                        ws_project
+                            .primary_member()
+                            .map(|m| m.id.as_str())
+                            .unwrap_or("primary"),
+                    )
+                    .cloned()
+                    .unwrap_or_else(|| primary_raw_name.clone());
+
+                for (id, name) in member_folder_names.iter_mut() {
+                    let is_primary = ws_project
+                        .primary_member()
+                        .map(|m| m.id == *id)
+                        .unwrap_or(false);
+                    if !is_primary && *name == primary_folder_name {
+                        *name = format!("{}-sidecar", name);
+                    }
+                }
+
+                // 1. Package Primary Repository into its dedicated workspaces/<primary_folder> namespace
+                let primary_dest = PathBuf::from(format!("workspaces/{}", primary_folder_name));
+                info!(
+                    folder = %primary_dest.display(),
+                    path = ?workspace_root,
+                    "Packaging primary workspace files into workspaces namespace"
+                );
+                if let Some(ref changed_files) = changed_files_filter {
+                    Self::append_filtered_files(
+                        &mut tar_builder,
+                        &workspace_root,
+                        changed_files,
+                        deterministic_epoch,
+                    )?;
+                } else {
+                    Self::append_dir_all(
+                        &mut tar_builder,
+                        &workspace_root,
+                        &primary_dest,
+                        true,
+                        deterministic_epoch,
+                    )?;
+                }
+
+                // 2. Package each Sidecar / Service Member into its dedicated workspaces/<sidecar_folder> namespace
+                for member in &ws_project.members {
+                    if member.role != MemberRole::Primary {
+                        if let Some(host_path) = member_host_paths.get(&member.id) {
+                            if let Some(folder_name) = member_folder_names.get(&member.id) {
+                                if host_path.is_dir() {
+                                    let sidecar_dest =
+                                        PathBuf::from(format!("workspaces/{}", folder_name));
+                                    info!(
+                                        member = %member.id,
+                                        src = ?host_path,
+                                        dest = %sidecar_dest.display(),
+                                        "Packaging sidecar workspace files into workspaces namespace"
+                                    );
+                                    Self::append_dir_all(
+                                        &mut tar_builder,
+                                        host_path,
+                                        &sidecar_dest,
+                                        true,
+                                        deterministic_epoch,
+                                    )?;
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // 3. Serialize and embed normalized dmz-workspace.toml pointing to workspaces/<folder> subfolders
                 let mut normalized_project = ws_project.clone();
                 for m in &mut normalized_project.members {
-                    if let Some(archive_path) = member_archive_paths.get(&m.id) {
-                        m.path = archive_path.clone();
+                    if let Some(folder_name) = member_folder_names.get(&m.id) {
+                        m.path = PathBuf::from(format!("workspaces/{}", folder_name));
                     }
                 }
                 if let Ok(toml_str) = normalized_project.to_toml_string() {
                     let mut header = tar::Header::new_gnu();
                     header.set_size(toml_str.len() as u64);
                     header.set_mode(0o644);
+                    header.set_mtime(deterministic_epoch);
+                    header.set_uid(0);
+                    header.set_gid(0);
+                    let _ = header.set_username("");
+                    let _ = header.set_groupname("");
                     header.set_cksum();
                     let _ = tar_builder.append_data(
                         &mut header,
@@ -441,23 +550,167 @@ impl AirGapExporter {
                 }
 
                 // 4. Generate and embed VS Code Multi-Root Workspace (.code-workspace)
+                let mut folders = Vec::new();
+                let mut linked_rust_projects = Vec::new();
+                let mut node_bin_unix = Vec::new();
+                let mut node_bin_win = Vec::new();
+
+                for m in &normalized_project.members {
+                    let folder_path = m.path.to_string_lossy().replace('\\', "/");
+                    let short_folder_name =
+                        m.path.file_name().and_then(|n| n.to_str()).unwrap_or(&m.id);
+                    let host_dir = member_host_paths.get(&m.id).unwrap_or(&workspace_root);
+
+                    let is_python = m.ecosystem.as_deref() == Some("python")
+                        || m.ecosystem.as_deref() == Some("pypi")
+                        || host_dir.join("requirements.txt").exists()
+                        || host_dir.join("pyproject.toml").exists();
+
+                    let is_rust = m.ecosystem.as_deref() == Some("rust")
+                        || m.ecosystem.as_deref() == Some("cargo")
+                        || host_dir.join("Cargo.toml").exists()
+                        || host_dir.join("src-tauri/Cargo.toml").exists();
+
+                    let is_node = m.ecosystem.as_deref() == Some("node")
+                        || m.ecosystem.as_deref() == Some("npm")
+                        || host_dir.join("package.json").exists();
+
+                    if is_rust {
+                        if host_dir.join("Cargo.toml").exists() {
+                            linked_rust_projects.push(format!("{}/Cargo.toml", folder_path));
+                        }
+                        if host_dir.join("src-tauri/Cargo.toml").exists() {
+                            linked_rust_projects
+                                .push(format!("{}/src-tauri/Cargo.toml", folder_path));
+                        }
+                    }
+
+                    if is_node {
+                        node_bin_unix.push(format!(
+                            "${{workspaceFolder}}/{}/node_modules/.bin",
+                            folder_path
+                        ));
+                        node_bin_win.push(format!(
+                            "${{workspaceFolder}}\\{}\\node_modules\\.bin",
+                            folder_path.replace('/', "\\")
+                        ));
+                    }
+
+                    let label = if !m.id.is_empty() {
+                        m.id.clone()
+                    } else {
+                        short_folder_name.to_string()
+                    };
+
+                    let mut folder_entry = serde_json::json!({
+                        "name": label,
+                        "path": folder_path
+                    });
+
+                    if is_python {
+                        let mut py_settings = serde_json::json!({
+                            "python.terminal.activateEnvironment": true
+                        });
+
+                        let has_bundled_py = config.with_toolchain
+                            || workspace_root.join(".dmz/toolchains/python").exists();
+                        let member_venv = host_dir.join(".venv");
+
+                        let depth = m
+                            .path
+                            .components()
+                            .filter(|c| matches!(c, std::path::Component::Normal(_)))
+                            .count();
+                        let rel_prefix = if depth == 0 {
+                            ".".to_string()
+                        } else {
+                            vec![".."; depth].join("/")
+                        };
+
+                        let py_bin_exists = member_venv.join("bin/python").exists()
+                            || member_venv.join("Scripts/python.exe").exists();
+
+                        if member_venv.exists() && py_bin_exists {
+                            let py_bin = if cfg!(windows) {
+                                "${workspaceFolder}/.venv/Scripts/python.exe"
+                            } else {
+                                "${workspaceFolder}/.venv/bin/python"
+                            };
+                            py_settings["python.defaultInterpreterPath"] =
+                                serde_json::Value::String(py_bin.to_string());
+                        } else if has_bundled_py {
+                            let py_bin = if rel_prefix == "." {
+                                if cfg!(windows) {
+                                    "${workspaceFolder}/.dmz/toolchains/python/python.exe"
+                                        .to_string()
+                                } else {
+                                    "${workspaceFolder}/.dmz/toolchains/python/bin/python3"
+                                        .to_string()
+                                }
+                            } else if cfg!(windows) {
+                                format!(
+                                    "${{workspaceFolder}}/{}/.dmz/toolchains/python/python.exe",
+                                    rel_prefix
+                                )
+                            } else {
+                                format!(
+                                    "${{workspaceFolder}}/{}/.dmz/toolchains/python/bin/python3",
+                                    rel_prefix
+                                )
+                            };
+                            py_settings["python.defaultInterpreterPath"] =
+                                serde_json::Value::String(py_bin);
+                        }
+
+                        folder_entry["settings"] = py_settings;
+                    }
+
+                    folders.push(folder_entry);
+                }
+
                 let workspace_display_name = if !ws_project.name.is_empty() {
                     &ws_project.name
                 } else {
                     "workspace"
                 };
 
-                let code_workspace_obj =
-                    crate::toolchain::ToolchainSetup::build_multi_root_workspace_json(
-                        &workspace_root,
-                        &normalized_project,
-                        Some(&member_host_paths),
-                    );
+                let unix_node_prefix = if !node_bin_unix.is_empty() {
+                    format!("{}:", node_bin_unix.join(":"))
+                } else {
+                    String::new()
+                };
+
+                let win_node_prefix = if !node_bin_win.is_empty() {
+                    format!("{};", node_bin_win.join(";"))
+                } else {
+                    String::new()
+                };
+
+                let code_workspace_obj = serde_json::json!({
+                    "folders": folders,
+                    "settings": {
+                        "rust-analyzer.linkedProjects": linked_rust_projects,
+                        "terminal.integrated.env.osx": {
+                            "PATH": format!("{}${{workspaceFolder}}/.dmz/toolchains/node/bin:${{workspaceFolder}}/.dmz/toolchains/rust/bin:${{workspaceFolder}}/.dmz/toolchains/python/bin:${{env:PATH}}", unix_node_prefix)
+                        },
+                        "terminal.integrated.env.linux": {
+                            "PATH": format!("{}${{workspaceFolder}}/.dmz/toolchains/node/bin:${{workspaceFolder}}/.dmz/toolchains/rust/bin:${{workspaceFolder}}/.dmz/toolchains/python/bin:${{env:PATH}}", unix_node_prefix)
+                        },
+                        "terminal.integrated.env.windows": {
+                            "PATH": format!("{}${{workspaceFolder}}\\.dmz\\toolchains\\node\\bin;${{workspaceFolder}}\\.dmz\\toolchains\\rust\\bin;${{workspaceFolder}}\\.dmz\\toolchains\\python;${{env:PATH}}", win_node_prefix)
+                        }
+                    }
+                });
 
                 if let Ok(cw_bytes) = serde_json::to_vec_pretty(&code_workspace_obj) {
                     let mut header = tar::Header::new_gnu();
                     header.set_size(cw_bytes.len() as u64);
                     header.set_mode(0o644);
+                    header.set_mtime(deterministic_epoch);
+                    header.set_uid(0);
+                    header.set_gid(0);
+                    let _ = header.set_username("");
+                    let _ = header.set_groupname("");
                     header.set_cksum();
                     let _ = tar_builder.append_data(
                         &mut header,
@@ -564,6 +817,11 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
                 let mut header = tar::Header::new_gnu();
                 header.set_size(readme_content.len() as u64);
                 header.set_mode(0o644);
+                header.set_mtime(deterministic_epoch);
+                header.set_uid(0);
+                header.set_gid(0);
+                let _ = header.set_username("");
+                let _ = header.set_groupname("");
                 header.set_cksum();
                 let _ =
                     tar_builder.append_data(&mut header, "README.md", readme_content.as_bytes());
@@ -582,6 +840,7 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
                             &mut tar_builder,
                             &workspace_root,
                             changed_files,
+                            deterministic_epoch,
                         )?;
                     } else {
                         Self::append_dir_all(
@@ -589,6 +848,7 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
                             &workspace_root,
                             Path::new(""),
                             false,
+                            deterministic_epoch,
                         )?;
                     }
                 }
@@ -611,14 +871,12 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
                         head = %binfo.head_commit,
                         "Adding deterministic workspace.bundle to air-gap archive"
                     );
-                    tar_builder
-                        .append_path_with_name(&temp_bundle, "workspace.bundle")
-                        .map_err(|e| {
-                            ExportError::ArchiveError(format!(
-                                "Failed to pack workspace.bundle: {}",
-                                e
-                            ))
-                        })?;
+                    Self::append_file_normalized(
+                        &mut tar_builder,
+                        &temp_bundle,
+                        "workspace.bundle",
+                        deterministic_epoch,
+                    )?;
                     has_git_history = true;
                 }
                 Err(e) => {
@@ -631,10 +889,11 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
         let mut toolchain_manifest_entries = Vec::new();
         if config.with_toolchain {
             info!("Initiating host toolchain discovery and packaging");
-            match crate::toolchain::ToolchainPackager::package_toolchains_with_lockfile(
+            match crate::toolchain::ToolchainPackager::package_toolchains_with_epoch(
                 &workspace_root,
                 Some(&lockfile),
                 &mut tar_builder,
+                deterministic_epoch,
             ) {
                 Ok(entries) => {
                     info!(
@@ -670,10 +929,7 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
             workspace_project: final_ws_project.or_else(|| config.multi_workspace.clone()),
             closure_signature: lockfile.closure_signature.clone(),
             package_count: packed_count,
-            created_at_utc: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            created_at_utc: deterministic_epoch,
             archive_sha256: String::new(), // Populated post-compression
         };
 
@@ -683,6 +939,11 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
         let mut header = tar::Header::new_gnu();
         header.set_size(manifest_json.len() as u64);
         header.set_mode(0o644);
+        header.set_mtime(deterministic_epoch);
+        header.set_uid(0);
+        header.set_gid(0);
+        let _ = header.set_username("");
+        let _ = header.set_groupname("");
         header.set_cksum();
 
         tar_builder
@@ -695,19 +956,28 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
                 ExportError::ArchiveError(format!("Failed to embed airgap manifest: {}", e))
             })?;
 
-        // Finish streams and obtain single-pass SHA-256 digest without re-reading the archive from disk
-        let zstd_encoder = tar_builder.into_inner().map_err(|e| {
-            ExportError::ArchiveError(format!("Failed to finalize tar stream: {}", e))
-        })?;
+        // Finish streams and finalize the single-pass cryptographic archive hash (zero disk re-reading)
+        let archive_sha256 = {
+            let zstd_encoder = tar_builder.into_inner().map_err(|e| {
+                ExportError::ArchiveError(format!("Failed to finalize tar stream: {}", e))
+            })?;
 
-        let hashing_writer = zstd_encoder
-            .finish()
-            .map_err(|e| format!("Failed to finish zstd compression: {}", e))
-            .map_err(ExportError::ArchiveError)?;
+            let mut hashing_writer = zstd_encoder
+                .finish()
+                .map_err(|e| format!("Failed to finish zstd compression: {}", e))
+                .map_err(ExportError::ArchiveError)?;
 
-        let (archive_sha256, _size_bytes) = hashing_writer
-            .finalize()
-            .map_err(|e| ExportError::IoError(e.to_string()))?;
+            hashing_writer
+                .flush()
+                .map_err(|e| ExportError::IoError(e.to_string()))?;
+
+            let (mut inner_buf, computed_hash) = hashing_writer.finalize_hash();
+            inner_buf
+                .flush()
+                .map_err(|e| ExportError::IoError(e.to_string()))?;
+
+            computed_hash
+        };
 
         let mut final_manifest = manifest;
         final_manifest.archive_sha256 = archive_sha256;
@@ -740,18 +1010,86 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
         Ok(final_manifest)
     }
 
+    /// Resolves reproducible timestamp: SOURCE_DATE_EPOCH env var -> Git commit timestamp -> DOS/Bazel epoch (1980-01-01)
+    pub fn resolve_deterministic_epoch(workspace_root: &Path, _vcs: Option<&VcsProvenance>) -> u64 {
+        if let Ok(epoch_str) = std::env::var("SOURCE_DATE_EPOCH") {
+            if let Ok(epoch) = epoch_str.trim().parse::<u64>() {
+                return epoch;
+            }
+        }
+        if let Ok(Some(commit_time)) = GitProvider::get_commit_timestamp(workspace_root) {
+            return commit_time;
+        }
+        315_532_800 // 1980-01-01 00:00:00 UTC (standard DOS/Bazel reproducible epoch)
+    }
+
+    fn append_file_normalized<W: Write>(
+        tar: &mut TarBuilder<W>,
+        src_path: &Path,
+        dest_path: &str,
+        deterministic_epoch: u64,
+    ) -> Result<(), ExportError> {
+        let mut file = File::open(src_path).map_err(|e| {
+            ExportError::IoError(format!("Failed to open file {:?}: {}", src_path, e))
+        })?;
+        let metadata = file.metadata().map_err(|e| {
+            ExportError::IoError(format!("Failed to read metadata {:?}: {}", src_path, e))
+        })?;
+
+        let is_executable = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                metadata.permissions().mode() & 0o111 != 0
+            }
+            #[cfg(not(unix))]
+            {
+                dest_path.ends_with(".exe")
+                    || dest_path.ends_with(".bat")
+                    || dest_path.ends_with(".cmd")
+                    || dest_path.ends_with(".sh")
+            }
+        };
+
+        let mode = if is_executable { 0o755 } else { 0o644 };
+
+        let mut header = tar::Header::new_gnu();
+        header.set_size(metadata.len());
+        header.set_mode(mode);
+        header.set_mtime(deterministic_epoch);
+        header.set_uid(0);
+        header.set_gid(0);
+        let _ = header.set_username("");
+        let _ = header.set_groupname("");
+        header.set_cksum();
+
+        tar.append_data(&mut header, dest_path, &mut file)
+            .map_err(|e| {
+                ExportError::ArchiveError(format!("Failed to add file {}: {}", dest_path, e))
+            })?;
+
+        Ok(())
+    }
+
     fn append_dir_all<W: Write>(
         tar: &mut TarBuilder<W>,
         src_dir: &Path,
         dest_prefix: &Path,
         skip_manifest: bool,
+        deterministic_epoch: u64,
     ) -> Result<(), ExportError> {
         let entries = fs::read_dir(src_dir).map_err(|e| {
             ExportError::IoError(format!("Directory read failed {:?}: {}", src_dir, e))
         })?;
 
+        let mut sorted_entries = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|e| ExportError::IoError(e.to_string()))?;
+            sorted_entries.push(entry);
+        }
+        sorted_entries.sort_by_key(|e| e.file_name());
+
+        for entry in sorted_entries {
             let path = entry.path();
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
@@ -774,13 +1112,10 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
             let rel_dest = dest_prefix.join(name);
 
             if path.is_dir() {
-                Self::append_dir_all(tar, &path, &rel_dest, skip_manifest)?;
+                Self::append_dir_all(tar, &path, &rel_dest, skip_manifest, deterministic_epoch)?;
             } else {
                 let normalized_dest = rel_dest.to_string_lossy().replace('\\', "/");
-                tar.append_path_with_name(&path, &normalized_dest)
-                    .map_err(|e| {
-                        ExportError::ArchiveError(format!("Failed to add file {:?}: {}", path, e))
-                    })?;
+                Self::append_file_normalized(tar, &path, &normalized_dest, deterministic_epoch)?;
             }
         }
 
@@ -791,8 +1126,12 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
         tar: &mut TarBuilder<W>,
         workspace_root: &Path,
         files: &HashSet<PathBuf>,
+        deterministic_epoch: u64,
     ) -> Result<(), ExportError> {
-        for rel_path in files {
+        let mut sorted_files: Vec<_> = files.iter().collect();
+        sorted_files.sort();
+
+        for rel_path in sorted_files {
             // Skip .git, target, node_modules, dist, .dmz
             let starts_with_ignored = rel_path
                 .components()
@@ -814,13 +1153,12 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
             let full_path = workspace_root.join(rel_path);
             if full_path.is_file() {
                 let normalized_path = rel_path.to_string_lossy().replace('\\', "/");
-                tar.append_path_with_name(&full_path, &normalized_path)
-                    .map_err(|e| {
-                        ExportError::ArchiveError(format!(
-                            "Failed to add delta file {:?}: {}",
-                            rel_path, e
-                        ))
-                    })?;
+                Self::append_file_normalized(
+                    tar,
+                    &full_path,
+                    &normalized_path,
+                    deterministic_epoch,
+                )?;
             }
         }
         Ok(())
@@ -828,9 +1166,8 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
 
     fn read_manifest_from_archive(path: &Path) -> Result<AirGapManifest, String> {
         let file = File::open(path).map_err(|e| format!("Failed to open since archive: {}", e))?;
-        let buf_reader = BufReader::with_capacity(64 * 1024, file);
-        let decoder = zstd::stream::read::Decoder::new(buf_reader)
-            .map_err(|e| format!("Zstd error: {}", e))?;
+        let decoder =
+            zstd::stream::read::Decoder::new(file).map_err(|e| format!("Zstd error: {}", e))?;
         let mut archive = tar::Archive::new(decoder);
         for entry in archive.entries().map_err(|e| format!("Tar error: {}", e))? {
             let mut entry = entry.map_err(|e| format!("Tar entry error: {}", e))?;

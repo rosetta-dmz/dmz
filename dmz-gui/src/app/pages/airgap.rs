@@ -576,6 +576,15 @@ pub(super) fn show(
                                                 count
                                             ));
                                         }
+                                        Err(dmz_core::install::InstallError::IntegrityMismatch {
+                                            expected,
+                                            actual,
+                                        }) => {
+                                            msg.push_str(&format!(
+                                                " · [SUPPLY CHAIN INTEGRITY MISMATCH] FATAL: Tampered package detected in store! (expected {}, computed {})",
+                                                expected, actual
+                                            ));
+                                        }
                                         Err(e) => {
                                             msg.push_str(&format!(
                                                 " · Offline install error: {}",

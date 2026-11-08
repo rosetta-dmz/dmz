@@ -49,6 +49,28 @@ impl GitProvider {
         Ok(commit.id().to_string())
     }
 
+    /// Retrieve the author/commit unix timestamp (seconds since epoch) of HEAD, if available
+    pub fn get_commit_timestamp(workspace_path: &Path) -> Result<Option<u64>, GitError> {
+        let repo = match Repository::open(workspace_path) {
+            Ok(r) => r,
+            Err(e) if e.class() == ErrorClass::Repository || e.code() == ErrorCode::NotFound => {
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
+        let head = match repo.head() {
+            Ok(h) => h,
+            Err(_) => return Ok(None),
+        };
+        let commit = match head.peel_to_commit() {
+            Ok(c) => c,
+            Err(_) => return Ok(None),
+        };
+        let time_secs = commit.time().seconds();
+        let timestamp = if time_secs > 0 { time_secs as u64 } else { 0 };
+        Ok(Some(timestamp))
+    }
+
     /// Inspect workspace repository provenance: active commit, active branch, dirty status,
     /// with full breakdown of uncommitted modified files and untracked files.
     /// Returns Ok(None) if workspace_path is not a git repository.

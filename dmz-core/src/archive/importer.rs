@@ -4,7 +4,7 @@ use crate::resolver::lockfile::DmzLockfile;
 use crate::vcs::{GitProvider, VcsProvenance};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
-use std::io::{BufReader, Read};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use tar::Archive as TarArchive;
 use tracing::{info, warn};
@@ -188,13 +188,15 @@ impl AirGapImporter {
             config.verify_closure_hash,
         );
 
-        if let Err(ref _e) = result {
-            if let Some(ref backup_dir) = backup_snapshot {
-                let _ = Self::restore_backup_snapshot(&effective_workspace, backup_dir);
+        match result {
+            Ok(res) => Ok(res),
+            Err(e) => {
+                if let Some(ref backup_dir) = backup_snapshot {
+                    let _ = Self::restore_backup_snapshot(&effective_workspace, backup_dir);
+                }
+                Err(e)
             }
         }
-
-        result
     }
 
     fn do_import(
@@ -203,12 +205,11 @@ impl AirGapImporter {
         effective_workspace: &Path,
         verify_closure_hash: bool,
     ) -> Result<ImportResult, ImportError> {
-        // Open archive with 64 KB Buffered Reader and initialize zstd stream
+        // Open archive and initialize zstd stream
         let file = File::open(effective_archive)
             .map_err(|e| ImportError::IoError(format!("Failed to open archive: {}", e)))?;
-        let buf_reader = BufReader::with_capacity(64 * 1024, file);
 
-        let zstd_decoder = ZstdDecoder::new(buf_reader).map_err(|e| {
+        let zstd_decoder = ZstdDecoder::new(file).map_err(|e| {
             ImportError::ExtractionError(format!("Failed to initialize zstd decoder: {}", e))
         })?;
 
@@ -633,6 +634,81 @@ impl AirGapImporter {
         };
 
         for (dir, _role) in &target_dirs {
+            // 0. Member workspace parity symlinks (.dmz, dmz.lock, dmz-workspace.toml)
+            if dir != workspace_root {
+                let member_dmz = dir.join(".dmz");
+                let root_dmz = workspace_root.join(".dmz");
+                if !member_dmz.exists() {
+                    let rel_dmz = Self::relative_path_between(dir, &root_dmz);
+                    #[cfg(unix)]
+                    let _ = std::os::unix::fs::symlink(&rel_dmz, &member_dmz);
+                    #[cfg(windows)]
+                    {
+                        let _ = fs::create_dir_all(&root_dmz);
+                        let rel_dmz_win = rel_dmz.replace('/', "\\");
+                        let linked = std::os::windows::fs::symlink_dir(&rel_dmz_win, &member_dmz)
+                            .or_else(|_| std::os::windows::fs::symlink_dir(&root_dmz, &member_dmz))
+                            .is_ok();
+                        let junctioned = if !linked {
+                            let member_str = member_dmz.to_string_lossy().replace('/', "\\");
+                            let root_str = root_dmz.to_string_lossy().replace('/', "\\");
+                            let clean_member = member_str.trim_start_matches(r"\\?\");
+                            let clean_root = root_str.trim_start_matches(r"\\?\");
+                            std::process::Command::new("cmd")
+                                .args(["/C", "mklink", "/J", clean_member, clean_root])
+                                .output()
+                                .map(|o| o.status.success() && member_dmz.exists())
+                                .unwrap_or(false)
+                        } else {
+                            true
+                        };
+                        if !junctioned && !member_dmz.exists() {
+                            let _ = fs::create_dir_all(&member_dmz);
+                            let _ = Self::copy_dir_contents(&root_dmz, &member_dmz, false);
+                        }
+                    }
+                }
+
+                let member_lock = dir.join("dmz.lock");
+                let root_lock = workspace_root.join("dmz.lock");
+                if !member_lock.exists() && root_lock.exists() {
+                    let rel_lock = Self::relative_path_between(dir, &root_lock);
+                    #[cfg(unix)]
+                    let _ = std::os::unix::fs::symlink(&rel_lock, &member_lock);
+                    #[cfg(windows)]
+                    {
+                        let rel_lock_win = rel_lock.replace('/', "\\");
+                        if std::os::windows::fs::symlink_file(&rel_lock_win, &member_lock).is_err()
+                            && std::os::windows::fs::symlink_file(&root_lock, &member_lock).is_err()
+                        {
+                            let _ = std::fs::hard_link(&root_lock, &member_lock)
+                                .or_else(|_| std::fs::copy(&root_lock, &member_lock).map(|_| ()));
+                        }
+                    }
+                }
+
+                let member_manifest = dir.join("dmz-workspace.toml");
+                let root_manifest = workspace_root.join("dmz-workspace.toml");
+                if !member_manifest.exists() && root_manifest.exists() {
+                    let rel_manifest = Self::relative_path_between(dir, &root_manifest);
+                    #[cfg(unix)]
+                    let _ = std::os::unix::fs::symlink(&rel_manifest, &member_manifest);
+                    #[cfg(windows)]
+                    {
+                        let rel_manifest_win = rel_manifest.replace('/', "\\");
+                        if std::os::windows::fs::symlink_file(&rel_manifest_win, &member_manifest)
+                            .is_err()
+                            && std::os::windows::fs::symlink_file(&root_manifest, &member_manifest)
+                                .is_err()
+                        {
+                            let _ = std::fs::hard_link(&root_manifest, &member_manifest).or_else(
+                                |_| std::fs::copy(&root_manifest, &member_manifest).map(|_| ()),
+                            );
+                        }
+                    }
+                }
+            }
+
             // 1. Cargo vendoring configuration: .cargo/config.toml
             let cargo_toml = dir.join("Cargo.toml");
             let tauri_cargo_toml = dir.join("src-tauri/Cargo.toml");
@@ -678,58 +754,62 @@ impl AirGapImporter {
                 dir.join("requirements.txt").is_file() || dir.join("pyproject.toml").is_file();
             let is_umbrella =
                 workspace_project.is_some() || workspace_root.join("dmz-workspace.toml").exists();
-            if has_python && is_umbrella {
-                let vscode_dir = dir.join(".vscode");
-                let _ = fs::create_dir_all(&vscode_dir);
-                let settings_file = vscode_dir.join("settings.json");
-                if !settings_file.exists() {
-                    let mut settings_map = serde_json::Map::new();
-                    let bundled_py = workspace_root.join(".dmz/toolchains/python");
-                    let venv_py = if cfg!(windows) {
-                        dir.join(".venv/Scripts/python.exe")
-                    } else {
-                        dir.join(".venv/bin/python")
-                    };
-                    let toolchain_py = if cfg!(windows) {
-                        bundled_py.join("python.exe")
-                    } else {
-                        bundled_py.join("bin/python3")
-                    };
-
-                    if venv_py.is_file() {
-                        let py_bin = if cfg!(windows) {
-                            "${workspaceFolder}/.venv/Scripts/python.exe"
-                        } else {
-                            "${workspaceFolder}/.venv/bin/python"
-                        };
-                        settings_map.insert(
-                            "python.defaultInterpreterPath".into(),
-                            serde_json::Value::String(py_bin.into()),
-                        );
-                    } else if toolchain_py.is_file() {
-                        let rel_py = Self::relative_path_between(dir, &bundled_py);
-                        let py_bin = if cfg!(windows) {
-                            format!("${{workspaceFolder}}/{}/python.exe", rel_py)
-                        } else {
-                            format!("${{workspaceFolder}}/{}/bin/python3", rel_py)
-                        };
-                        settings_map.insert(
-                            "python.defaultInterpreterPath".into(),
-                            serde_json::Value::String(py_bin),
-                        );
-                    }
-                    settings_map.insert(
-                        "python.terminal.activateEnvironment".into(),
-                        serde_json::Value::Bool(true),
+            if has_python {
+                let member_venv = dir.join(".venv");
+                if member_venv.is_dir() {
+                    let py_ver = crate::install::mappers::PyPiMapper::detect_python_version(dir);
+                    crate::install::mappers::PyPiMapper::hydrate_venv_environment(
+                        dir,
+                        &member_venv,
+                        &py_ver,
                     );
-                    if let Ok(content) =
-                        serde_json::to_string_pretty(&serde_json::Value::Object(settings_map))
-                    {
-                        let _ = fs::write(&settings_file, content);
-                        info!(
-                            settings = ?settings_file,
-                            "Wrote scoped Python IDE settings for workspace member"
+                }
+
+                if is_umbrella {
+                    let vscode_dir = dir.join(".vscode");
+                    let _ = fs::create_dir_all(&vscode_dir);
+                    let settings_file = vscode_dir.join("settings.json");
+                    if !settings_file.exists() {
+                        let mut settings_map = serde_json::Map::new();
+                        let bundled_py = workspace_root.join(".dmz/toolchains/python");
+                        let py_bin_exists = member_venv.join("bin/python").exists()
+                            || member_venv.join("Scripts/python.exe").exists();
+
+                        if member_venv.exists() && py_bin_exists {
+                            let py_bin = if cfg!(windows) {
+                                "${workspaceFolder}/.venv/Scripts/python.exe"
+                            } else {
+                                "${workspaceFolder}/.venv/bin/python"
+                            };
+                            settings_map.insert(
+                                "python.defaultInterpreterPath".into(),
+                                serde_json::Value::String(py_bin.into()),
+                            );
+                        } else if bundled_py.exists() {
+                            let rel_py = Self::relative_path_between(dir, &bundled_py);
+                            let py_bin = if cfg!(windows) {
+                                format!("${{workspaceFolder}}/{}/python.exe", rel_py)
+                            } else {
+                                format!("${{workspaceFolder}}/{}/bin/python3", rel_py)
+                            };
+                            settings_map.insert(
+                                "python.defaultInterpreterPath".into(),
+                                serde_json::Value::String(py_bin),
+                            );
+                        }
+                        settings_map.insert(
+                            "python.terminal.activateEnvironment".into(),
+                            serde_json::Value::Bool(true),
                         );
+                        if let Ok(content) =
+                            serde_json::to_string_pretty(&serde_json::Value::Object(settings_map))
+                        {
+                            let _ = fs::write(&settings_file, content);
+                            info!(
+                                settings = ?settings_file,
+                                "Wrote scoped Python IDE settings for workspace member"
+                            );
+                        }
                     }
                 }
             }

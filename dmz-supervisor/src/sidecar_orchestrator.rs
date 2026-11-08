@@ -192,6 +192,12 @@ impl SidecarOrchestrator {
                 std::fs::create_dir_all(parent).map_err(|e| {
                     format!("Failed to create socket directory {:?}: {}", parent, e)
                 })?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ =
+                        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+                }
             }
         }
 
@@ -418,6 +424,85 @@ impl SidecarOrchestrator {
         ))
     }
 
+    /// Automatically infers execution command and arguments for a workspace member based on project manifests
+    pub fn infer_member_execution(
+        member_dir: &Path,
+        _member: &WorkspaceMember,
+    ) -> Result<(String, Vec<String>), String> {
+        let pkg_json_path = member_dir.join("package.json");
+        let cargo_toml_path = member_dir.join("Cargo.toml");
+        let tauri_cargo_path = member_dir.join("src-tauri/Cargo.toml");
+        let py_req_path = member_dir.join("requirements.txt");
+        let pyproject_path = member_dir.join("pyproject.toml");
+
+        if pkg_json_path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&pkg_json_path) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(scripts) = val.get("scripts").and_then(|s| s.as_object()) {
+                        if scripts.contains_key("tauri") {
+                            return Ok((
+                                "npm".to_string(),
+                                vec!["run".into(), "tauri".into(), "dev".into()],
+                            ));
+                        } else if scripts.contains_key("dev") {
+                            return Ok(("npm".to_string(), vec!["run".into(), "dev".into()]));
+                        } else if scripts.contains_key("start") {
+                            return Ok(("npm".to_string(), vec!["run".into(), "start".into()]));
+                        }
+                    }
+                }
+            }
+            return Ok(("npm".to_string(), vec!["start".into()]));
+        } else if tauri_cargo_path.is_file() || cargo_toml_path.is_file() {
+            return Ok(("cargo".to_string(), vec!["run".into()]));
+        } else if py_req_path.is_file()
+            || pyproject_path.is_file()
+            || member_dir.join("main.py").is_file()
+            || member_dir.join("server.py").is_file()
+            || member_dir.join("app.py").is_file()
+            || member_dir.join("src/main.py").is_file()
+            || member_dir.join("src/server.py").is_file()
+            || member_dir.join("src/app.py").is_file()
+        {
+            let py_cmd = if cfg!(windows) {
+                "python".to_string()
+            } else {
+                "python3".to_string()
+            };
+
+            for entry_file in &[
+                "server.py",
+                "main.py",
+                "app.py",
+                "src/main.py",
+                "src/server.py",
+                "src/app.py",
+            ] {
+                if member_dir.join(entry_file).is_file() {
+                    return Ok((py_cmd, vec![entry_file.to_string()]));
+                }
+            }
+
+            if let Ok(entries) = std::fs::read_dir(member_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() && path.extension().is_some_and(|e| e == "py") {
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            return Ok((py_cmd, vec![name.to_string()]));
+                        }
+                    }
+                }
+            }
+
+            return Ok((py_cmd, Vec::new()));
+        }
+
+        Err(format!(
+            "Unable to determine execution command for workspace member at {}. Specify \"exec_command\" and \"exec_args\" in dmz-workspace.toml",
+            member_dir.display()
+        ))
+    }
+
     /// Orchestrate KEP-753 sequential execution of primary app and companion sidecars.
     pub async fn start_pair(&self, config: SidecarPairConfig) -> Result<PathBuf, String> {
         let current = self.current_state().await;
@@ -584,7 +669,7 @@ impl SidecarOrchestrator {
     }
 
     /// KEP-753 Phase III: Reverse Graceful Teardown Sequence.
-    /// Terminates primary application first $\rightarrow$ allows drain window $\rightarrow$ terminates sidecars.
+    /// Terminates primary application first -> allows drain window -> terminates sidecars.
     pub async fn stop_pair(&self) -> Result<(), String> {
         let mut guard = self.active_pair.write().await;
         let Some(mut pair) = guard.take() else {
@@ -651,7 +736,13 @@ impl SidecarOrchestrator {
             ));
         }
 
-        let (exec_cmd, default_args) = member.resolve_command(&member_dir, workspace_root)?;
+        let (exec_cmd, default_args) = if let Some(ref cmd) = member.exec_command {
+            (cmd.clone(), member.exec_args.clone().unwrap_or_default())
+        } else if let Ok(res) = Self::infer_member_execution(&member_dir, member) {
+            res
+        } else {
+            member.resolve_command(&member_dir, workspace_root)?
+        };
 
         let mut cmd = Command::new(&exec_cmd);
         if !default_args.is_empty() {

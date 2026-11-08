@@ -19,11 +19,14 @@ impl EcosystemHandler for RustEcosystem {
             args: vec!["generate-lockfile".into()],
         })
     }
-    fn verification_command(&self, _root: &Path) -> Option<CommandSpec> {
-        Some(CommandSpec {
-            program: "cargo".into(),
-            args: vec!["check".into(), "--offline".into()],
-        })
+    fn verification_command(&self, root: &Path) -> Option<CommandSpec> {
+        Some(
+            CommandSpec {
+                program: "cargo".into(),
+                args: vec!["check".into(), "--offline".into()],
+            }
+            .resolve_in_workspace(root),
+        )
     }
     fn materialize(
         &self,
@@ -61,11 +64,14 @@ impl EcosystemHandler for PnpmEcosystem {
             ],
         })
     }
-    fn verification_command(&self, _root: &Path) -> Option<CommandSpec> {
-        Some(CommandSpec {
-            program: "pnpm".into(),
-            args: vec!["ls".into(), "--offline".into()],
-        })
+    fn verification_command(&self, root: &Path) -> Option<CommandSpec> {
+        Some(
+            CommandSpec {
+                program: "pnpm".into(),
+                args: vec!["ls".into(), "--offline".into()],
+            }
+            .resolve_in_workspace(root),
+        )
     }
 }
 
@@ -92,11 +98,14 @@ impl EcosystemHandler for YarnEcosystem {
             ],
         })
     }
-    fn verification_command(&self, _root: &Path) -> Option<CommandSpec> {
-        Some(CommandSpec {
-            program: "yarn".into(),
-            args: vec!["list".into(), "--offline".into(), "--depth=0".into()],
-        })
+    fn verification_command(&self, root: &Path) -> Option<CommandSpec> {
+        Some(
+            CommandSpec {
+                program: "yarn".into(),
+                args: vec!["list".into(), "--offline".into(), "--depth=0".into()],
+            }
+            .resolve_in_workspace(root),
+        )
     }
 }
 
@@ -119,11 +128,14 @@ impl EcosystemHandler for NpmEcosystem {
             args: vec!["ci".into()],
         })
     }
-    fn verification_command(&self, _root: &Path) -> Option<CommandSpec> {
-        Some(CommandSpec {
-            program: "npm".into(),
-            args: vec!["ls".into(), "--offline".into()],
-        })
+    fn verification_command(&self, root: &Path) -> Option<CommandSpec> {
+        Some(
+            CommandSpec {
+                program: "npm".into(),
+                args: vec!["ls".into(), "--offline".into()],
+            }
+            .resolve_in_workspace(root),
+        )
     }
 }
 
@@ -150,10 +162,13 @@ impl EcosystemHandler for GoEcosystem {
         } else {
             "-mod=readonly"
         };
-        Some(CommandSpec {
-            program: "go".into(),
-            args: vec!["build".into(), mod_flag.into(), "./...".into()],
-        })
+        Some(
+            CommandSpec {
+                program: "go".into(),
+                args: vec!["build".into(), mod_flag.into(), "./...".into()],
+            }
+            .resolve_in_workspace(root),
+        )
     }
 }
 
@@ -179,11 +194,14 @@ impl EcosystemHandler for PythonEcosystem {
             ],
         })
     }
-    fn verification_command(&self, _root: &Path) -> Option<CommandSpec> {
-        Some(CommandSpec {
-            program: "python3".into(),
-            args: vec!["-m".into(), "compileall".into(), "-q".into(), ".".into()],
-        })
+    fn verification_command(&self, root: &Path) -> Option<CommandSpec> {
+        Some(
+            CommandSpec {
+                program: "python3".into(),
+                args: vec!["-m".into(), "compileall".into(), "-q".into(), ".".into()],
+            }
+            .resolve_in_workspace(root),
+        )
     }
 }
 
@@ -204,11 +222,14 @@ impl EcosystemHandler for PhpEcosystem {
             args: vec!["install".into(), "--no-dev".into()],
         })
     }
-    fn verification_command(&self, _root: &Path) -> Option<CommandSpec> {
-        Some(CommandSpec {
-            program: "composer".into(),
-            args: vec!["validate".into()],
-        })
+    fn verification_command(&self, root: &Path) -> Option<CommandSpec> {
+        Some(
+            CommandSpec {
+                program: "composer".into(),
+                args: vec!["validate".into()],
+            }
+            .resolve_in_workspace(root),
+        )
     }
 }
 
@@ -229,10 +250,13 @@ impl EcosystemHandler for RubyEcosystem {
             args: vec!["install".into(), "--path".into(), "vendor/bundle".into()],
         })
     }
-    fn verification_command(&self, _root: &Path) -> Option<CommandSpec> {
-        Some(CommandSpec {
-            program: "bundle".into(),
-            args: vec!["check".into()],
-        })
+    fn verification_command(&self, root: &Path) -> Option<CommandSpec> {
+        Some(
+            CommandSpec {
+                program: "bundle".into(),
+                args: vec!["check".into()],
+            }
+            .resolve_in_workspace(root),
+        )
     }
 }

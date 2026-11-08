@@ -3,10 +3,39 @@ pub mod manifest;
 
 use crate::resolver::manifest::Ecosystem;
 use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use tracing::info;
 
 pub use lockfile::{DmzLockfile, LockError, LockedPackage};
+
+#[derive(Debug)]
+pub enum ResolverError {
+    Io(String),
+    Lockfile(String),
+    Network(String),
+    Parse(String),
+}
+
+impl std::fmt::Display for ResolverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(msg) => write!(f, "Resolver IO Error: {}", msg),
+            Self::Lockfile(msg) => write!(f, "Resolver Lockfile Error: {}", msg),
+            Self::Network(msg) => write!(f, "Resolver Network Error: {}", msg),
+            Self::Parse(msg) => write!(f, "Resolver Parse Error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for ResolverError {}
+
+impl From<ResolverError> for String {
+    fn from(err: ResolverError) -> Self {
+        err.to_string()
+    }
+}
 
 pub struct ResolverEngine;
 
@@ -16,23 +45,20 @@ impl ResolverEngine {
         Self::resolve_workspace_with_target(workspace_dir, None)
     }
 
-    /// Scans project workspace, auto-resolves dependencies, and tags the target platform.
-    /// Automatically detects `dmz-workspace.toml` for multi-repository / companion workspaces.
+    /// Scans project workspace, auto-resolves dependencies, and tags the target platform
     pub fn resolve_workspace_with_target(
         workspace_dir: &Path,
         target_platform: Option<String>,
     ) -> Result<DmzLockfile, String> {
-        let manifest_file = workspace_dir.join("dmz-workspace.toml");
-        if manifest_file.is_file() {
-            if let Ok(project) =
-                crate::workspace::WorkspaceProjectConfig::load_from_file(&manifest_file)
+        let manifest_path = workspace_dir.join("dmz-workspace.toml");
+        if manifest_path.is_file() {
+            if let Ok(manifest) =
+                crate::workspace::WorkspaceProjectConfig::load_from_file(&manifest_path)
             {
-                let layouts = project.resolve_member_layouts(workspace_dir, Some(&manifest_file));
-                if !layouts.is_empty() && layouts.iter().all(|l| l.host_path.is_dir()) {
-                    return Self::resolve_multi_workspace(
+                if !manifest.members.is_empty() {
+                    return Self::resolve_multi_workspace_with_target(
                         workspace_dir,
-                        &project,
-                        Some(&manifest_file),
+                        &manifest,
                         target_platform,
                     );
                 }
@@ -111,32 +137,42 @@ impl ResolverEngine {
                 }
                 Err(e) => {
                     return Err(format!(
-                        "Dependency resolution failed for member '{}' ({:?}): {}",
+                        "Failed to resolve member '{}' at {:?}: {}",
                         layout.id, layout.host_path, e
                     ));
                 }
             }
         }
 
-        if merged_packages.is_empty() {
-            return Err(
-                "Fail-Fast Guardrail: Multi-workspace scan detected manifests, but resolved 0 packages across all members."
-                    .to_string(),
-            );
-        }
-
         let mut unified_lock = DmzLockfile::with_platform(merged_packages, target_platform);
-        if let Ok(Some(prov)) = crate::vcs::GitProvider::get_provenance(workspace_dir) {
-            unified_lock.vcs = Some(prov);
-        }
         for meta in workspaces_meta {
             unified_lock.add_workspace(meta);
         }
 
+        if let Ok(Some(prov)) = crate::vcs::GitProvider::get_provenance(workspace_dir) {
+            unified_lock.vcs = Some(prov);
+        }
+
+        info!(
+            closure_sig = %unified_lock.closure_signature,
+            packages = unified_lock.packages.len(),
+            workspaces = unified_lock.workspaces.len(),
+            "Successfully resolved multi-workspace project into unified lockfile"
+        );
+
         Ok(unified_lock)
     }
 
-    /// Scans a single project workspace directory, auto-resolves dependencies, and tags the target platform
+    /// Resolves multi-workspace projects by resolving each declared member and merging into a unified lockfile
+    pub fn resolve_multi_workspace_with_target(
+        workspace_dir: &Path,
+        manifest: &crate::workspace::WorkspaceProjectConfig,
+        target_platform: Option<String>,
+    ) -> Result<DmzLockfile, String> {
+        Self::resolve_multi_workspace(workspace_dir, manifest, None, target_platform)
+    }
+
+    /// Scans a single workspace directory, auto-resolves dependencies, and tags the target platform
     pub fn resolve_single_workspace_with_target(
         workspace_dir: &Path,
         target_platform: Option<String>,
@@ -362,264 +398,101 @@ impl ResolverEngine {
 
         let mut fetched_count = 0;
 
-        let client = reqwest::blocking::Client::builder()
-            .user_agent(concat!(
-                "dmz-airgap-tool/",
-                env!("CARGO_PKG_VERSION"),
-                " (air-gap workspace manager)"
-            ))
-            .build()
-            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        let crates_api_base = std::env::var("DMZ_REGISTRY_CRATES_API")
+            .unwrap_or_else(|_| "https://crates.io/api/v1/crates".to_string());
+        let crates_dl_base = std::env::var("DMZ_REGISTRY_CRATES_DL")
+            .unwrap_or_else(|_| "https://static.crates.io/crates".to_string());
+        let npm_base = std::env::var("DMZ_REGISTRY_NPM")
+            .unwrap_or_else(|_| "https://registry.npmjs.org".to_string());
+        let pypi_base = std::env::var("DMZ_REGISTRY_PYPI")
+            .unwrap_or_else(|_| "https://pypi.org/pypi".to_string());
+        let golang_proxy_base = std::env::var("DMZ_REGISTRY_GOLANG")
+            .unwrap_or_else(|_| "https://proxy.golang.org".to_string());
 
-        for pkg in lockfile.packages.values_mut() {
-            // --- SKIP LOCAL PATH DEPENDENCIES & WORKSPACE MEMBERS ---
-            if pkg.version.starts_with("path:") {
-                info!(name = %pkg.name, version = %pkg.version, "Skipping remote download for local path dependency/workspace member");
-                continue;
-            }
+        let target_platform = lockfile.target_platform.clone();
 
-            info!(name = %pkg.name, version_req = %pkg.version, "Resolving concrete version and downloading package artifact");
-            // --- RESOLVE CONCRETE VERSION FROM CRATES.IO API IF REQUIREMENT IS PARTIAL ---
-            let eco_str = format!("{:?}", pkg.ecosystem).to_lowercase();
-            let mut concrete_version = pkg.version.clone();
+        let packages_to_download: Vec<(String, LockedPackage)> = lockfile
+            .packages
+            .clone()
+            .into_iter()
+            .filter(|(_k, pkg)| !pkg.version.starts_with("path:") && !pkg.version.contains("path"))
+            .collect();
 
-            if (eco_str == "cargo" || eco_str == "rust")
-                && (!concrete_version.contains('.') || concrete_version.matches('.').count() < 2)
-            {
-                let meta_url = format!("https://crates.io/api/v1/crates/{}", pkg.name);
-                if let Ok(resp) = client.get(&meta_url).send() {
-                    if resp.status().is_success() {
-                        if let Ok(text) = resp.text() {
-                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                                if let Some(versions) =
-                                    json.get("versions").and_then(|v| v.as_array())
-                                {
-                                    for v in versions {
-                                        if let Some(num) = v.get("num").and_then(|n| n.as_str()) {
-                                            if num.starts_with(&concrete_version)
-                                                || concrete_version == "*"
-                                            {
-                                                concrete_version = num.to_string();
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
+        if !packages_to_download.is_empty() {
+            let queue = Arc::new(Mutex::new(VecDeque::from(packages_to_download)));
+            let (tx, rx) = std::sync::mpsc::channel();
+
+            let num_workers = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .clamp(2, 16);
+
+            std::thread::scope(|s| {
+                for _ in 0..num_workers {
+                    let queue = Arc::clone(&queue);
+                    let tx = tx.clone();
+                    let crates_api_ref = &crates_api_base;
+                    let crates_dl_ref = &crates_dl_base;
+                    let npm_ref = &npm_base;
+                    let pypi_ref = &pypi_base;
+                    let golang_ref = &golang_proxy_base;
+                    let target_ref = target_platform.as_deref();
+
+                    s.spawn(move || {
+                        let client = match reqwest::blocking::Client::builder()
+                            .user_agent(concat!(
+                                "dmz-airgap-tool/",
+                                env!("CARGO_PKG_VERSION"),
+                                " (air-gap workspace manager)"
+                            ))
+                            .build()
+                        {
+                            Ok(c) => c,
+                            Err(e) => {
+                                let _ =
+                                    tx.send(Err(format!("Failed to create HTTP client: {}", e)));
+                                return;
+                            }
+                        };
+
+                        loop {
+                            let item = {
+                                let mut lock = queue.lock().unwrap();
+                                lock.pop_front()
+                            };
+
+                            let Some((key, pkg)) = item else {
+                                break;
+                            };
+
+                            let res = Self::fetch_single_package(
+                                &client,
+                                store_path,
+                                crates_api_ref,
+                                crates_dl_ref,
+                                npm_ref,
+                                pypi_ref,
+                                golang_ref,
+                                target_ref,
+                                key,
+                                pkg,
+                            );
+
+                            if tx.send(res).is_err() {
+                                break;
                             }
                         }
-                    }
+                    });
+                }
+            });
+            drop(tx);
+
+            for res in rx {
+                if let Some((map_key, updated_pkg)) = res? {
+                    fetched_count += 1;
+                    lockfile.packages.insert(map_key, updated_pkg);
                 }
             }
-
-            // --- SANITIZE VERSION OPERATORS FOR URL CONSTRUCTION ---
-            let clean_version = concrete_version
-                .trim_start_matches('=')
-                .trim_start_matches('^')
-                .trim_start_matches('~')
-                .trim();
-
-            let safe_pkg_name = pkg.name.replace('/', "__");
-
-            let pkg_dir = store_path.join(&safe_pkg_name);
-            std::fs::create_dir_all(&pkg_dir)
-                .map_err(|e| format!("Failed to create package directory: {}", e))?;
-
-            let artifact_filename = format!("{}-{}.archive", safe_pkg_name, clean_version);
-            let artifact_path = pkg_dir.join(&artifact_filename);
-
-            // --- STORE ARTIFACT CACHE HIT CHECK ---
-            if artifact_path.is_file() && !pkg.sha256.is_empty() {
-                let mut identity_hasher = Sha256::new();
-                identity_hasher.update(format!("{}:{}", pkg.name, pkg.version).as_bytes());
-                let placeholder_hash = format!("{:x}", identity_hasher.finalize());
-
-                if pkg.sha256 != placeholder_hash {
-                    if let Ok(mut cached_file) = std::fs::File::open(&artifact_path) {
-                        let mut cache_hasher = Sha256::new();
-                        if std::io::copy(&mut cached_file, &mut cache_hasher).is_ok() {
-                            let cached_digest = format!("{:x}", cache_hasher.finalize());
-                            if cached_digest == pkg.sha256 {
-                                info!(
-                                    name = %pkg.name,
-                                    version = %clean_version,
-                                    sha256 = %cached_digest,
-                                    "Store artifact cache hit verified; skipping download"
-                                );
-                                continue;
-                            }
-                        }
-                    }
-                }
-            }
-
-            let download_url = match &pkg.source_url {
-                Some(url) => url.clone(),
-                None => match eco_str.as_str() {
-                    "cargo" | "rust" => format!(
-                        "https://static.crates.io/crates/{}/{}-{}.crate",
-                        pkg.name, pkg.name, clean_version
-                    ),
-                    "npm" | "node" => {
-                        let encoded_name = pkg.name.replace('/', "%2F");
-                        let meta_url = format!("https://registry.npmjs.org/{}", encoded_name);
-                        let mut resolved_tarball = String::new();
-
-                        if let Ok(resp) = client.get(&meta_url).send() {
-                            if resp.status().is_success() {
-                                if let Ok(text) = resp.text() {
-                                    if let Ok(json) =
-                                        serde_json::from_str::<serde_json::Value>(&text)
-                                    {
-                                        if let Some(tarball) = json
-                                            .get("versions")
-                                            .and_then(|v| v.get(clean_version))
-                                            .and_then(|ver| ver.get("dist"))
-                                            .and_then(|d| d.get("tarball"))
-                                            .and_then(|t| t.as_str())
-                                        {
-                                            resolved_tarball = tarball.to_string();
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        if resolved_tarball.is_empty() {
-                            if pkg.name.starts_with('@') {
-                                if let Some(idx) = pkg.name.find('/') {
-                                    let scope = &pkg.name[..idx];
-                                    let short_name = &pkg.name[idx + 1..];
-                                    format!(
-                                        "https://registry.npmjs.org/{}%2F{}/-/{}-{}.tgz",
-                                        scope, short_name, short_name, clean_version
-                                    )
-                                } else {
-                                    format!(
-                                        "https://registry.npmjs.org/{}/-/{}-{}.tgz",
-                                        pkg.name, pkg.name, clean_version
-                                    )
-                                }
-                            } else {
-                                format!(
-                                    "https://registry.npmjs.org/{}/-/{}-{}.tgz",
-                                    pkg.name, pkg.name, clean_version
-                                )
-                            }
-                        } else {
-                            resolved_tarball
-                        }
-                    }
-                    "pypi" | "python" => {
-                        let pypi_url =
-                            format!("https://pypi.org/pypi/{}/{}/json", pkg.name, clean_version);
-                        let mut resolved_url = String::new();
-
-                        if let Ok(resp) = client.get(&pypi_url).send() {
-                            if resp.status().is_success() {
-                                if let Ok(text) = resp.text() {
-                                    if let Ok(json) =
-                                        serde_json::from_str::<serde_json::Value>(&text)
-                                    {
-                                        if let Some(urls) =
-                                            json.get("urls").and_then(|u| u.as_array())
-                                        {
-                                            for u in urls {
-                                                if let Some(url_str) =
-                                                    u.get("url").and_then(|s| s.as_str())
-                                                {
-                                                    if url_str.ends_with(".whl")
-                                                        || url_str.ends_with(".tar.gz")
-                                                    {
-                                                        resolved_url = url_str.to_string();
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        if resolved_url.is_empty() {
-                            let first_char = pkg.name.chars().next().unwrap_or('_');
-                            format!(
-                                "https://files.pythonhosted.org/packages/source/{}/{}/{}-{}.tar.gz",
-                                first_char, pkg.name, pkg.name, clean_version
-                            )
-                        } else {
-                            resolved_url
-                        }
-                    }
-                    "go" | "golang" => {
-                        format!(
-                            "https://proxy.golang.org/{}/@v/{}.zip",
-                            pkg.name, clean_version
-                        )
-                    }
-                    _ => {
-                        info!(name = %pkg.name, ecosystem = %eco_str, "No source URL and unknown ecosystem, skipping download");
-                        continue;
-                    }
-                },
-            };
-
-            let mut response = client
-                .get(&download_url)
-                .send()
-                .map_err(|e| format!("HTTP request failed for {}: {}", download_url, e))?;
-
-            if !response.status().is_success() {
-                return Err(format!(
-                    "Failed to download {}: server returned status {}",
-                    download_url,
-                    response.status()
-                ));
-            }
-
-            // Stream response in 64 KB chunks to a temporary .part file while computing SHA-256
-            let part_path = pkg_dir.join(format!("{}.part", artifact_filename));
-            let part_file = std::fs::File::create(&part_path)
-                .map_err(|e| format!("Failed to create staging file for {}: {}", pkg.name, e))?;
-            let mut writer = std::io::BufWriter::new(part_file);
-            let mut hasher = Sha256::new();
-            let mut buffer = [0u8; 65536];
-
-            loop {
-                let n = std::io::Read::read(&mut response, &mut buffer).map_err(|e| {
-                    let _ = std::fs::remove_file(&part_path);
-                    format!("Failed to stream response bytes for {}: {}", pkg.name, e)
-                })?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..n]);
-                std::io::Write::write_all(&mut writer, &buffer[..n]).map_err(|e| {
-                    let _ = std::fs::remove_file(&part_path);
-                    format!("Failed to write artifact chunk for {}: {}", pkg.name, e)
-                })?;
-            }
-
-            std::io::Write::flush(&mut writer)
-                .map_err(|e| format!("Failed to flush artifact file for {}: {}", pkg.name, e))?;
-            drop(writer);
-
-            std::fs::rename(&part_path, &artifact_path).map_err(|e| {
-                let _ = std::fs::remove_file(&part_path);
-                format!("Failed to finalize artifact file for {}: {}", pkg.name, e)
-            })?;
-
-            let computed_hash = format!("{:x}", hasher.finalize());
-
-            pkg.sha256 = computed_hash;
-
-            let meta_path = pkg_dir.join("metadata.json");
-            let meta_data = serde_json::to_string_pretty(&pkg).unwrap_or_default();
-            std::fs::write(&meta_path, meta_data)
-                .map_err(|e| format!("Failed to write package metadata: {}", e))?;
-
-            fetched_count += 1;
-            info!(name = %pkg.name, version = %clean_version, "Successfully downloaded, verified, and cached artifact");
         }
 
         if fetched_count > 0 {
@@ -640,5 +513,317 @@ impl ResolverEngine {
             "Store artifact population completed successfully"
         );
         Ok(fetched_count)
+    }
+
+    /// Evaluates Python wheel ABI tags and selects the best matching artifact for target platform
+    pub fn select_pypi_artifact(
+        urls: &[serde_json::Value],
+        target_platform: Option<&str>,
+    ) -> Option<String> {
+        let host_os = std::env::consts::OS;
+        let host_arch = std::env::consts::ARCH;
+
+        let (target_os, target_arch) = if let Some(target) = target_platform {
+            let parts: Vec<&str> = target.split('-').collect();
+            if parts.len() >= 2 {
+                (parts[0], parts[1])
+            } else {
+                (host_os, host_arch)
+            }
+        } else {
+            (host_os, host_arch)
+        };
+
+        let is_macos = target_os == "macos" || target_os == "darwin";
+        let is_linux = target_os == "linux";
+        let is_windows = target_os == "windows" || target_os == "win32";
+
+        let is_arm64 = target_arch == "arm64" || target_arch == "aarch64";
+        let is_x86_64 = target_arch == "x86_64" || target_arch == "x64";
+
+        let mut best_score = -1;
+        let mut best_url = None;
+
+        for entry in urls {
+            let url_str = match entry.get("url").and_then(|u| u.as_str()) {
+                Some(u) => u,
+                None => continue,
+            };
+            let filename = entry
+                .get("filename")
+                .and_then(|f| f.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+
+            let score: i32 = if filename.ends_with(".whl") {
+                if filename.contains("-none-any.whl")
+                    || filename.contains("py2.py3-none-any")
+                    || filename.contains("py3-none-any")
+                {
+                    80 // Pure Python universal wheel
+                } else if is_macos && (filename.contains("macosx") || filename.contains("darwin")) {
+                    if (is_arm64 && filename.contains("arm64"))
+                        || (is_x86_64 && filename.contains("x86_64"))
+                    {
+                        100 // Exact architecture match
+                    } else if filename.contains("universal2") {
+                        95 // macOS universal binary
+                    } else {
+                        -1 // Incompatible architecture
+                    }
+                } else if is_linux
+                    && (filename.contains("manylinux")
+                        || filename.contains("musllinux")
+                        || filename.contains("linux"))
+                {
+                    if (is_x86_64 && (filename.contains("x86_64") || filename.contains("amd64")))
+                        || (is_arm64 && filename.contains("aarch64"))
+                    {
+                        100 // Exact Linux architecture match
+                    } else {
+                        -1
+                    }
+                } else if is_windows
+                    && (filename.contains("win_amd64")
+                        || filename.contains("win32")
+                        || filename.contains("windows"))
+                {
+                    if (is_x86_64 && (filename.contains("amd64") || filename.contains("win_amd64")))
+                        || (is_arm64 && filename.contains("arm64"))
+                    {
+                        100
+                    } else {
+                        -1
+                    }
+                } else {
+                    -1 // Incompatible OS/platform wheel
+                }
+            } else if filename.ends_with(".tar.gz") || filename.ends_with(".zip") {
+                50 // Source distribution fallback
+            } else {
+                10
+            };
+
+            if score > best_score {
+                best_score = score;
+                best_url = Some(url_str.to_string());
+            }
+        }
+
+        best_url
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fetch_single_package(
+        client: &reqwest::blocking::Client,
+        store_path: &Path,
+        crates_api_base: &str,
+        crates_dl_base: &str,
+        npm_base: &str,
+        pypi_base: &str,
+        golang_proxy_base: &str,
+        target_platform: Option<&str>,
+        map_key: String,
+        pkg: LockedPackage,
+    ) -> Result<Option<(String, LockedPackage)>, String> {
+        if pkg.version.starts_with("path:") || pkg.version.contains("path") {
+            info!(name = %pkg.name, version = %pkg.version, "Skipping remote download for local path dependency/workspace member");
+            return Ok(None);
+        }
+
+        info!(name = %pkg.name, version_req = %pkg.version, "Resolving concrete version and downloading package artifact");
+        let eco_str = format!("{:?}", pkg.ecosystem).to_lowercase();
+        let mut concrete_version = pkg.version.clone();
+
+        if (eco_str == "cargo" || eco_str == "rust")
+            && (!concrete_version.contains('.') || concrete_version.matches('.').count() < 2)
+        {
+            let meta_url = format!("{}/{}", crates_api_base.trim_end_matches('/'), pkg.name);
+            if let Ok(resp) = client.get(&meta_url).send() {
+                if resp.status().is_success() {
+                    if let Ok(text) = resp.text() {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if let Some(versions) = json.get("versions").and_then(|v| v.as_array())
+                            {
+                                for v in versions {
+                                    if let Some(num) = v.get("num").and_then(|n| n.as_str()) {
+                                        if num.starts_with(&concrete_version)
+                                            || concrete_version == "*"
+                                        {
+                                            concrete_version = num.to_string();
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let clean_version = concrete_version
+            .trim_start_matches('=')
+            .trim_start_matches('^')
+            .trim_start_matches('~')
+            .trim();
+
+        let safe_pkg_name = pkg.name.replace('/', "__");
+        let pkg_dir = store_path.join(&safe_pkg_name);
+        std::fs::create_dir_all(&pkg_dir)
+            .map_err(|e| format!("Failed to create package directory: {}", e))?;
+
+        let download_url = match &pkg.source_url {
+            Some(url) => url.clone(),
+            None => match eco_str.as_str() {
+                "cargo" | "rust" => format!(
+                    "{}/{}/{}-{}.crate",
+                    crates_dl_base.trim_end_matches('/'),
+                    pkg.name,
+                    pkg.name,
+                    clean_version
+                ),
+                "npm" | "node" => {
+                    let encoded_name = pkg.name.replace('/', "%2F");
+                    let meta_url = format!("{}/{}", npm_base.trim_end_matches('/'), encoded_name);
+                    let mut resolved_tarball = String::new();
+
+                    if let Ok(resp) = client.get(&meta_url).send() {
+                        if resp.status().is_success() {
+                            if let Ok(text) = resp.text() {
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                    if let Some(tarball) = json
+                                        .get("versions")
+                                        .and_then(|v| v.get(clean_version))
+                                        .and_then(|ver| ver.get("dist"))
+                                        .and_then(|d| d.get("tarball"))
+                                        .and_then(|t| t.as_str())
+                                    {
+                                        resolved_tarball = tarball.to_string();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if resolved_tarball.is_empty() {
+                        let npm_root = npm_base.trim_end_matches('/');
+                        if pkg.name.starts_with('@') {
+                            if let Some(idx) = pkg.name.find('/') {
+                                let scope = &pkg.name[..idx];
+                                let short_name = &pkg.name[idx + 1..];
+                                format!(
+                                    "{}/{}%2F{}/-/{}-{}.tgz",
+                                    npm_root, scope, short_name, short_name, clean_version
+                                )
+                            } else {
+                                format!(
+                                    "{}/{}/-/{}-{}.tgz",
+                                    npm_root, pkg.name, pkg.name, clean_version
+                                )
+                            }
+                        } else {
+                            format!(
+                                "{}/{}/-/{}-{}.tgz",
+                                npm_root, pkg.name, pkg.name, clean_version
+                            )
+                        }
+                    } else {
+                        resolved_tarball
+                    }
+                }
+                "pypi" | "python" => {
+                    let pypi_url = format!(
+                        "{}/{}/{}/json",
+                        pypi_base.trim_end_matches('/'),
+                        pkg.name,
+                        clean_version
+                    );
+                    let mut resolved_url = String::new();
+
+                    if let Ok(resp) = client.get(&pypi_url).send() {
+                        if resp.status().is_success() {
+                            if let Ok(text) = resp.text() {
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                    if let Some(urls) = json.get("urls").and_then(|u| u.as_array())
+                                    {
+                                        if let Some(best) =
+                                            Self::select_pypi_artifact(urls, target_platform)
+                                        {
+                                            resolved_url = best;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if resolved_url.is_empty() {
+                        format!(
+                            "https://files.pythonhosted.org/packages/source/{}/{}/{}-{}.tar.gz",
+                            &pkg.name[..1],
+                            pkg.name,
+                            pkg.name,
+                            clean_version
+                        )
+                    } else {
+                        resolved_url
+                    }
+                }
+                "go" | "golang" => {
+                    format!(
+                        "{}/{}/@v/{}.zip",
+                        golang_proxy_base.trim_end_matches('/'),
+                        pkg.name,
+                        clean_version
+                    )
+                }
+                _ => {
+                    info!(name = %pkg.name, ecosystem = %eco_str, "No source URL and unknown ecosystem, skipping download");
+                    return Ok(None);
+                }
+            },
+        };
+
+        let response = client
+            .get(&download_url)
+            .send()
+            .map_err(|e| format!("HTTP request failed for {}: {}", download_url, e))?;
+
+        if !response.status().is_success() {
+            return Err(format!(
+                "Failed to download {}: server returned status {}",
+                download_url,
+                response.status()
+            ));
+        }
+
+        let bytes = response
+            .bytes()
+            .map_err(|e| format!("Failed to read response bytes for {}: {}", pkg.name, e))?;
+
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let computed_hash = format!("{:x}", hasher.finalize());
+
+        let mut updated_pkg = pkg;
+        updated_pkg.sha256 = computed_hash;
+
+        let artifact_filename = format!("{}-{}.archive", safe_pkg_name, clean_version);
+        let artifact_path = pkg_dir.join(artifact_filename);
+        std::fs::write(&artifact_path, &bytes).map_err(|e| {
+            format!(
+                "Failed to write artifact file for {}: {}",
+                updated_pkg.name, e
+            )
+        })?;
+
+        let meta_path = pkg_dir.join("metadata.json");
+        let meta_data = serde_json::to_string_pretty(&updated_pkg).unwrap_or_default();
+        std::fs::write(&meta_path, meta_data)
+            .map_err(|e| format!("Failed to write package metadata: {}", e))?;
+
+        info!(name = %updated_pkg.name, version = %clean_version, "Successfully downloaded, verified, and cached artifact");
+        Ok(Some((map_key, updated_pkg)))
     }
 }
