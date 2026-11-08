@@ -1,10 +1,17 @@
 use eframe::egui;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{channel, Receiver};
+use std::thread;
 
 use super::super::components;
 use dmz_core::archive::{AirGapExporter, ExportConfig, ExportMode};
 use dmz_core::resolver::lockfile::DmzLockfile;
 use dmz_core::vcs::{GitProvider, VcsProvenance};
+
+pub(super) enum VcsTaskOutcome {
+    StatusOnly(String),
+    DiffPreview(Vec<String>, String),
+}
 
 pub(super) struct VersionControlState {
     pub cached_provenance: Option<VcsProvenance>,
@@ -15,6 +22,7 @@ pub(super) struct VersionControlState {
     pub clone_source: String,
     pub clone_destination: String,
     pub changed_files_preview: Vec<String>,
+    pub active_task: Option<(String, Receiver<VcsTaskOutcome>)>,
 }
 
 impl Default for VersionControlState {
@@ -28,7 +36,14 @@ impl Default for VersionControlState {
             clone_source: String::from("workspace.bundle"),
             clone_destination: String::from("workspace"),
             changed_files_preview: Vec::new(),
+            active_task: None,
         }
+    }
+}
+
+impl VersionControlState {
+    pub(super) fn is_busy(&self) -> bool {
+        self.active_task.is_some()
     }
 }
 
@@ -39,6 +54,30 @@ pub(super) fn show(
     lockfile_path: &mut String,
     status_message: &mut String,
 ) {
+    if let Some((ref label, ref rx)) = state.active_task {
+        match rx.try_recv() {
+            Ok(outcome) => {
+                match outcome {
+                    VcsTaskOutcome::StatusOnly(msg) => {
+                        *status_message = msg;
+                    }
+                    VcsTaskOutcome::DiffPreview(files, msg) => {
+                        state.changed_files_preview = files;
+                        *status_message = msg;
+                    }
+                }
+                state.active_task = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ui.ctx().request_repaint();
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                *status_message = format!("VCS operation '{label}' terminated unexpectedly.");
+                state.active_task = None;
+            }
+        }
+    }
+
     components::page_header(ui, "Version Control & Embedded Git");
 
     let ws_path = PathBuf::from(&*workspace_path);
@@ -235,27 +274,43 @@ pub(super) fn show(
             });
 
         ui.add_space(12.0);
-        if components::action_button(ui, "Export Git Bundle (.bundle)", true).clicked() {
-            let bundle_dest = if Path::new(&state.bundle_output_path).is_relative() {
-                ws_canon.join(&state.bundle_output_path)
-            } else {
-                PathBuf::from(&state.bundle_output_path)
-            };
+        let is_busy = state.is_busy();
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(!is_busy, |ui| {
+                if components::action_button(ui, "Export Git Bundle (.bundle)", true).clicked() {
+                    let bundle_dest = if Path::new(&state.bundle_output_path).is_relative() {
+                        ws_canon.join(&state.bundle_output_path)
+                    } else {
+                        PathBuf::from(&state.bundle_output_path)
+                    };
+                    let ws = ws_canon.clone();
+                    let (tx, rx) = channel();
+                    let ctx = ui.ctx().clone();
+                    state.active_task = Some(("Exporting Git bundle...".to_string(), rx));
 
-            match GitProvider::create_bundle(&ws_canon, &bundle_dest, None) {
-                Ok(info) => {
-                    *status_message = format!(
-                        "Created Git bundle at {:?} ({} objects, commit {})",
-                        bundle_dest,
-                        info.object_count,
-                        &info.head_commit[..8.min(info.head_commit.len())]
-                    );
+                    thread::spawn(move || {
+                        let outcome = match GitProvider::create_bundle(&ws, &bundle_dest, None) {
+                            Ok(info) => VcsTaskOutcome::StatusOnly(format!(
+                                "Created Git bundle at {:?} ({} objects, commit {})",
+                                bundle_dest,
+                                info.object_count,
+                                &info.head_commit[..8.min(info.head_commit.len())]
+                            )),
+                            Err(e) => {
+                                VcsTaskOutcome::StatusOnly(format!("Bundle Export Failed: {e}"))
+                            }
+                        };
+                        let _ = tx.send(outcome);
+                        ctx.request_repaint();
+                    });
                 }
-                Err(e) => {
-                    *status_message = format!("Bundle Export Failed: {e}");
-                }
+            });
+
+            if let Some((ref label, _)) = state.active_task {
+                ui.add_space(8.0);
+                components::inline_spinner_status(ui, label);
             }
-        }
+        });
     });
 
     ui.add_space(16.0);
@@ -328,69 +383,92 @@ pub(super) fn show(
             });
 
         ui.add_space(12.0);
+        let is_busy = state.is_busy();
         ui.horizontal(|ui| {
-            if components::action_button(ui, "Preview Changed Files", false).clicked() {
-                match GitProvider::get_changed_files_since(&ws_canon, &state.since_ref) {
-                    Ok(files) => {
-                        state.changed_files_preview =
-                            files.iter().map(|p| p.display().to_string()).collect();
-                        *status_message = format!(
-                            "Found {} modified/added files since {}",
-                            state.changed_files_preview.len(),
-                            state.since_ref
-                        );
-                    }
-                    Err(e) => {
-                        *status_message = format!("Diff failed: {e}");
-                    }
+            ui.add_enabled_ui(!is_busy, |ui| {
+                if components::action_button(ui, "Preview Changed Files", false).clicked() {
+                    let ws = ws_canon.clone();
+                    let since_ref = state.since_ref.clone();
+                    let (tx, rx) = channel();
+                    let ctx = ui.ctx().clone();
+                    state.active_task = Some(("Diffing repository changes...".to_string(), rx));
+
+                    thread::spawn(move || {
+                        let outcome = match GitProvider::get_changed_files_since(&ws, &since_ref) {
+                            Ok(files) => {
+                                let file_strs: Vec<String> =
+                                    files.iter().map(|p| p.display().to_string()).collect();
+                                let msg = format!(
+                                    "Found {} modified/added files since {}",
+                                    file_strs.len(),
+                                    since_ref
+                                );
+                                VcsTaskOutcome::DiffPreview(file_strs, msg)
+                            }
+                            Err(e) => VcsTaskOutcome::StatusOnly(format!("Diff failed: {e}")),
+                        };
+                        let _ = tx.send(outcome);
+                        ctx.request_repaint();
+                    });
                 }
-            }
 
-            if components::action_button(ui, "Export Delta Bundle (.tar.zst)", true).clicked() {
-                let lockfile = if Path::new(&*lockfile_path).is_relative() {
-                    ws_canon.join(&*lockfile_path)
-                } else {
-                    PathBuf::from(&*lockfile_path)
-                };
-                let store = ws_canon.join(".dmz/store");
-                let output = if Path::new(&state.delta_output_path).is_relative() {
-                    ws_canon.join(&state.delta_output_path)
-                } else {
-                    PathBuf::from(&state.delta_output_path)
-                };
+                if components::action_button(ui, "Export Delta Bundle (.tar.zst)", true).clicked() {
+                    let lockfile = if Path::new(&*lockfile_path).is_relative() {
+                        ws_canon.join(&*lockfile_path)
+                    } else {
+                        PathBuf::from(&*lockfile_path)
+                    };
+                    let store = ws_canon.join(".dmz/store");
+                    let output = if Path::new(&state.delta_output_path).is_relative() {
+                        ws_canon.join(&state.delta_output_path)
+                    } else {
+                        PathBuf::from(&state.delta_output_path)
+                    };
 
-                let multi_workspace =
-                    dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(
-                        &ws_canon,
-                    )
-                    .map(|(cfg, _)| cfg);
+                    let ws = ws_canon.clone();
+                    let since_ref = state.since_ref.clone();
+                    let (tx, rx) = channel();
+                    let ctx = ui.ctx().clone();
+                    state.active_task = Some(("Exporting delta bundle...".to_string(), rx));
 
-                let config = ExportConfig {
-                    workspace_path: ws_canon.clone(),
-                    lockfile_path: lockfile,
-                    store_dir: store,
-                    output_path: output.clone(),
-                    zstd_level: 3,
-                    mode: ExportMode::Unified,
-                    target_platform: None,
-                    with_git_history: true,
-                    since: Some(state.since_ref.clone()),
-                    with_toolchain: false,
-                    multi_workspace,
-                };
+                    thread::spawn(move || {
+                        let multi_workspace =
+                            dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(
+                                &ws,
+                            )
+                            .map(|(cfg, _)| cfg);
 
-                match AirGapExporter::export(&config) {
-                    Ok(manifest) => {
-                        *status_message = format!(
-                            "Delta bundle exported to {:?} (checksum: {})",
-                            output,
-                            &manifest.archive_sha256[..12.min(manifest.archive_sha256.len())]
-                        );
-                    }
-                    Err(e) => {
-                        *status_message = format!("Delta Export Failed: {e}");
-                    }
+                        let config = ExportConfig {
+                            workspace_path: ws,
+                            lockfile_path: lockfile,
+                            store_dir: store,
+                            output_path: output.clone(),
+                            zstd_level: 3,
+                            mode: ExportMode::Unified,
+                            target_platform: None,
+                            with_git_history: true,
+                            since: Some(since_ref),
+                            with_toolchain: false,
+                            multi_workspace,
+                        };
+
+                        let outcome = match AirGapExporter::export(&config) {
+                            Ok(manifest) => VcsTaskOutcome::StatusOnly(format!(
+                                "Delta bundle exported to {:?} (checksum: {})",
+                                output,
+                                &manifest.archive_sha256[..12.min(manifest.archive_sha256.len())]
+                            )),
+                            Err(e) => VcsTaskOutcome::StatusOnly(format!("Delta Export Failed: {e}")),
+                        };
+                        let _ = tx.send(outcome);
+                        ctx.request_repaint();
+                    });
                 }
+            });
+
+            if let Some((ref label, _)) = state.active_task {
+                ui.add_space(8.0);
+                components::inline_spinner_status(ui, label);
             }
         });
 
@@ -450,28 +528,44 @@ pub(super) fn show(
             });
 
         ui.add_space(12.0);
-        if components::action_button(ui, "Restore / Clone from Bundle", true).clicked() {
-            let bundle_src = if Path::new(&state.clone_source).is_relative() {
-                ws_canon.join(&state.clone_source)
-            } else {
-                PathBuf::from(&state.clone_source)
-            };
-            let target_ws = if Path::new(&state.clone_destination).is_relative() {
-                ws_canon.join(&state.clone_destination)
-            } else {
-                PathBuf::from(&state.clone_destination)
-            };
+        let is_busy = state.is_busy();
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(!is_busy, |ui| {
+                if components::action_button(ui, "Restore / Clone from Bundle", true).clicked() {
+                    let bundle_src = if Path::new(&state.clone_source).is_relative() {
+                        ws_canon.join(&state.clone_source)
+                    } else {
+                        PathBuf::from(&state.clone_source)
+                    };
+                    let target_ws = if Path::new(&state.clone_destination).is_relative() {
+                        ws_canon.join(&state.clone_destination)
+                    } else {
+                        PathBuf::from(&state.clone_destination)
+                    };
+                    let (tx, rx) = channel();
+                    let ctx = ui.ctx().clone();
+                    state.active_task =
+                        Some(("Restoring repository from bundle...".to_string(), rx));
 
-            match GitProvider::restore_bundle(&target_ws, &bundle_src) {
-                Ok(()) => {
-                    *status_message =
-                        format!("Successfully restored Git repository into {:?}", target_ws);
+                    thread::spawn(move || {
+                        let outcome = match GitProvider::restore_bundle(&target_ws, &bundle_src) {
+                            Ok(()) => VcsTaskOutcome::StatusOnly(format!(
+                                "Successfully restored Git repository into {:?}",
+                                target_ws
+                            )),
+                            Err(e) => VcsTaskOutcome::StatusOnly(format!("Restore Failed: {e}")),
+                        };
+                        let _ = tx.send(outcome);
+                        ctx.request_repaint();
+                    });
                 }
-                Err(e) => {
-                    *status_message = format!("Restore Failed: {e}");
-                }
+            });
+
+            if let Some((ref label, _)) = state.active_task {
+                ui.add_space(8.0);
+                components::inline_spinner_status(ui, label);
             }
-        }
+        });
     });
 }
 

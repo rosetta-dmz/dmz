@@ -194,7 +194,11 @@ impl eframe::App for DmzGuiApp {
                                             );
                                         });
                                     if self.pages.show_status_bar() {
-                                        components::status_bar(ui, &self.status_message);
+                                        components::status_bar(
+                                            ui,
+                                            &self.status_message,
+                                            self.pages.is_busy(),
+                                        );
                                     }
                                 });
                             },

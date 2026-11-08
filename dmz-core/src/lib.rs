@@ -12,5 +12,6 @@ pub use resolver::ResolverEngine;
 pub use vcs::{BundleInfo, GitProvider, VcsProvenance};
 pub use workspace::{
     analyze_sidecar_abi, check_socket_path_length, cleanup_stale_socket, safe_socket_path,
-    IpcBridgeConfig, MemberRole, SidecarAbiReport, WorkspaceMember, WorkspaceProjectConfig,
+    IpcBridgeConfig, MemberRole, ResolvedMemberLayout, SidecarAbiReport, WorkspaceMember,
+    WorkspaceProjectConfig,
 };

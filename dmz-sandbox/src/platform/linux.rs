@@ -19,6 +19,8 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     cmd.stderr(Stdio::inherit());
 
     if !config.allow_network {
+        // SAFETY: `pre_exec` runs in the forked child before `exec`. `unshare` only invokes
+        // async-signal-safe kernel syscalls on the success path without heap allocation.
         unsafe {
             cmd.pre_exec(|| {
                 // Try unsharing user namespace + mount namespace + network namespace (Bazel/Nix style full isolation)

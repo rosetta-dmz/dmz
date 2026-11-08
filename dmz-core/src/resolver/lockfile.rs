@@ -73,7 +73,21 @@ impl DmzLockfile {
     pub fn with_platform(packages: Vec<LockedPackage>, target_platform: Option<String>) -> Self {
         let mut package_map = BTreeMap::new();
         for pkg in packages {
-            let key = format!("{}:{}", pkg.name, pkg.version);
+            let base_key = format!("{}:{}", pkg.name, pkg.version);
+            let key = if let Some(existing) = package_map.get(&base_key) {
+                let existing_pkg: &LockedPackage = existing;
+                if existing_pkg.member_id != pkg.member_id {
+                    if let Some(ref mid) = pkg.member_id {
+                        format!("{}@{}", mid, base_key)
+                    } else {
+                        base_key
+                    }
+                } else {
+                    base_key
+                }
+            } else {
+                base_key
+            };
             package_map.insert(key, pkg);
         }
 

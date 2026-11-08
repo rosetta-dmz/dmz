@@ -86,7 +86,7 @@ impl InstallerEngine {
         let mut installed_count = 0;
 
         for (_key, pkg) in lockfile.packages {
-            if pkg.version.starts_with("path:") || pkg.version.contains("path") {
+            if pkg.version.starts_with("path:") {
                 info!(name = %pkg.name, "Skipping install for local path dependency");
                 continue;
             }
@@ -253,8 +253,21 @@ impl InstallerEngine {
             // Ecosystem-specific deterministic linkage
             match pkg.ecosystem {
                 Ecosystem::Npm => {
-                    let pnpm_lock_exists = target_workspace.join("pnpm-lock.yaml").exists();
-                    if pnpm_lock_exists {
+                    let pnpm_detected = target_workspace.join("pnpm-lock.yaml").exists()
+                        || config.workspace_path.join("pnpm-lock.yaml").exists()
+                        || target_workspace.join("pnpm-workspace.yaml").exists()
+                        || config.workspace_path.join("pnpm-workspace.yaml").exists()
+                        || target_workspace.join("node_modules/.pnpm").is_dir()
+                        || config.workspace_path.join("node_modules/.pnpm").is_dir()
+                        || {
+                            if let Ok(c) = fs::read_to_string(target_workspace.join("package.json"))
+                            {
+                                c.contains("\"pnpm\"")
+                            } else {
+                                false
+                            }
+                        };
+                    if pnpm_detected {
                         mappers::PnpmMapper::map_package(&target_workspace, &pkg, &archive_path)?;
                     } else {
                         mappers::NpmMapper::map_package(&target_workspace, &pkg, &archive_path)?;
@@ -317,6 +330,26 @@ impl InstallerEngine {
                 let member_path = std::fs::canonicalize(&member_path).unwrap_or(member_path);
                 if member_path.is_dir() {
                     mappers::NpmMapper::hydrate_workspace_bin_shims(&member_path);
+                }
+            }
+        }
+
+        // Regenerate environment activator scripts (.dmz/env.sh, .dmz/env.bat) for root and members
+        let _ =
+            crate::toolchain::ToolchainSetup::generate_activator_scripts(&config.workspace_path);
+
+        // Ensure .modules.yaml exists in root and all members with node_modules
+        mappers::PnpmMapper::ensure_modules_yaml(&config.workspace_path);
+        if let Some(ref manifest) = workspace_manifest {
+            for member in &manifest.members {
+                let member_path = if member.path.is_absolute() {
+                    member.path.clone()
+                } else {
+                    config.workspace_path.join(&member.path)
+                };
+                let member_path = std::fs::canonicalize(&member_path).unwrap_or(member_path);
+                if member_path.is_dir() {
+                    mappers::PnpmMapper::ensure_modules_yaml(&member_path);
                 }
             }
         }

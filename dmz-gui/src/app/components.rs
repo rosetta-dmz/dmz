@@ -365,12 +365,27 @@ pub(super) fn dismissable_toast(ui: &mut egui::Ui, text: &str, open: &mut bool) 
     closed
 }
 
-pub(super) fn status_bar(ui: &mut egui::Ui, status_message: &str) {
-    let visuals = ui.visuals();
-    let text = visuals
-        .override_text_color
-        .unwrap_or(visuals.widgets.inactive.fg_stroke.color);
-    let border = visuals.widgets.noninteractive.bg_stroke.color;
+pub(super) fn inline_spinner_status(ui: &mut egui::Ui, label: &str) {
+    let accent = ui.visuals().selection.stroke.color;
+    ui.horizontal(|ui| {
+        ui.add(egui::Spinner::new().size(16.0).color(accent));
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(label).color(accent).strong());
+    });
+    ui.ctx().request_repaint();
+}
+
+pub(super) fn status_bar(ui: &mut egui::Ui, status_message: &str, is_busy: bool) {
+    let (text, border, accent) = {
+        let visuals = ui.visuals();
+        (
+            visuals
+                .override_text_color
+                .unwrap_or(visuals.widgets.inactive.fg_stroke.color),
+            visuals.widgets.noninteractive.bg_stroke.color,
+            visuals.selection.stroke.color,
+        )
+    };
     let (footer_rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 48.0), egui::Sense::hover());
     ui.painter().hline(
@@ -381,8 +396,14 @@ pub(super) fn status_bar(ui: &mut egui::Ui, status_message: &str) {
 
     let inner_rect = footer_rect.shrink2(egui::vec2(16.0, 0.0));
     let dot_center = egui::pos2(inner_rect.left() + 1.0, inner_rect.center().y + 4.0);
-    ui.painter()
-        .circle_filled(dot_center, 5.0, egui::Color32::from_rgb(71, 209, 125));
+    if is_busy {
+        let spinner_rect = egui::Rect::from_center_size(dot_center, egui::vec2(14.0, 14.0));
+        ui.put(spinner_rect, egui::Spinner::new().size(14.0).color(accent));
+        ui.ctx().request_repaint();
+    } else {
+        ui.painter()
+            .circle_filled(dot_center, 5.0, egui::Color32::from_rgb(71, 209, 125));
+    }
 
     let text_left = dot_center.x + 13.0;
     let text_width = (inner_rect.right() - text_left).max(0.0);

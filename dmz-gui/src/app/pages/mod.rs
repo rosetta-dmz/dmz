@@ -42,6 +42,13 @@ impl Pages {
         self.appearance.show_status_bar()
     }
 
+    pub(super) fn is_busy(&self) -> bool {
+        self.airgap.is_busy()
+            || self.resolver.is_busy()
+            || self.version_control.is_busy()
+            || self.sandbox.is_busy()
+    }
+
     pub(super) fn save(&self, storage: &mut dyn eframe::Storage) {
         self.appearance.save(storage);
     }

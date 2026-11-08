@@ -1,9 +1,16 @@
 use eframe::egui;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{channel, Receiver};
+use std::thread;
 
 use super::super::components;
 use dmz_core::diagnostics::DiagnosticError;
 use dmz_sandbox::platform::{run_sandboxed, SandboxConfig};
+
+pub(super) struct SandboxTaskOutcome {
+    output_line: String,
+    status_message: String,
+}
 
 pub(super) struct SandboxState {
     closure_path: String,
@@ -12,6 +19,7 @@ pub(super) struct SandboxState {
     pub(super) diagnose: bool,
     command: String,
     console_output: String,
+    pub(super) active_task: Option<(String, Receiver<SandboxTaskOutcome>)>,
 }
 
 impl Default for SandboxState {
@@ -25,7 +33,14 @@ impl Default for SandboxState {
             console_output: String::from(
                 "DMZ Workspace Sandbox ready.\nConfigure isolation toggles, workspace directory, and execute commands below.\n",
             ),
+            active_task: None,
         }
+    }
+}
+
+impl SandboxState {
+    pub(super) fn is_busy(&self) -> bool {
+        self.active_task.is_some()
     }
 }
 
@@ -35,6 +50,23 @@ pub(super) fn show(
     workspace_path: &mut String,
     status_message: &mut String,
 ) {
+    if let Some((ref label, ref rx)) = state.active_task {
+        match rx.try_recv() {
+            Ok(outcome) => {
+                state.console_output.push_str(&outcome.output_line);
+                *status_message = outcome.status_message;
+                state.active_task = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ui.ctx().request_repaint();
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                *status_message = format!("Sandbox task '{label}' disconnected unexpectedly.");
+                state.active_task = None;
+            }
+        }
+    }
+
     components::page_header(ui, "Workspace Sandbox");
 
     components::section(ui, |ui| {
@@ -132,136 +164,164 @@ pub(super) fn show(
             });
 
         ui.add_space(16.0);
+        let is_busy = state.is_busy();
         ui.horizontal_wrapped(|ui| {
-            if components::action_button(ui, "Execute Command in Sandbox", true).clicked() {
-                let workspace = PathBuf::from(&*workspace_path);
-                let abs_workspace =
-                    std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
-                let store = PathBuf::from(&state.closure_path);
+            ui.add_enabled_ui(!is_busy, |ui| {
+                if components::action_button(ui, "Execute Command in Sandbox", true).clicked() {
+                    let workspace = PathBuf::from(&*workspace_path);
+                    let abs_workspace =
+                        std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
+                    let store = PathBuf::from(&state.closure_path);
 
-                let start_time = std::time::Instant::now();
-                state.console_output.push_str(&format!(
-                    "\n>>> [{}] Executing: {} (sandboxed: {}, network: {})\n",
-                    chrono_timestamp(),
-                    state.command,
-                    state.sandboxed,
-                    state.allow_network
-                ));
+                    let sandboxed = state.sandboxed;
+                    let allow_network = state.allow_network;
+                    let diagnose = state.diagnose;
+                    let command = state.command.clone();
 
-                let mut envs: std::collections::HashMap<String, String> =
-                    std::env::vars().collect();
-                envs.insert(
-                    "DMZ_WORKSPACE".to_string(),
-                    abs_workspace.display().to_string(),
-                );
-                envs.insert("DMZ_STORE".to_string(), store.display().to_string());
-                envs.insert(
-                    "CARGO_HOME".to_string(),
-                    abs_workspace.join(".cargo").display().to_string(),
-                );
-                envs.insert(
-                    "NODE_PATH".to_string(),
-                    abs_workspace.join("node_modules").display().to_string(),
-                );
-                envs.insert(
-                    "DMZ_SANDBOX".to_string(),
-                    if state.sandboxed {
-                        "1".to_string()
+                    state.console_output.push_str(&format!(
+                        "\n>>> [{}] Executing: {} (sandboxed: {}, network: {})\n",
+                        chrono_timestamp(),
+                        command,
+                        sandboxed,
+                        allow_network
+                    ));
+
+                    let mut envs =
+                        dmz_core::workspace::WorkspaceProjectConfig::default().build_member_env(
+                            &abs_workspace,
+                            &abs_workspace,
+                            Path::new(""),
+                            allow_network,
+                        );
+                    envs.insert("DMZ_STORE".to_string(), store.display().to_string());
+                    envs.insert(
+                        "DMZ_SANDBOX".to_string(),
+                        if sandboxed {
+                            "1".to_string()
+                        } else {
+                            "0".to_string()
+                        },
+                    );
+
+                    let env_vec: Vec<(String, String)> = envs.into_iter().collect();
+
+                    let (shell_cmd, shell_arg) = if cfg!(windows) {
+                        ("cmd.exe", "/C")
                     } else {
-                        "0".to_string()
-                    },
-                );
-
-                let env_vec: Vec<(String, String)> = envs.into_iter().collect();
-
-                let (shell_cmd, shell_arg) = if cfg!(windows) {
-                    ("cmd.exe", "/C")
-                } else {
-                    ("/bin/sh", "-c")
-                };
-
-                if state.sandboxed {
-                    let config = SandboxConfig {
-                        workspace_path: workspace,
-                        closure_path: store,
-                        command: shell_cmd.to_string(),
-                        args: vec![shell_arg.to_string(), state.command.clone()],
-                        envs: env_vec,
-                        allow_network: state.allow_network,
-                        ipc_socket_path: None,
+                        ("/bin/sh", "-c")
                     };
 
-                    match run_sandboxed(&config) {
-                        Ok(status) => {
-                            let elapsed = start_time.elapsed();
-                            let code = status.code().unwrap_or(-1);
-                            if status.success() {
-                                state.console_output.push_str(&format!(
-                                    "✓ [SUCCESS] Process finished in {:.2?} with exit code {}\n",
-                                    elapsed, code
-                                ));
-                                *status_message =
-                                    format!("Sandbox process finished (exit code {})", code);
-                            } else {
-                                state.console_output.push_str(&format!(
-                                    "✗ [PROCESS FAILED] Finished in {:.2?} with exit code {}\n",
-                                    elapsed, code
-                                ));
-                                *status_message =
-                                    format!("Sandbox process exited with code {}", code);
-                            }
-                        }
-                        Err(e) => {
-                            let elapsed = start_time.elapsed();
-                            state.console_output.push_str(&format!(
-                                "✗ [PLATFORM ERROR] Failed after {:.2?}: {}\n",
-                                elapsed, e
-                            ));
-                            if state.diagnose {
-                                let diag = DiagnosticError::classify(&e);
-                                state.console_output.push_str(&format!(
-                                    "\n[DIAGNOSTIC CLASSIFICATION]: {:?}\nMessage: {}\nRemediation: {}\n",
-                                    diag.category, diag.message, diag.remediation
-                                ));
-                            }
-                            *status_message = format!("Sandbox Execution Error: {}", e);
-                        }
-                    }
-                } else {
-                    let mut cmd = std::process::Command::new(shell_cmd);
-                    cmd.args([shell_arg, &state.command])
-                        .current_dir(&workspace)
-                        .envs(env_vec);
+                    let (tx, rx) = channel();
+                    let ctx = ui.ctx().clone();
+                    state.active_task = Some(("Executing command...".to_string(), rx));
 
-                    match cmd.status() {
-                        Ok(status) => {
-                            let elapsed = start_time.elapsed();
-                            let code = status.code().unwrap_or(-1);
-                            state.console_output.push_str(&format!(
-                                "✓ [HOST UNCONFINED] Finished in {:.2?} with exit code {}\n",
-                                elapsed, code
-                            ));
-                            *status_message =
-                                format!("Host command completed (exit code {})", code);
+                    thread::spawn(move || {
+                        let start_time = std::time::Instant::now();
+                        if sandboxed {
+                            let config = SandboxConfig {
+                                workspace_path: workspace,
+                                closure_path: store,
+                                command: shell_cmd.to_string(),
+                                args: vec![shell_arg.to_string(), command],
+                                envs: env_vec,
+                                allow_network,
+                                ipc_socket_path: None,
+                            };
+
+                            let outcome = match run_sandboxed(&config) {
+                                Ok(status) => {
+                                    let elapsed = start_time.elapsed();
+                                    let code = status.code().unwrap_or(-1);
+                                    if status.success() {
+                                        SandboxTaskOutcome {
+                                            output_line: format!(
+                                                "✓ [SUCCESS] Process finished in {:.2?} with exit code {}\n",
+                                                elapsed, code
+                                            ),
+                                            status_message: format!(
+                                                "Sandbox process finished (exit code {})",
+                                                code
+                                            ),
+                                        }
+                                    } else {
+                                        SandboxTaskOutcome {
+                                            output_line: format!(
+                                                "✗ [PROCESS FAILED] Finished in {:.2?} with exit code {}\n",
+                                                elapsed, code
+                                            ),
+                                            status_message: format!(
+                                                "Sandbox process exited with code {}",
+                                                code
+                                            ),
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    let elapsed = start_time.elapsed();
+                                    let mut out = format!(
+                                        "✗ [PLATFORM ERROR] Failed after {:.2?}: {}\n",
+                                        elapsed, e
+                                    );
+                                    if diagnose {
+                                        let diag = DiagnosticError::classify(&e);
+                                        out.push_str(&format!(
+                                            "\n[DIAGNOSTIC CLASSIFICATION]: {:?}\nMessage: {}\nRemediation: {}\n",
+                                            diag.category, diag.message, diag.remediation
+                                        ));
+                                    }
+                                    SandboxTaskOutcome {
+                                        output_line: out,
+                                        status_message: format!("Sandbox Execution Error: {}", e),
+                                    }
+                                }
+                            };
+                            let _ = tx.send(outcome);
+                        } else {
+                            let mut cmd = std::process::Command::new(shell_cmd);
+                            cmd.args([shell_arg, &command])
+                                .current_dir(&workspace)
+                                .envs(env_vec);
+
+                            let outcome = match cmd.status() {
+                                Ok(status) => {
+                                    let elapsed = start_time.elapsed();
+                                    let code = status.code().unwrap_or(-1);
+                                    SandboxTaskOutcome {
+                                        output_line: format!(
+                                            "✓ [HOST UNCONFINED] Finished in {:.2?} with exit code {}\n",
+                                            elapsed, code
+                                        ),
+                                        status_message: format!(
+                                            "Host command completed (exit code {})",
+                                            code
+                                        ),
+                                    }
+                                }
+                                Err(e) => SandboxTaskOutcome {
+                                    output_line: format!("✗ [ERROR] Host execution failed: {}\n", e),
+                                    status_message: format!("Command Execution Error: {}", e),
+                                },
+                            };
+                            let _ = tx.send(outcome);
                         }
-                        Err(e) => {
-                            state
-                                .console_output
-                                .push_str(&format!("✗ [ERROR] Host execution failed: {}\n", e));
-                            *status_message = format!("Command Execution Error: {}", e);
-                        }
-                    }
+                        ctx.request_repaint();
+                    });
                 }
-            }
 
-            if components::action_button(ui, "Launch Interactive Shell", false).clicked() {
-                launch_external_terminal(workspace_path, state.sandboxed, state.allow_network);
-                *status_message =
-                    String::from("Launched interactive terminal shell session for workspace.");
-            }
+                if components::action_button(ui, "Launch Interactive Shell", false).clicked() {
+                    launch_external_terminal(workspace_path, state.sandboxed, state.allow_network);
+                    *status_message =
+                        String::from("Launched interactive terminal shell session for workspace.");
+                }
 
-            if components::action_button(ui, "Clear Console", false).clicked() {
-                state.console_output.clear();
+                if components::action_button(ui, "Clear Console", false).clicked() {
+                    state.console_output.clear();
+                }
+            });
+
+            if let Some((ref label, _)) = state.active_task {
+                ui.add_space(8.0);
+                components::inline_spinner_status(ui, label);
             }
         });
     });
@@ -374,11 +434,12 @@ fn launch_external_terminal(workspace_path: &str, sandboxed: bool, allow_network
             ""
         };
         let shell_cmd = resolve_dmz_cli_cmd(&abs_workspace, extra_flags);
+        let escaped_cmd = shell_cmd.replace('\\', "\\\\").replace('"', "\\\"");
         let _ = std::process::Command::new("osascript")
             .arg("-e")
             .arg(format!(
                 "tell application \"Terminal\" to do script \"{}\"",
-                shell_cmd
+                escaped_cmd
             ))
             .spawn();
     }
