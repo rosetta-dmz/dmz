@@ -6,11 +6,46 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use tar::Builder as TarBuilder;
 use tracing::{info, warn};
 use zstd::stream::write::Encoder as ZstdEncoder;
+
+/// Single-pass streaming writer that updates a SHA-256 digest and byte counter on every write.
+pub(crate) struct HashingWriter<W: Write> {
+    inner: W,
+    hasher: Sha256,
+    bytes_written: u64,
+}
+
+impl<W: Write> HashingWriter<W> {
+    pub(crate) fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+            bytes_written: 0,
+        }
+    }
+
+    pub(crate) fn finalize(mut self) -> std::io::Result<(String, u64)> {
+        self.inner.flush()?;
+        Ok((format!("{:x}", self.hasher.finalize()), self.bytes_written))
+    }
+}
+
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        self.bytes_written += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportMode {
@@ -264,11 +299,12 @@ impl AirGapExporter {
             }
         }
 
-        // Prepare archive output stream
+        // Prepare archive output stream with 64 KB buffered single-pass SHA-256 hashing writer
         let file = File::create(&effective_output)
             .map_err(|e| ExportError::IoError(format!("Failed to create export archive: {}", e)))?;
+        let hashing_writer = HashingWriter::new(BufWriter::with_capacity(64 * 1024, file));
 
-        let zstd_encoder = ZstdEncoder::new(file, config.zstd_level)
+        let zstd_encoder = ZstdEncoder::new(hashing_writer, config.zstd_level)
             .map_err(|e| ExportError::ArchiveError(format!("Failed to initialize zstd: {}", e)))?;
 
         let mut tar_builder = TarBuilder::new(zstd_encoder);
@@ -283,7 +319,7 @@ impl AirGapExporter {
         if config.mode == ExportMode::Unified || config.mode == ExportMode::DepsOnly {
             for pkg_info in lockfile.packages.values() {
                 // Skip local path dependencies/workspace members since they are in the workspace source
-                if pkg_info.version.starts_with("path:") || pkg_info.version.contains("path") {
+                if pkg_info.version.starts_with("path:") {
                     continue;
                 }
 
@@ -333,127 +369,63 @@ impl AirGapExporter {
         if config.mode == ExportMode::Unified || config.mode == ExportMode::CodeOnly {
             if let Some(ref ws_project) = ws_project_opt {
                 // --- MULTI-WORKSPACE UMBRELLA EXPORT ---
-                let primary_raw_name = workspace_root
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .filter(|n| !n.is_empty())
-                    .unwrap_or("primary")
-                    .to_string();
-
-                let mut member_folder_names = HashMap::new();
+                let layouts = ws_project
+                    .resolve_member_layouts(&workspace_root, manifest_path_opt.as_deref());
                 let mut member_host_paths = HashMap::new();
+                let mut member_archive_paths = HashMap::new();
 
-                for member in &ws_project.members {
-                    if member.role == MemberRole::Primary {
-                        let folder_name = if !member.id.is_empty()
-                            && member.id != "primary"
-                            && member.id != "default"
-                        {
-                            member.id.clone()
+                for layout in &layouts {
+                    member_host_paths.insert(layout.member.id.clone(), layout.host_path.clone());
+                    member_archive_paths
+                        .insert(layout.member.id.clone(), layout.archive_path.clone());
+
+                    if layout.member.role == MemberRole::Primary {
+                        info!(
+                            folder = %layout.archive_path.display(),
+                            path = ?layout.host_path,
+                            "Packaging primary workspace files into workspaces namespace"
+                        );
+                        if let Some(ref changed_files) = changed_files_filter {
+                            Self::append_filtered_files(
+                                &mut tar_builder,
+                                &layout.host_path,
+                                changed_files,
+                            )?;
                         } else {
-                            primary_raw_name.clone()
-                        };
-                        member_folder_names.insert(member.id.clone(), folder_name);
-                        member_host_paths.insert(member.id.clone(), workspace_root.clone());
-                    } else {
-                        let host_path = if member.path.is_relative() {
-                            if let Some(ref m_path) = manifest_path_opt {
-                                m_path
-                                    .parent()
-                                    .unwrap_or(&workspace_root)
-                                    .join(&member.path)
-                            } else {
-                                workspace_root.join(&member.path)
-                            }
-                        } else {
-                            member.path.clone()
-                        };
-                        let host_path = fs::canonicalize(&host_path).unwrap_or(host_path);
-                        let raw_name = host_path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .filter(|n| !n.is_empty())
-                            .unwrap_or(&member.id)
-                            .to_string();
-                        let folder_name = if !member.id.is_empty()
-                            && member.id != "sidecar"
-                            && member.id != "service"
-                            && member.id != "default"
-                        {
-                            member.id.clone()
-                        } else {
-                            raw_name
-                        };
-                        member_folder_names.insert(member.id.clone(), folder_name);
-                        member_host_paths.insert(member.id.clone(), host_path);
-                    }
-                }
-
-                // Disambiguate if primary and sidecar resolve to the same folder name
-                let primary_folder_name = member_folder_names
-                    .get(
-                        ws_project
-                            .primary_member()
-                            .map(|m| m.id.as_str())
-                            .unwrap_or("primary"),
-                    )
-                    .cloned()
-                    .unwrap_or_else(|| primary_raw_name.clone());
-
-                for (id, name) in member_folder_names.iter_mut() {
-                    let is_primary = ws_project
-                        .primary_member()
-                        .map(|m| m.id == *id)
-                        .unwrap_or(false);
-                    if !is_primary && *name == primary_folder_name {
-                        *name = format!("{}-sidecar", name);
-                    }
-                }
-
-                // 1. Package Primary Repository into its dedicated workspaces/<primary_folder> namespace
-                let primary_dest = PathBuf::from(format!("workspaces/{}", primary_folder_name));
-                info!(
-                    folder = %primary_dest.display(),
-                    path = ?workspace_root,
-                    "Packaging primary workspace files into workspaces namespace"
-                );
-                if let Some(ref changed_files) = changed_files_filter {
-                    Self::append_filtered_files(&mut tar_builder, &workspace_root, changed_files)?;
-                } else {
-                    Self::append_dir_all(&mut tar_builder, &workspace_root, &primary_dest, true)?;
-                }
-
-                // 2. Package each Sidecar / Service Member into its dedicated workspaces/<sidecar_folder> namespace
-                for member in &ws_project.members {
-                    if member.role != MemberRole::Primary {
-                        if let Some(host_path) = member_host_paths.get(&member.id) {
-                            if let Some(folder_name) = member_folder_names.get(&member.id) {
-                                if host_path.is_dir() {
-                                    let sidecar_dest =
-                                        PathBuf::from(format!("workspaces/{}", folder_name));
-                                    info!(
-                                        member = %member.id,
-                                        src = ?host_path,
-                                        dest = %sidecar_dest.display(),
-                                        "Packaging sidecar workspace files into workspaces namespace"
-                                    );
-                                    Self::append_dir_all(
-                                        &mut tar_builder,
-                                        host_path,
-                                        &sidecar_dest,
-                                        true,
-                                    )?;
-                                }
-                            }
+                            Self::append_dir_all(
+                                &mut tar_builder,
+                                &layout.host_path,
+                                &layout.archive_path,
+                                true,
+                            )?;
                         }
+                    } else if layout.host_path.is_dir() {
+                        info!(
+                            member = %layout.member.id,
+                            src = ?layout.host_path,
+                            dest = %layout.archive_path.display(),
+                            "Packaging sidecar workspace files into workspaces namespace"
+                        );
+                        Self::append_dir_all(
+                            &mut tar_builder,
+                            &layout.host_path,
+                            &layout.archive_path,
+                            true,
+                        )?;
                     }
                 }
+
+                let primary_folder_name = layouts
+                    .iter()
+                    .find(|l| l.member.role == MemberRole::Primary)
+                    .map(|l| l.folder_name.clone())
+                    .unwrap_or_else(|| "primary".to_string());
 
                 // 3. Serialize and embed normalized dmz-workspace.toml pointing to workspaces/<folder> subfolders
                 let mut normalized_project = ws_project.clone();
                 for m in &mut normalized_project.members {
-                    if let Some(folder_name) = member_folder_names.get(&m.id) {
-                        m.path = PathBuf::from(format!("workspaces/{}", folder_name));
+                    if let Some(archive_path) = member_archive_paths.get(&m.id) {
+                        m.path = archive_path.clone();
                     }
                 }
                 if let Ok(toml_str) = normalized_project.to_toml_string() {
@@ -469,135 +441,18 @@ impl AirGapExporter {
                 }
 
                 // 4. Generate and embed VS Code Multi-Root Workspace (.code-workspace)
-                let mut folders = Vec::new();
-                let mut linked_rust_projects = Vec::new();
-                let mut node_bin_unix = Vec::new();
-                let mut node_bin_win = Vec::new();
-
-                for m in &normalized_project.members {
-                    let folder_path = m.path.to_string_lossy().replace('\\', "/");
-                    let short_folder_name =
-                        m.path.file_name().and_then(|n| n.to_str()).unwrap_or(&m.id);
-                    let host_dir = member_host_paths.get(&m.id).unwrap_or(&workspace_root);
-
-                    let is_python = m.ecosystem.as_deref() == Some("python")
-                        || m.ecosystem.as_deref() == Some("pypi")
-                        || host_dir.join("requirements.txt").exists()
-                        || host_dir.join("pyproject.toml").exists();
-
-                    let is_rust = m.ecosystem.as_deref() == Some("rust")
-                        || m.ecosystem.as_deref() == Some("cargo")
-                        || host_dir.join("Cargo.toml").exists()
-                        || host_dir.join("src-tauri/Cargo.toml").exists();
-
-                    let is_node = m.ecosystem.as_deref() == Some("node")
-                        || m.ecosystem.as_deref() == Some("npm")
-                        || host_dir.join("package.json").exists();
-
-                    if is_rust {
-                        if host_dir.join("Cargo.toml").exists() {
-                            linked_rust_projects.push(format!("{}/Cargo.toml", folder_path));
-                        }
-                        if host_dir.join("src-tauri/Cargo.toml").exists() {
-                            linked_rust_projects
-                                .push(format!("{}/src-tauri/Cargo.toml", folder_path));
-                        }
-                    }
-
-                    if is_node {
-                        node_bin_unix.push(format!(
-                            "${{workspaceFolder}}/{}/node_modules/.bin",
-                            folder_path
-                        ));
-                        node_bin_win.push(format!(
-                            "${{workspaceFolder}}\\{}\\node_modules\\.bin",
-                            folder_path.replace('/', "\\")
-                        ));
-                    }
-
-                    let label = if !m.id.is_empty() {
-                        m.id.clone()
-                    } else {
-                        short_folder_name.to_string()
-                    };
-
-                    let mut folder_entry = serde_json::json!({
-                        "name": label,
-                        "path": folder_path
-                    });
-
-                    if is_python {
-                        let mut py_settings = serde_json::json!({
-                            "python.terminal.activateEnvironment": true
-                        });
-
-                        let has_bundled_py = config.with_toolchain
-                            || workspace_root.join(".dmz/toolchains/python").exists();
-                        let member_venv = host_dir.join(".venv");
-
-                        if member_venv.exists() {
-                            let py_bin = if cfg!(windows) {
-                                "${workspaceFolder}/.venv/Scripts/python.exe"
-                            } else {
-                                "${workspaceFolder}/.venv/bin/python"
-                            };
-                            py_settings["python.defaultInterpreterPath"] =
-                                serde_json::Value::String(py_bin.to_string());
-                        } else if has_bundled_py {
-                            let py_bin = if folder_path == "." {
-                                if cfg!(windows) {
-                                    "${workspaceFolder}/.dmz/toolchains/python/python.exe"
-                                } else {
-                                    "${workspaceFolder}/.dmz/toolchains/python/bin/python3"
-                                }
-                            } else if cfg!(windows) {
-                                "${workspaceFolder}/../.dmz/toolchains/python/python.exe"
-                            } else {
-                                "${workspaceFolder}/../.dmz/toolchains/python/bin/python3"
-                            };
-                            py_settings["python.defaultInterpreterPath"] =
-                                serde_json::Value::String(py_bin.to_string());
-                        }
-
-                        folder_entry["settings"] = py_settings;
-                    }
-
-                    folders.push(folder_entry);
-                }
-
                 let workspace_display_name = if !ws_project.name.is_empty() {
                     &ws_project.name
                 } else {
                     "workspace"
                 };
 
-                let unix_node_prefix = if !node_bin_unix.is_empty() {
-                    format!("{}:", node_bin_unix.join(":"))
-                } else {
-                    String::new()
-                };
-
-                let win_node_prefix = if !node_bin_win.is_empty() {
-                    format!("{};", node_bin_win.join(";"))
-                } else {
-                    String::new()
-                };
-
-                let code_workspace_obj = serde_json::json!({
-                    "folders": folders,
-                    "settings": {
-                        "rust-analyzer.linkedProjects": linked_rust_projects,
-                        "terminal.integrated.env.osx": {
-                            "PATH": format!("{}${{workspaceFolder}}/.dmz/toolchains/node/bin:${{workspaceFolder}}/.dmz/toolchains/rust/bin:${{workspaceFolder}}/.dmz/toolchains/python/bin:${{env:PATH}}", unix_node_prefix)
-                        },
-                        "terminal.integrated.env.linux": {
-                            "PATH": format!("{}${{workspaceFolder}}/.dmz/toolchains/node/bin:${{workspaceFolder}}/.dmz/toolchains/rust/bin:${{workspaceFolder}}/.dmz/toolchains/python/bin:${{env:PATH}}", unix_node_prefix)
-                        },
-                        "terminal.integrated.env.windows": {
-                            "PATH": format!("{}${{workspaceFolder}}\\.dmz\\toolchains\\node\\bin;${{workspaceFolder}}\\.dmz\\toolchains\\rust\\bin;${{workspaceFolder}}\\.dmz\\toolchains\\python;${{env:PATH}}", win_node_prefix)
-                        }
-                    }
-                });
+                let code_workspace_obj =
+                    crate::toolchain::ToolchainSetup::build_multi_root_workspace_json(
+                        &workspace_root,
+                        &normalized_project,
+                        Some(&member_host_paths),
+                    );
 
                 if let Ok(cw_bytes) = serde_json::to_vec_pretty(&code_workspace_obj) {
                     let mut header = tar::Header::new_gnu();
@@ -840,28 +695,20 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
                 ExportError::ArchiveError(format!("Failed to embed airgap manifest: {}", e))
             })?;
 
-        // Finish streams and ensure file handle is fully closed
-        {
-            let zstd_encoder = tar_builder.into_inner().map_err(|e| {
-                ExportError::ArchiveError(format!("Failed to finalize tar stream: {}", e))
-            })?;
-
-            let mut inner_file = zstd_encoder
-                .finish()
-                .map_err(|e| format!("Failed to finish zstd compression: {}", e))
-                .map_err(ExportError::ArchiveError)?;
-
-            inner_file
-                .flush()
-                .map_err(|e| ExportError::IoError(e.to_string()))?;
-
-            inner_file
-        };
-
-        // Compute final archive checksum
-        let archive_sha256 = Self::calculate_file_sha256(&effective_output).map_err(|e| {
-            ExportError::IoError(format!("Failed to calculate archive hash: {}", e))
+        // Finish streams and obtain single-pass SHA-256 digest without re-reading the archive from disk
+        let zstd_encoder = tar_builder.into_inner().map_err(|e| {
+            ExportError::ArchiveError(format!("Failed to finalize tar stream: {}", e))
         })?;
+
+        let hashing_writer = zstd_encoder
+            .finish()
+            .map_err(|e| format!("Failed to finish zstd compression: {}", e))
+            .map_err(ExportError::ArchiveError)?;
+
+        let (archive_sha256, _size_bytes) = hashing_writer
+            .finalize()
+            .map_err(|e| ExportError::IoError(e.to_string()))?;
+
         let mut final_manifest = manifest;
         final_manifest.archive_sha256 = archive_sha256;
 
@@ -981,8 +828,9 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
 
     fn read_manifest_from_archive(path: &Path) -> Result<AirGapManifest, String> {
         let file = File::open(path).map_err(|e| format!("Failed to open since archive: {}", e))?;
-        let decoder =
-            zstd::stream::read::Decoder::new(file).map_err(|e| format!("Zstd error: {}", e))?;
+        let buf_reader = BufReader::with_capacity(64 * 1024, file);
+        let decoder = zstd::stream::read::Decoder::new(buf_reader)
+            .map_err(|e| format!("Zstd error: {}", e))?;
         let mut archive = tar::Archive::new(decoder);
         for entry in archive.entries().map_err(|e| format!("Tar error: {}", e))? {
             let mut entry = entry.map_err(|e| format!("Tar entry error: {}", e))?;

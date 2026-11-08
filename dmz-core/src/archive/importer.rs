@@ -4,7 +4,7 @@ use crate::resolver::lockfile::DmzLockfile;
 use crate::vcs::{GitProvider, VcsProvenance};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use tar::Archive as TarArchive;
 use tracing::{info, warn};
@@ -188,15 +188,13 @@ impl AirGapImporter {
             config.verify_closure_hash,
         );
 
-        match result {
-            Ok(res) => Ok(res),
-            Err(e) => {
-                if let Some(ref backup_dir) = backup_snapshot {
-                    let _ = Self::restore_backup_snapshot(&effective_workspace, backup_dir);
-                }
-                Err(e)
+        if let Err(ref _e) = result {
+            if let Some(ref backup_dir) = backup_snapshot {
+                let _ = Self::restore_backup_snapshot(&effective_workspace, backup_dir);
             }
         }
+
+        result
     }
 
     fn do_import(
@@ -205,11 +203,12 @@ impl AirGapImporter {
         effective_workspace: &Path,
         verify_closure_hash: bool,
     ) -> Result<ImportResult, ImportError> {
-        // Open archive and initialize zstd stream
+        // Open archive with 64 KB Buffered Reader and initialize zstd stream
         let file = File::open(effective_archive)
             .map_err(|e| ImportError::IoError(format!("Failed to open archive: {}", e)))?;
+        let buf_reader = BufReader::with_capacity(64 * 1024, file);
 
-        let zstd_decoder = ZstdDecoder::new(file).map_err(|e| {
+        let zstd_decoder = ZstdDecoder::new(buf_reader).map_err(|e| {
             ImportError::ExtractionError(format!("Failed to initialize zstd decoder: {}", e))
         })?;
 
@@ -686,8 +685,18 @@ impl AirGapImporter {
                 if !settings_file.exists() {
                     let mut settings_map = serde_json::Map::new();
                     let bundled_py = workspace_root.join(".dmz/toolchains/python");
-                    let member_venv = dir.join(".venv");
-                    if member_venv.exists() {
+                    let venv_py = if cfg!(windows) {
+                        dir.join(".venv/Scripts/python.exe")
+                    } else {
+                        dir.join(".venv/bin/python")
+                    };
+                    let toolchain_py = if cfg!(windows) {
+                        bundled_py.join("python.exe")
+                    } else {
+                        bundled_py.join("bin/python3")
+                    };
+
+                    if venv_py.is_file() {
                         let py_bin = if cfg!(windows) {
                             "${workspaceFolder}/.venv/Scripts/python.exe"
                         } else {
@@ -697,7 +706,7 @@ impl AirGapImporter {
                             "python.defaultInterpreterPath".into(),
                             serde_json::Value::String(py_bin.into()),
                         );
-                    } else if bundled_py.exists() {
+                    } else if toolchain_py.is_file() {
                         let rel_py = Self::relative_path_between(dir, &bundled_py);
                         let py_bin = if cfg!(windows) {
                             format!("${{workspaceFolder}}/{}/python.exe", rel_py)

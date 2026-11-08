@@ -3,7 +3,7 @@ use dmz_core::resolver::lockfile::DmzLockfile;
 use dmz_core::resolver::ResolverEngine;
 use dmz_sandbox::platform::{run_sandboxed, SandboxConfig};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tempfile::TempDir;
 
 #[test]
@@ -90,9 +90,12 @@ fn test_end_to_end_dmz_pipeline() {
         vec!["/C".to_string(), "echo DMZ Sandbox Active".to_string()],
     );
 
+    let store_dir = workspace_path.join(".dmz").join("store");
+    fs::create_dir_all(&store_dir).expect("Failed to create test store dir");
+
     let sandbox_config = SandboxConfig {
         workspace_path: workspace_path.clone(),
-        closure_path: PathBuf::from("/nix/store"),
+        closure_path: store_dir,
         command: cmd.to_string(),
         args,
         envs: std::env::vars().collect(),
@@ -190,5 +193,103 @@ fn test_package_builder_anchors_relative_paths() {
     assert_eq!(
         result.artifact_path,
         workspace_path.join("dist/test_build_output.tar.zst")
+    );
+}
+
+#[test]
+fn test_packaging_importer_roundtrip_and_zip_slip_rejection() {
+    use dmz_core::packaging::AirGapImporter;
+    use dmz_core::resolver::lockfile::LockedPackage;
+    use dmz_core::resolver::manifest::Ecosystem;
+
+    let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
+    let workspace_path = temp_dir.path().join("pkg_project");
+    let store_pkg_dir = workspace_path.join(".dmz/store/serde");
+    fs::create_dir_all(&store_pkg_dir).unwrap();
+    fs::write(store_pkg_dir.join("serde-1.0.0.archive"), b"cached_bytes").unwrap();
+    create_dummy_manifests(&workspace_path);
+
+    let mut packages = std::collections::BTreeMap::new();
+    packages.insert(
+        "serde".to_string(),
+        LockedPackage {
+            name: "serde".to_string(),
+            version: "1.0.0".to_string(),
+            sha256: "abc123".to_string(),
+            ecosystem: Ecosystem::Cargo,
+            source_url: None,
+            dependencies: vec![],
+            member_id: None,
+        },
+    );
+    let closure_signature = DmzLockfile::compute_closure_hash(&packages);
+    let lockfile = DmzLockfile {
+        version: 1,
+        closure_signature,
+        packages,
+        target_platform: None,
+        vcs: None,
+        workspaces: std::collections::BTreeMap::new(),
+    };
+    let lockfile_path = workspace_path.join("dmz.lock");
+    lockfile.save(&lockfile_path).unwrap();
+
+    let build_config = BuildConfig {
+        workspace_dir: workspace_path.clone(),
+        lockfile_path,
+        output_dir: workspace_path.join("dist"),
+        target: BuildTarget::Unified,
+        archive_name: "unified_pkg".to_string(),
+        zstd_level: 3,
+    };
+
+    let built = PackageBuilder::build(&build_config).expect("PackageBuilder::build failed");
+    let extract_dir = temp_dir.path().join("extracted");
+    AirGapImporter::import_and_verify(&built.artifact_path, &built.sha256, &extract_dir)
+        .expect("AirGapImporter::import_and_verify failed");
+
+    assert!(extract_dir.join("dmz.lock").exists());
+    assert!(extract_dir.join("store/serde/serde-1.0.0.archive").exists());
+    assert!(extract_dir.join("app/Cargo.toml").exists());
+}
+
+#[test]
+fn test_git_provider_create_and_restore_bundle_roundtrip() {
+    use dmz_core::vcs::GitProvider;
+
+    let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
+    let src_repo = temp_dir.path().join("src_repo");
+    fs::create_dir_all(&src_repo).unwrap();
+
+    // Initialize repository and create a commit using git CLI or git2
+    let repo = git2::Repository::init(&src_repo).expect("Git init failed");
+    fs::write(src_repo.join("hello.txt"), "airgap git bundle payload").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("hello.txt")).unwrap();
+    index.write().unwrap();
+    let tree_id = index.write_tree().unwrap();
+    let tree = repo.find_tree(tree_id).unwrap();
+    let sig = git2::Signature::now("DMZ Test", "test@dmz.local").unwrap();
+    let commit_oid = repo
+        .commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[])
+        .unwrap()
+        .to_string();
+
+    let bundle_path = temp_dir.path().join("repo.bundle");
+    let bundle_info = GitProvider::create_bundle(&src_repo, &bundle_path, None)
+        .expect("Git create_bundle failed");
+    assert_eq!(bundle_info.head_commit, commit_oid);
+    assert!(bundle_path.exists());
+
+    let restored_repo = temp_dir.path().join("restored_repo");
+    fs::create_dir_all(&restored_repo).unwrap();
+    GitProvider::restore_bundle(&restored_repo, &bundle_path).expect("Git restore_bundle failed");
+
+    let restored_commit =
+        GitProvider::get_current_commit(&restored_repo).expect("get_current_commit failed");
+    assert_eq!(restored_commit, commit_oid);
+    assert_eq!(
+        fs::read_to_string(restored_repo.join("hello.txt")).unwrap(),
+        "airgap git bundle payload"
     );
 }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 use tokio::sync::RwLock;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, timeout, Duration};
 use tracing::{info, warn};
 
 #[derive(Debug, Clone)]
@@ -32,6 +32,25 @@ pub struct ManagedService {
     pub config: ServiceConfig,
     pub status: ServiceStatus,
     child: Option<Child>,
+    #[cfg(unix)]
+    pgid: Option<i32>,
+}
+
+impl Drop for ManagedService {
+    fn drop(&mut self) {
+        if let Some(ref mut child) = self.child {
+            if let Ok(None) = child.try_wait() {
+                #[cfg(unix)]
+                if let Some(pid) = self.pgid {
+                    // SAFETY: `pid` is a positive process group ID created via `cmd.process_group(0)` for this service.
+                    unsafe {
+                        libc::killpg(pid, libc::SIGKILL);
+                    }
+                }
+                let _ = child.start_kill();
+            }
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -66,16 +85,25 @@ impl ServiceRunner {
         let mut cmd = Command::new(&config.command);
         cmd.args(&config.args)
             .envs(&config.envs)
-            .current_dir(&config.working_dir);
+            .current_dir(&config.working_dir)
+            .kill_on_drop(true);
+
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         let child = cmd
             .spawn()
             .map_err(|e| format!("Failed to spawn service '{}': {}", name, e))?;
 
+        #[cfg(unix)]
+        let pgid = child.id().map(|id| id as i32);
+
         let managed = ManagedService {
             config: config.clone(),
             status: ServiceStatus::Starting,
             child: Some(child),
+            #[cfg(unix)]
+            pgid,
         };
 
         {
@@ -86,10 +114,10 @@ impl ServiceRunner {
         if let Some(addr) = config.health_check_addr {
             let services_ref = self.services.clone();
             let name_clone = name.clone();
-            let timeout = config.health_check_timeout_secs;
+            let timeout_secs = config.health_check_timeout_secs;
 
             tokio::spawn(async move {
-                Self::poll_health(services_ref, name_clone, addr, timeout).await;
+                Self::poll_health(services_ref, name_clone, addr, timeout_secs).await;
             });
         } else {
             let mut services = self.services.write().await;
@@ -108,10 +136,13 @@ impl ServiceRunner {
         timeout_secs: u64,
     ) {
         let start = std::time::Instant::now();
-        let timeout = Duration::from_secs(timeout_secs);
+        let total_timeout = Duration::from_secs(timeout_secs);
 
-        while start.elapsed() < timeout {
-            if TcpStream::connect(addr).await.is_ok() {
+        while start.elapsed() < total_timeout {
+            if matches!(
+                timeout(Duration::from_millis(500), TcpStream::connect(addr)).await,
+                Ok(Ok(_))
+            ) {
                 info!(service = %name, addr = %addr, "Service TCP health check PASSED");
                 let mut guard = services.write().await;
                 if let Some(service) = guard.get_mut(&name) {
@@ -138,14 +169,16 @@ impl ServiceRunner {
                 #[cfg(windows)]
                 {
                     let _ = child.kill().await;
+                    let _ = child.wait().await;
                     return Ok(());
                 }
 
                 #[cfg(unix)]
                 {
-                    if let Some(pid) = child.id() {
+                    if let Some(pid) = service.pgid.or_else(|| child.id().map(|id| id as i32)) {
+                        // SAFETY: `pid` is a positive process group ID created via `cmd.process_group(0)` for this service.
                         unsafe {
-                            libc::kill(pid as i32, libc::SIGTERM);
+                            libc::killpg(pid, libc::SIGTERM);
                         }
                     }
                 }
@@ -156,7 +189,15 @@ impl ServiceRunner {
                     }
                     _ = sleep(Duration::from_secs(3)) => {
                         warn!(service = %name, "Service failed to exit gracefully; sending SIGKILL");
+                        #[cfg(unix)]
+                        if let Some(pid) = service.pgid.or_else(|| child.id().map(|id| id as i32)) {
+                            // SAFETY: `pid` is a positive process group ID created via `cmd.process_group(0)` for this service.
+                            unsafe {
+                                libc::killpg(pid, libc::SIGKILL);
+                            }
+                        }
                         let _ = child.kill().await;
+                        let _ = child.wait().await;
                     }
                 }
             }

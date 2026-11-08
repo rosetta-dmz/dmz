@@ -1,8 +1,8 @@
+use crate::archive::exporter::HashingWriter;
 use crate::resolver::lockfile::DmzLockfile;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use tar::Builder as TarBuilder;
 use tracing::info;
@@ -117,8 +117,9 @@ impl PackageBuilder {
 
         let output_file = File::create(&artifact_path)
             .map_err(|e| BuildError::IoError(format!("Failed to create output file: {}", e)))?;
+        let hashing_writer = HashingWriter::new(BufWriter::with_capacity(64 * 1024, output_file));
 
-        let zstd_encoder = ZstdEncoder::new(output_file, config.zstd_level).map_err(|e| {
+        let zstd_encoder = ZstdEncoder::new(hashing_writer, config.zstd_level).map_err(|e| {
             BuildError::ArchiveError(format!("Zstd encoder initialization failed: {}", e))
         })?;
 
@@ -127,13 +128,13 @@ impl PackageBuilder {
         // Assemble package layers based on selected Build Target
         match config.target {
             BuildTarget::DependenciesOnly => {
-                Self::bundle_dependencies(&mut tar_builder, &lockfile)?;
+                Self::bundle_dependencies(&mut tar_builder, &lockfile, &workspace_root)?;
             }
             BuildTarget::AppOnly => {
                 Self::bundle_app_code(&mut tar_builder, &workspace_root)?;
             }
             BuildTarget::Unified => {
-                Self::bundle_dependencies(&mut tar_builder, &lockfile)?;
+                Self::bundle_dependencies(&mut tar_builder, &lockfile, &workspace_root)?;
                 Self::bundle_app_code(&mut tar_builder, &workspace_root)?;
             }
         }
@@ -147,17 +148,18 @@ impl PackageBuilder {
                 })?;
         }
 
-        // Finalize archive and flush zstd encoder
+        // Finalize archive, flush zstd encoder, and obtain single-pass SHA-256 and byte length
         let zstd_encoder = tar_builder.into_inner().map_err(|e| {
             BuildError::ArchiveError(format!("Failed to finalize tar stream: {}", e))
         })?;
 
-        zstd_encoder.finish().map_err(|e| {
+        let hashing_writer = zstd_encoder.finish().map_err(|e| {
             BuildError::ArchiveError(format!("Zstd compression finish failed: {}", e))
         })?;
 
-        // Calculate SHA-256 integrity hash and byte size of final artifact
-        let (sha256, size_bytes) = Self::calculate_checksum_and_size(&artifact_path)?;
+        let (sha256, size_bytes) = hashing_writer.finalize().map_err(|e| {
+            BuildError::IoError(format!("Failed to flush and finalize output hash: {}", e))
+        })?;
 
         info!(
             artifact = ?artifact_path,
@@ -179,6 +181,7 @@ impl PackageBuilder {
     fn bundle_dependencies<W: Write>(
         tar: &mut TarBuilder<W>,
         lockfile: &DmzLockfile,
+        workspace_root: &Path,
     ) -> Result<(), BuildError> {
         info!(
             pkg_count = lockfile.packages.len(),
@@ -198,8 +201,18 @@ impl PackageBuilder {
                 BuildError::ArchiveError(format!("Failed to write closure metadata: {}", e))
             })?;
 
+        let store_root = workspace_root.join(".dmz").join("store");
         for (key, pkg) in &lockfile.packages {
             info!(package = %key, sha256 = %pkg.sha256, "Archiving locked package entry");
+            let safe_pkg_name = pkg.name.replace('/', "__");
+            let pkg_store_dir = store_root.join(&safe_pkg_name);
+            if pkg_store_dir.is_dir() {
+                Self::append_dir_filtered(
+                    tar,
+                    &pkg_store_dir,
+                    &Path::new("store").join(&safe_pkg_name),
+                )?;
+            }
         }
 
         Ok(())
@@ -229,8 +242,9 @@ impl PackageBuilder {
             let file_name = entry.file_name();
             let name_str = file_name.to_string_lossy();
 
-            // Ignore VCS directories, heavy build caches, and node_modules
+            // Ignore VCS directories, heavy build caches, store dir, and node_modules
             if name_str == ".git"
+                || name_str == ".dmz"
                 || name_str == "node_modules"
                 || name_str == "target"
                 || name_str == ".dmz_cache"
@@ -251,31 +265,5 @@ impl PackageBuilder {
         }
 
         Ok(())
-    }
-
-    /// Calculates SHA-256 hash and byte length of built artifact
-    fn calculate_checksum_and_size(path: &Path) -> Result<(String, u64), BuildError> {
-        let mut file = File::open(path)
-            .map_err(|e| BuildError::IoError(format!("Failed to open artifact for hash: {}", e)))?;
-
-        let metadata = file
-            .metadata()
-            .map_err(|e| BuildError::IoError(format!("Failed to read metadata: {}", e)))?;
-
-        let mut hasher = Sha256::new();
-        let mut buffer = [0u8; 65536];
-
-        loop {
-            let bytes_read = file
-                .read(&mut buffer)
-                .map_err(|e| BuildError::IoError(format!("Error hashing file: {}", e)))?;
-
-            if bytes_read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..bytes_read]);
-        }
-
-        Ok((format!("{:x}", hasher.finalize()), metadata.len()))
     }
 }

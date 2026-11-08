@@ -13,6 +13,11 @@ impl ToolchainDetector {
     ) -> HashSet<ToolchainEcosystem> {
         let mut ecosystems = HashSet::new();
         for member in members {
+            if let Some(ref eco_str) = member.ecosystem {
+                if let Some(eco) = ToolchainEcosystem::from_str_name(eco_str) {
+                    ecosystems.insert(eco);
+                }
+            }
             let member_ecosystems = Self::detect_workspace_ecosystems(&member.path, lockfile);
             ecosystems.extend(member_ecosystems);
         }
@@ -143,6 +148,34 @@ impl ToolchainDetector {
                     ecosystems.insert(ToolchainEcosystem::Juce);
                     ecosystems.insert(ToolchainEcosystem::Cc);
                     ecosystems.insert(ToolchainEcosystem::CMake);
+                }
+            }
+        }
+
+        // If dmz-workspace.toml exists at workspace_root, inspect all declared workspace members
+        let manifest_file = workspace_root.join("dmz-workspace.toml");
+        if manifest_file.is_file() {
+            if let Ok(project) =
+                crate::workspace::WorkspaceProjectConfig::load_from_file(&manifest_file)
+            {
+                let ws_canon = std::fs::canonicalize(workspace_root)
+                    .unwrap_or_else(|_| workspace_root.to_path_buf());
+                for layout in project.resolve_member_layouts(workspace_root, Some(&manifest_file)) {
+                    if let Some(ref eco_str) = layout.member.ecosystem {
+                        if let Some(eco) = ToolchainEcosystem::from_str_name(eco_str) {
+                            ecosystems.insert(eco);
+                        }
+                    }
+                    if layout.host_path != workspace_root
+                        && layout.host_path != ws_canon
+                        && layout.host_path.is_dir()
+                        && !layout.host_path.join("dmz-workspace.toml").exists()
+                    {
+                        ecosystems.extend(Self::detect_workspace_ecosystems(
+                            &layout.host_path,
+                            lockfile,
+                        ));
+                    }
                 }
             }
         }

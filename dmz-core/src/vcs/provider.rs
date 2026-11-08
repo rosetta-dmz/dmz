@@ -271,10 +271,94 @@ impl GitProvider {
             Repository::init(workspace_path)?
         };
 
-        // If repo exists or was initialized, copy bundle into .git/workspace.bundle for record & local fetch
-        let git_dir = repo.path();
+        // Stage bundle into .git/workspace.bundle for audit record
+        let git_dir = repo.path().to_path_buf();
         let target_bundle_path = git_dir.join("workspace.bundle");
         let _ = std::fs::copy(bundle_path, &target_bundle_path);
+
+        // Parse v2 git bundle header and index embedded PACK stream directly into repository ODB
+        let raw_bytes = std::fs::read(bundle_path)
+            .map_err(|e| GitError::from_str(&format!("Failed to read bundle file: {}", e)))?;
+
+        if !raw_bytes.starts_with(b"# v2 git bundle\n") {
+            return Err(GitError::from_str(
+                "Unsupported or corrupted bundle header (expected '# v2 git bundle')",
+            ));
+        }
+
+        // Locate the blank separator line (\n\n) before the PACK payload
+        let pack_offset = raw_bytes
+            .windows(2)
+            .position(|w| w == b"\n\n")
+            .map(|idx| idx + 2)
+            .ok_or_else(|| GitError::from_str("Malformed git bundle: missing header separator"))?;
+
+        let header_str = std::str::from_utf8(&raw_bytes[..pack_offset - 1])
+            .map_err(|e| GitError::from_str(&format!("Invalid UTF-8 in bundle header: {}", e)))?;
+
+        let mut prerequisites: Vec<git2::Oid> = Vec::new();
+        let mut advertised_refs: Vec<(git2::Oid, String)> = Vec::new();
+
+        for line in header_str.lines().skip(1) {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some(rest) = trimmed.strip_prefix('-') {
+                if let Some(oid_str) = rest.split_whitespace().next() {
+                    let oid = git2::Oid::from_str(oid_str)?;
+                    prerequisites.push(oid);
+                }
+            } else if let Some((oid_str, ref_name)) = trimmed.split_once(' ') {
+                let oid = git2::Oid::from_str(oid_str.trim())?;
+                advertised_refs.push((oid, ref_name.trim().to_string()));
+            }
+        }
+
+        let odb = repo.odb()?;
+        for prereq in prerequisites {
+            if !odb.exists(prereq) {
+                return Err(GitError::from_str(&format!(
+                    "Missing prerequisite commit {} required by incremental bundle",
+                    prereq
+                )));
+            }
+        }
+
+        let pack_bytes = &raw_bytes[pack_offset..];
+        if pack_bytes.starts_with(b"PACK") {
+            let mut packwriter = odb.packwriter()?;
+            packwriter.write_all(pack_bytes).map_err(|e| {
+                GitError::from_str(&format!("Failed to stream bundle packfile into ODB: {}", e))
+            })?;
+            packwriter.commit()?;
+        }
+
+        let mut head_target_ref: Option<String> = None;
+        let mut head_oid_opt: Option<git2::Oid> = None;
+
+        for (oid, ref_name) in &advertised_refs {
+            if ref_name == "HEAD" {
+                head_oid_opt = Some(*oid);
+            } else if ref_name.starts_with("refs/") {
+                repo.reference(ref_name, *oid, true, "dmz restore_bundle")?;
+                if head_target_ref.is_none() && ref_name.starts_with("refs/heads/") {
+                    head_target_ref = Some(ref_name.clone());
+                }
+            }
+        }
+
+        if head_target_ref.is_none() {
+            if let Some(head_oid) = head_oid_opt {
+                repo.reference("refs/heads/main", head_oid, true, "dmz restore_bundle")?;
+                head_target_ref = Some("refs/heads/main".to_string());
+            }
+        }
+
+        if let Some(ref target_ref) = head_target_ref {
+            let _ = repo.set_head(target_ref);
+            let _ = repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()));
+        }
 
         Ok(())
     }

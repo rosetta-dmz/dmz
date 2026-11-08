@@ -14,6 +14,7 @@ struct JobHandle(HANDLE);
 impl Drop for JobHandle {
     fn drop(&mut self) {
         if self.0 != 0 {
+            // SAFETY: `self.0` is a valid non-zero Win32 Job Object handle owned exclusively by `JobHandle`.
             unsafe {
                 CloseHandle(self.0);
             }
@@ -26,6 +27,7 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
         fs::canonicalize(&config.workspace_path).unwrap_or_else(|_| config.workspace_path.clone());
 
     // Create Win32 Job Object for process containment
+    // SAFETY: Passing null security attributes and null name creates an unnamed Win32 Job Object.
     let job = unsafe {
         let h = CreateJobObjectW(std::ptr::null(), std::ptr::null());
         if h == 0 {
@@ -37,6 +39,8 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     };
 
     // Configure Job Object to automatically kill all child processes when the handle is closed
+    // SAFETY: `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` is a plain-old-data C struct valid when zero-initialized,
+    // and `job.0` is a valid Job Object handle checked above.
     unsafe {
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
         info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -66,6 +70,7 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     })?;
 
     // Assign spawned process to Job Object
+    // SAFETY: Both `job.0` and `child.as_raw_handle()` are valid open Win32 kernel handles.
     unsafe {
         let process_handle = child.as_raw_handle() as HANDLE;
         if AssignProcessToJobObject(job.0, process_handle) == 0 {
