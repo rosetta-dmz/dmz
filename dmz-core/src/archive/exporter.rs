@@ -107,6 +107,7 @@ impl std::error::Error for ExportError {}
 pub struct HashingWriter<W: Write> {
     inner: W,
     hasher: Sha256,
+    bytes_written: u64,
 }
 
 impl<W: Write> HashingWriter<W> {
@@ -114,12 +115,22 @@ impl<W: Write> HashingWriter<W> {
         Self {
             inner,
             hasher: Sha256::new(),
+            bytes_written: 0,
         }
+    }
+
+    pub fn finalize(mut self) -> std::io::Result<(String, u64)> {
+        self.inner.flush()?;
+        Ok((format!("{:x}", self.hasher.finalize()), self.bytes_written))
     }
 
     pub fn finalize_hash(self) -> (W, String) {
         let hash = format!("{:x}", self.hasher.finalize());
         (self.inner, hash)
+    }
+
+    pub fn bytes_written(&self) -> u64 {
+        self.bytes_written
     }
 }
 
@@ -127,6 +138,7 @@ impl<W: Write> Write for HashingWriter<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let n = self.inner.write(buf)?;
         self.hasher.update(&buf[..n]);
+        self.bytes_written += n as u64;
         Ok(n)
     }
 

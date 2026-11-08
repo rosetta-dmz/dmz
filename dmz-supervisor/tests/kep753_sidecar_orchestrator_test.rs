@@ -177,3 +177,86 @@ fn test_infer_member_execution_undetectable_fails_with_clear_message() {
         err_msg
     );
 }
+
+#[tokio::test]
+async fn test_multi_sidecar_lifecycle_and_cancelled_wait_for_exit_teardown() {
+    use dmz_core::workspace::{MemberRole, WorkspaceMember, WorkspaceProjectConfig};
+    use dmz_supervisor::sidecar_orchestrator::SidecarPairConfig;
+    use std::time::Duration;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path();
+    let prim_dir = root.join("primary");
+    let sc1_dir = root.join("sidecar_one");
+    let sc2_dir = root.join("sidecar_two");
+    fs::create_dir_all(&prim_dir).unwrap();
+    fs::create_dir_all(&sc1_dir).unwrap();
+    fs::create_dir_all(&sc2_dir).unwrap();
+
+    let mut primary = WorkspaceMember::new("primary", &prim_dir, MemberRole::Primary);
+    let mut sidecar1 = WorkspaceMember::new("sidecar-1", &sc1_dir, MemberRole::Sidecar);
+    let mut sidecar2 = WorkspaceMember::new("sidecar-2", &sc2_dir, MemberRole::Service);
+
+    if cfg!(windows) {
+        primary.exec_command = Some("cmd.exe".to_string());
+        primary.exec_args = Some(vec![
+            "/c".to_string(),
+            "ping -n 30 127.0.0.1 > nul".to_string(),
+        ]);
+        sidecar1.exec_command = Some("cmd.exe".to_string());
+        sidecar1.exec_args = Some(vec![
+            "/c".to_string(),
+            "ping -n 30 127.0.0.1 > nul".to_string(),
+        ]);
+        sidecar2.exec_command = Some("cmd.exe".to_string());
+        sidecar2.exec_args = Some(vec![
+            "/c".to_string(),
+            "ping -n 30 127.0.0.1 > nul".to_string(),
+        ]);
+    } else {
+        primary.exec_command = Some("/bin/sh".to_string());
+        primary.exec_args = Some(vec!["-c".to_string(), "sleep 30".to_string()]);
+        sidecar1.exec_command = Some("/bin/sh".to_string());
+        sidecar1.exec_args = Some(vec!["-c".to_string(), "sleep 30".to_string()]);
+        sidecar2.exec_command = Some("/bin/sh".to_string());
+        sidecar2.exec_args = Some(vec!["-c".to_string(), "sleep 30".to_string()]);
+    }
+
+    let mut project = WorkspaceProjectConfig::new("suite", vec![primary, sidecar1, sidecar2]);
+    // Skip socket probe (0ms) to test process orchestration across platforms without a socket listener script
+    project.ipc.readiness_timeout_ms = 0;
+    project.ipc.drain_timeout_ms = 200;
+
+    let orchestrator = SidecarOrchestrator::new();
+    let sock = orchestrator
+        .start_pair(SidecarPairConfig {
+            workspace_root: root.to_path_buf(),
+            project,
+            allow_network: false,
+        })
+        .await
+        .expect("Failed to start multi-sidecar pair");
+
+    assert_eq!(
+        orchestrator.current_state().await,
+        SidecarLifecycleState::Running
+    );
+
+    // Simulate `dmz run` Ctrl+C: cancel `wait_for_exit()` via tokio::select! and then invoke `stop_pair()`
+    tokio::select! {
+        _ = orchestrator.wait_for_exit() => {
+            panic!("Primary should still be sleeping");
+        }
+        _ = tokio::time::sleep(Duration::from_millis(120)) => {}
+    }
+
+    orchestrator
+        .stop_pair()
+        .await
+        .expect("stop_pair failed after cancelled wait_for_exit");
+    assert_eq!(
+        orchestrator.current_state().await,
+        SidecarLifecycleState::Stopped
+    );
+    assert!(!sock.exists());
+}

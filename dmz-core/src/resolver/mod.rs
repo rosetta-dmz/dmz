@@ -68,67 +68,85 @@ impl ResolverEngine {
         Self::resolve_single_workspace_with_target(workspace_dir, target_platform)
     }
 
-    /// Resolves multi-workspace projects by resolving each declared member and merging into a unified lockfile
-    pub fn resolve_multi_workspace_with_target(
+    /// Resolves dependencies across all members of a multi-repository `WorkspaceProjectConfig`,
+    /// tagging each package with its canonical `member_id` and recording workspace metadata.
+    pub fn resolve_multi_workspace(
         workspace_dir: &Path,
-        manifest: &crate::workspace::WorkspaceProjectConfig,
+        project: &crate::workspace::WorkspaceProjectConfig,
+        manifest_path: Option<&Path>,
         target_platform: Option<String>,
     ) -> Result<DmzLockfile, String> {
+        let layouts = project.resolve_member_layouts(workspace_dir, manifest_path);
+        if layouts.is_empty() {
+            return Self::resolve_single_workspace_with_target(workspace_dir, target_platform);
+        }
+
         info!(
-            workspace = ?workspace_dir,
-            members = manifest.members.len(),
-            "Resolving multi-workspace project with declared members"
+            project = %project.name,
+            members = layouts.len(),
+            "Resolving multi-workspace dependencies across all declared members"
         );
 
         let mut merged_packages = Vec::new();
+        let mut workspaces_meta = Vec::new();
 
-        for member in &manifest.members {
-            let member_dir = if member.path.is_absolute() {
-                member.path.clone()
-            } else {
-                workspace_dir.join(&member.path)
-            };
-            let member_dir = std::fs::canonicalize(&member_dir).unwrap_or(member_dir);
-
-            if !member_dir.exists() {
-                tracing::warn!(
-                    member = %member.id,
-                    path = ?member_dir,
-                    "Multi-workspace member path does not exist; skipping resolution"
-                );
-                continue;
+        for layout in &layouts {
+            if !layout.host_path.is_dir() {
+                return Err(format!(
+                    "Workspace member '{}' directory does not exist at {:?}",
+                    layout.id, layout.host_path
+                ));
             }
 
-            info!(
-                member = %member.id,
-                path = ?member_dir,
-                "Resolving dependencies for workspace member"
-            );
-
-            let member_lock =
-                Self::resolve_single_workspace_with_target(&member_dir, target_platform.clone())?;
-
-            for (_, mut pkg) in member_lock.packages {
-                pkg.member_id = Some(member.id.clone());
-                merged_packages.push(pkg);
+            let member_cfg = project.find_member(&layout.id);
+            match Self::resolve_single_workspace_with_target(
+                &layout.host_path,
+                target_platform.clone(),
+            ) {
+                Ok(member_lock) => {
+                    let member_sig = member_lock.closure_signature.clone();
+                    for (_, mut pkg) in member_lock.packages {
+                        pkg.member_id = Some(layout.id.clone());
+                        merged_packages.push(pkg);
+                    }
+                    workspaces_meta.push(crate::resolver::lockfile::WorkspaceMetadata {
+                        id: layout.id.clone(),
+                        path: member_cfg
+                            .map(|m| m.path.display().to_string())
+                            .unwrap_or_else(|| layout.host_path.display().to_string()),
+                        role: layout.role.to_string(),
+                        ecosystem: member_cfg.and_then(|m| m.ecosystem.clone()),
+                        closure_signature: Some(member_sig),
+                    });
+                }
+                Err(e) if layouts.len() > 1 && e.contains("resolved 0 packages") => {
+                    info!(
+                        member = %layout.id,
+                        path = ?layout.host_path,
+                        "Member has 0 external dependencies; continuing multi-workspace resolution"
+                    );
+                    workspaces_meta.push(crate::resolver::lockfile::WorkspaceMetadata {
+                        id: layout.id.clone(),
+                        path: member_cfg
+                            .map(|m| m.path.display().to_string())
+                            .unwrap_or_else(|| layout.host_path.display().to_string()),
+                        role: layout.role.to_string(),
+                        ecosystem: member_cfg.and_then(|m| m.ecosystem.clone()),
+                        closure_signature: None,
+                    });
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to resolve member '{}' at {:?}: {}",
+                        layout.id, layout.host_path, e
+                    ));
+                }
             }
         }
 
         let mut unified_lock = DmzLockfile::with_platform(merged_packages, target_platform);
-
-        for member in &manifest.members {
-            let member_dir = if member.path.is_absolute() {
-                member.path.clone()
-            } else {
-                workspace_dir.join(&member.path)
-            };
-            unified_lock.add_workspace(crate::resolver::lockfile::WorkspaceMetadata {
-                id: member.id.clone(),
-                path: member_dir.display().to_string(),
-                role: member.role.to_string(),
-                ecosystem: member.ecosystem.clone(),
-                closure_signature: None,
-            });
+        for meta in workspaces_meta {
+            unified_lock.add_workspace(meta);
         }
 
         if let Ok(Some(prov)) = crate::vcs::GitProvider::get_provenance(workspace_dir) {
@@ -143,6 +161,15 @@ impl ResolverEngine {
         );
 
         Ok(unified_lock)
+    }
+
+    /// Resolves multi-workspace projects by resolving each declared member and merging into a unified lockfile
+    pub fn resolve_multi_workspace_with_target(
+        workspace_dir: &Path,
+        manifest: &crate::workspace::WorkspaceProjectConfig,
+        target_platform: Option<String>,
+    ) -> Result<DmzLockfile, String> {
+        Self::resolve_multi_workspace(workspace_dir, manifest, None, target_platform)
     }
 
     /// Scans a single workspace directory, auto-resolves dependencies, and tags the target platform
