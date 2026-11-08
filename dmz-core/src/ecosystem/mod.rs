@@ -10,6 +10,56 @@ pub struct CommandSpec {
     pub args: Vec<String>,
 }
 
+impl CommandSpec {
+    pub fn new(program: impl Into<String>, args: Vec<String>) -> Self {
+        Self {
+            program: program.into(),
+            args,
+        }
+    }
+
+    /// Resolves the command program path, checking bundled `.dmz/toolchains` first before falling back to system binary
+    pub fn resolve_in_workspace(&self, workspace_root: &Path) -> Self {
+        let toolchains_dir = workspace_root.join(".dmz/toolchains");
+        if toolchains_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&toolchains_dir) {
+                for entry in entries.flatten() {
+                    let candidate = entry.path().join("bin").join(&self.program);
+                    let candidate_win = entry
+                        .path()
+                        .join("bin")
+                        .join(format!("{}.exe", self.program));
+                    let candidate_root = entry.path().join(&self.program);
+                    let candidate_root_win = entry.path().join(format!("{}.exe", self.program));
+
+                    if candidate.is_file() {
+                        return Self {
+                            program: candidate.display().to_string(),
+                            args: self.args.clone(),
+                        };
+                    } else if candidate_win.is_file() {
+                        return Self {
+                            program: candidate_win.display().to_string(),
+                            args: self.args.clone(),
+                        };
+                    } else if candidate_root.is_file() {
+                        return Self {
+                            program: candidate_root.display().to_string(),
+                            args: self.args.clone(),
+                        };
+                    } else if candidate_root_win.is_file() {
+                        return Self {
+                            program: candidate_root_win.display().to_string(),
+                            args: self.args.clone(),
+                        };
+                    }
+                }
+            }
+        }
+        self.clone()
+    }
+}
+
 pub trait EcosystemHandler: Send + Sync {
     fn name(&self) -> &str;
     fn detect(&self, workspace_root: &Path) -> bool;

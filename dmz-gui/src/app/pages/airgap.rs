@@ -260,7 +260,7 @@ pub(super) fn show(
                             String::new()
                         };
                         *status_message = format!(
-                            "Bundle created successfully! Packages: {}, SHA256: {}{}",
+                            "Deterministic bundle created successfully! Packages: {}, SHA256: {} (.sha256 sidecar written){}",
                             manifest.package_count,
                             &manifest.archive_sha256[..12.min(manifest.archive_sha256.len())],
                             ws_info
@@ -325,7 +325,7 @@ pub(super) fn show(
                             String::new()
                         };
                         *status_message = format!(
-                            "Exported {} packages to archive (SHA256: {}){}",
+                            "Exported {} packages to deterministic archive (SHA256: {}, .sha256 sidecar written){}",
                             manifest.package_count,
                             &manifest.archive_sha256[..12.min(manifest.archive_sha256.len())],
                             ws_info
@@ -472,6 +472,15 @@ pub(super) fn show(
                                 msg.push_str(&format!(
                                     " · Materialized {} packages into workspace offline",
                                     count
+                                ));
+                            }
+                            Err(dmz_core::install::InstallError::IntegrityMismatch {
+                                expected,
+                                actual,
+                            }) => {
+                                msg.push_str(&format!(
+                                    " · [SUPPLY CHAIN INTEGRITY MISMATCH] FATAL: Tampered package detected in store! (expected {}, computed {})",
+                                    expected, actual
                                 ));
                             }
                             Err(e) => {

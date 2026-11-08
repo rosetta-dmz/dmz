@@ -212,3 +212,45 @@ fn test_multi_workspace_toolchain_detection() {
     assert!(ecosystems.contains(&ToolchainEcosystem::Node));
     assert!(ecosystems.contains(&ToolchainEcosystem::Python));
 }
+
+#[test]
+fn test_resolver_engine_auto_discovers_dmz_workspace_toml() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path();
+
+    let primary_dir = root.join("frontend");
+    let sidecar_dir = root.join("backend");
+    fs::create_dir_all(&primary_dir).unwrap();
+    fs::create_dir_all(&sidecar_dir).unwrap();
+
+    fs::write(
+        primary_dir.join("package.json"),
+        r#"{"name": "frontend", "dependencies": {"is-odd": "3.0.1"}}"#,
+    )
+    .unwrap();
+    fs::write(sidecar_dir.join("requirements.txt"), "uvicorn==0.22.0\n").unwrap();
+
+    let manifest = WorkspaceProjectConfig::new(
+        "my-fullstack-app",
+        vec![
+            WorkspaceMember::new("frontend", PathBuf::from("frontend"), MemberRole::Primary),
+            WorkspaceMember::new("backend", PathBuf::from("backend"), MemberRole::Sidecar),
+        ],
+    );
+    manifest
+        .save_to_file(&root.join("dmz-workspace.toml"))
+        .unwrap();
+
+    let lock = dmz_core::resolver::ResolverEngine::resolve_workspace_with_target(root, None)
+        .expect("Auto-discovery of dmz-workspace.toml must resolve all members");
+
+    assert_eq!(lock.workspaces.len(), 2);
+    assert!(lock
+        .packages
+        .iter()
+        .any(|(_, p)| p.name == "is-odd" && p.member_id.as_deref() == Some("frontend")));
+    assert!(lock
+        .packages
+        .iter()
+        .any(|(_, p)| p.name == "uvicorn" && p.member_id.as_deref() == Some("backend")));
+}

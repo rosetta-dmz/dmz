@@ -150,6 +150,28 @@ pub(super) fn show(
                 ui.end_row();
             });
 
+        // Display custom registry mirrors if configured via DMZ_REGISTRY_* environment variables
+        let mut custom_mirrors = Vec::new();
+        for (var, label) in [
+            ("DMZ_REGISTRY_CRATES_API", "Crates API"),
+            ("DMZ_REGISTRY_NPM", "npm Registry"),
+            ("DMZ_REGISTRY_PYPI", "PyPI Index"),
+            ("DMZ_REGISTRY_GOLANG", "Go Proxy"),
+        ] {
+            if let Ok(val) = std::env::var(var) {
+                if !val.trim().is_empty() {
+                    custom_mirrors.push((label, val));
+                }
+            }
+        }
+        if !custom_mirrors.is_empty() {
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Custom Registry Mirrors:").strong());
+            for (label, url) in custom_mirrors {
+                ui.label(format!(" · {}: {}", label, url));
+            }
+        }
+
         if state.is_dual_repo {
             ui.add_space(8.0);
             if components::action_button(ui, "Save as dmz-workspace.toml", false).clicked() {
@@ -364,6 +386,15 @@ pub(super) fn show(
                         *status_message = format!(
                             "Successfully installed {} packages offline into project layouts",
                             count
+                        );
+                    }
+                    Err(dmz_core::install::InstallError::IntegrityMismatch {
+                        expected,
+                        actual,
+                    }) => {
+                        *status_message = format!(
+                            "[SUPPLY CHAIN INTEGRITY MISMATCH] FATAL: Tampered package detected in store! (expected {}, computed {})",
+                            expected, actual
                         );
                     }
                     Err(e) => {

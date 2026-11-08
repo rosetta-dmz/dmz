@@ -1,10 +1,12 @@
 pub mod archive;
+pub mod fast_clone;
 pub mod mappers;
 pub mod rust_vendor;
 use crate::resolver::lockfile::DmzLockfile;
 use crate::resolver::manifest::Ecosystem;
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 use tracing::info;
 
@@ -103,7 +105,10 @@ impl InstallerEngine {
                         {
                             manifest.sidecars().first().copied()
                         } else {
-                            None
+                            manifest
+                                .members
+                                .iter()
+                                .find(|m| m.id.eq_ignore_ascii_case(mid))
                         }
                     })
                 } else {
@@ -199,12 +204,21 @@ impl InstallerEngine {
                 });
             }
 
-            // Cryptographic validation of store artifact against lockfile hash
-            let bytes = fs::read(&archive_path)
-                .map_err(|e| InstallError::IoError(format!("Failed to read artifact: {}", e)))?;
+            // Cryptographic validation of store artifact against lockfile hash (streaming 64KB chunk buffer)
+            let mut file = fs::File::open(&archive_path)
+                .map_err(|e| InstallError::IoError(format!("Failed to open artifact: {}", e)))?;
 
             let mut hasher = Sha256::new();
-            hasher.update(&bytes);
+            let mut buffer = [0u8; 65536];
+            loop {
+                let n = file.read(&mut buffer).map_err(|e| {
+                    InstallError::IoError(format!("Failed to read artifact: {}", e))
+                })?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..n]);
+            }
             let computed_hash = format!("{:x}", hasher.finalize());
 
             if computed_hash != pkg.sha256 {
@@ -217,12 +231,16 @@ impl InstallerEngine {
                         "Store artifact matches pre-fetch identity signature"
                     );
                 } else {
-                    tracing::warn!(
+                    tracing::error!(
                         package = %pkg.name,
                         expected = %pkg.sha256,
                         computed = %computed_hash,
-                        "Store artifact hash differs from recorded lockfile checksum; proceeding with offline installation"
+                        "Supply chain integrity mismatch! Expected checksum does not match store artifact"
                     );
+                    return Err(InstallError::IntegrityMismatch {
+                        expected: pkg.sha256.clone(),
+                        actual: computed_hash,
+                    });
                 }
             } else {
                 tracing::debug!(

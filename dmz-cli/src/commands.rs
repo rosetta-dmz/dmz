@@ -601,11 +601,43 @@ pub fn run_bundle(args: BundleArgs) {
         args.store
     };
 
+    let multi_workspace =
+        dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(&ws_canon)
+            .map(|(cfg, _)| cfg)
+            .or_else(|| {
+                args.sidecar.as_ref().map(|sc| {
+                    let primary = dmz_core::workspace::WorkspaceMember::new(
+                        "primary",
+                        &ws_canon,
+                        dmz_core::workspace::MemberRole::Primary,
+                    );
+                    let sidecar_m = dmz_core::workspace::WorkspaceMember::new(
+                        "sidecar",
+                        sc,
+                        dmz_core::workspace::MemberRole::Sidecar,
+                    );
+                    let proj_name = ws_canon
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("project");
+                    dmz_core::workspace::WorkspaceProjectConfig::new(
+                        proj_name,
+                        vec![primary, sidecar_m],
+                    )
+                })
+            });
+
     // Resolve manifests if lockfile is missing or refresh_lock is requested
     let should_resolve = args.refresh_lock || !effective_lockfile.exists();
     if should_resolve {
         info!("Resolving workspace dependency manifests at {:?}", ws_canon);
-        match ResolverEngine::resolve_workspace_with_target(&ws_canon, args.target.clone()) {
+        let resolve_res = if let Some(ref mws) = multi_workspace {
+            ResolverEngine::resolve_multi_workspace_with_target(&ws_canon, mws, args.target.clone())
+        } else {
+            ResolverEngine::resolve_workspace_with_target(&ws_canon, args.target.clone())
+        };
+
+        match resolve_res {
             Ok(resolved_lockfile) => {
                 if let Err(e) = resolved_lockfile.save(&effective_lockfile) {
                     error!("Failed to write lockfile {:?}: {}", effective_lockfile, e);
@@ -656,32 +688,6 @@ pub fn run_bundle(args: BundleArgs) {
     } else {
         args.output
     };
-
-    let multi_workspace =
-        dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(&ws_canon)
-            .map(|(cfg, _)| cfg)
-            .or_else(|| {
-                args.sidecar.as_ref().map(|sc| {
-                    let primary = dmz_core::workspace::WorkspaceMember::new(
-                        "primary",
-                        &ws_canon,
-                        dmz_core::workspace::MemberRole::Primary,
-                    );
-                    let sidecar_m = dmz_core::workspace::WorkspaceMember::new(
-                        "sidecar",
-                        sc,
-                        dmz_core::workspace::MemberRole::Sidecar,
-                    );
-                    let proj_name = ws_canon
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("project");
-                    dmz_core::workspace::WorkspaceProjectConfig::new(
-                        proj_name,
-                        vec![primary, sidecar_m],
-                    )
-                })
-            });
 
     let config = ExportConfig {
         workspace_path: ws_canon,
@@ -1326,50 +1332,12 @@ pub fn run_run(args: RunArgs) {
             };
             let member_dir = std::fs::canonicalize(&member_dir).unwrap_or(member_dir);
 
-            let pkg_json_path = member_dir.join("package.json");
-            let cargo_toml_path = member_dir.join("Cargo.toml");
-            let tauri_cargo_path = member_dir.join("src-tauri/Cargo.toml");
-            let py_req_path = member_dir.join("requirements.txt");
-            let pyproject_path = member_dir.join("pyproject.toml");
-
-            if pkg_json_path.is_file() {
-                if let Ok(content) = std::fs::read_to_string(&pkg_json_path) {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                        let scripts = val.get("scripts").and_then(|s| s.as_object());
-                        if let Some(sc) = scripts {
-                            if sc.contains_key("tauri") {
-                                member.exec_command = Some("npm".to_string());
-                                member.exec_args = Some(vec![
-                                    "run".to_string(),
-                                    "tauri".to_string(),
-                                    "dev".to_string(),
-                                ]);
-                            } else if sc.contains_key("dev") {
-                                member.exec_command = Some("npm".to_string());
-                                member.exec_args = Some(vec!["run".to_string(), "dev".to_string()]);
-                            } else if sc.contains_key("start") {
-                                member.exec_command = Some("npm".to_string());
-                                member.exec_args =
-                                    Some(vec!["run".to_string(), "start".to_string()]);
-                            }
-                        }
-                    }
-                }
-            } else if tauri_cargo_path.is_file() || cargo_toml_path.is_file() {
-                member.exec_command = Some("cargo".to_string());
-                member.exec_args = Some(vec!["run".to_string()]);
-            } else if py_req_path.is_file() || pyproject_path.is_file() {
-                member.exec_command = Some(if cfg!(windows) {
-                    "python".to_string()
-                } else {
-                    "python3".to_string()
-                });
-                if member_dir.join("server.py").is_file() {
-                    member.exec_args = Some(vec!["server.py".to_string()]);
-                } else if member_dir.join("main.py").is_file() {
-                    member.exec_args = Some(vec!["main.py".to_string()]);
-                } else if member_dir.join("app.py").is_file() {
-                    member.exec_args = Some(vec!["app.py".to_string()]);
+            if let Ok((cmd, cmd_args)) =
+                dmz_supervisor::SidecarOrchestrator::infer_member_execution(&member_dir, member)
+            {
+                member.exec_command = Some(cmd);
+                if !cmd_args.is_empty() {
+                    member.exec_args = Some(cmd_args);
                 }
             }
         }

@@ -1,6 +1,6 @@
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::Path;
-#[cfg(target_os = "macos")]
 use std::process::Command;
 
 /// Target machine activation and setup engine for imported toolchains.
@@ -60,9 +60,11 @@ impl ToolchainSetup {
                 .output();
         }
 
+        // Relocate dynamic linker search paths (RPATH) for bundled binaries
+        Self::relocate_bundled_binaries(workspace_root)?;
+
         // Generate hermetic Clang wrapper scripts (injecting -isysroot on macOS/Unix)
         Self::generate_clang_wrappers(workspace_root)?;
-
         // Setup Node.js companion package managers (npm, npx, pnpm, yarn)
         Self::setup_node_package_managers(workspace_root)?;
 
@@ -75,6 +77,94 @@ impl ToolchainSetup {
         // Configure IDE workspace settings (.vscode/settings.json)
         Self::generate_ide_settings(workspace_root)?;
 
+        Ok(())
+    }
+
+    /// Relocate bundled binaries and shared libraries using relative runtime search paths (RPATH).
+    /// On macOS, uses `install_name_tool` to inject `@loader_path/../lib` and `@executable_path/../lib`,
+    /// followed by ad-hoc codesigning (`codesign --force --sign -`) to satisfy Apple Silicon Gatekeeper.
+    /// On Linux, uses `patchelf` to inject `$ORIGIN/../lib`.
+    pub fn relocate_bundled_binaries(workspace_root: &Path) -> Result<(), String> {
+        let toolchains_dir = workspace_root.join(".dmz/toolchains");
+        if !toolchains_dir.is_dir() {
+            return Ok(());
+        }
+
+        fn walk_and_relocate(dir: &Path) {
+            let Ok(entries) = fs::read_dir(dir) else {
+                return;
+            };
+
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    walk_and_relocate(&p);
+                } else if p.is_file() {
+                    // Skip symlinks
+                    if fs::symlink_metadata(&p)
+                        .map(|m| m.file_type().is_symlink())
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+
+                    // Check magic bytes to identify Mach-O / ELF binaries
+                    let mut magic = [0u8; 4];
+                    let is_binary = if let Ok(mut f) = File::open(&p) {
+                        f.read_exact(&mut magic).is_ok()
+                    } else {
+                        false
+                    };
+
+                    if !is_binary {
+                        continue;
+                    }
+
+                    #[cfg(target_os = "macos")]
+                    {
+                        let is_macho = matches!(
+                            magic,
+                            [0xfe, 0xed, 0xfa, 0xcf]
+                                | [0xcf, 0xfa, 0xed, 0xfe]
+                                | [0xfe, 0xed, 0xfa, 0xce]
+                                | [0xce, 0xfa, 0xed, 0xfe]
+                                | [0xca, 0xfe, 0xba, 0xbe]
+                                | [0xbe, 0xba, 0xfe, 0xca]
+                        );
+
+                        if is_macho {
+                            let _ = Command::new("install_name_tool")
+                                .arg("-add_rpath")
+                                .arg("@loader_path/../lib")
+                                .arg(&p)
+                                .output();
+                            let _ = Command::new("install_name_tool")
+                                .arg("-add_rpath")
+                                .arg("@executable_path/../lib")
+                                .arg(&p)
+                                .output();
+                            let _ = Command::new("codesign")
+                                .args(["--force", "--sign", "-", p.to_str().unwrap_or_default()])
+                                .output();
+                        }
+                    }
+
+                    #[cfg(target_os = "linux")]
+                    {
+                        let is_elf = magic == *b"\x7fELF";
+                        if is_elf {
+                            let _ = Command::new("patchelf")
+                                .arg("--set-rpath")
+                                .arg("$ORIGIN/../lib")
+                                .arg(&p)
+                                .output();
+                        }
+                    }
+                }
+            }
+        }
+
+        walk_and_relocate(&toolchains_dir);
         Ok(())
     }
 
@@ -466,15 +556,32 @@ else
     _DMZ_SELF="$0"
 fi
 
+# Resolve physical path to handle symlinked .dmz directories in member workspaces
 if [ -f "$_DMZ_SELF" ]; then
-    DMZ_WS="$(cd "$(dirname "$_DMZ_SELF")/.." && pwd)"
+    _DMZ_DIR="$(cd -P "$(dirname "$_DMZ_SELF")" 2>/dev/null && pwd -P)"
+    DMZ_WS="$(cd -P "$_DMZ_DIR/.." 2>/dev/null && pwd -P)"
 elif [ -d "./.dmz" ]; then
-    DMZ_WS="$(pwd)"
+    _DMZ_DIR="$(cd -P "./.dmz" 2>/dev/null && pwd -P)"
+    DMZ_WS="$(cd -P "$_DMZ_DIR/.." 2>/dev/null && pwd -P)"
 elif [ -d "../.dmz" ]; then
-    DMZ_WS="$(cd .. && pwd)"
+    _DMZ_DIR="$(cd -P "../.dmz" 2>/dev/null && pwd -P)"
+    DMZ_WS="$(cd -P "$_DMZ_DIR/.." 2>/dev/null && pwd -P)"
+elif [ -d "../../.dmz" ]; then
+    _DMZ_DIR="$(cd -P "../../.dmz" 2>/dev/null && pwd -P)"
+    DMZ_WS="$(cd -P "$_DMZ_DIR/.." 2>/dev/null && pwd -P)"
 else
     DMZ_WS="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
 fi
+
+# Fallback parent directory traversal if .dmz/toolchains is in an ancestor directory
+_CURR="$DMZ_WS"
+while [ -n "$_CURR" ] && [ "$_CURR" != "/" ]; do
+    if [ -d "$_CURR/.dmz/toolchains" ]; then
+        DMZ_WS="$_CURR"
+        break
+    fi
+    _CURR="$(dirname "$_CURR")"
+done
 export DMZ_WORKSPACE="$DMZ_WS"
 
 # Prepend all bundled toolchain bin directories to PATH
@@ -494,6 +601,24 @@ if [ -d "$DMZ_WS/.dmz/toolchains" ]; then
             esac
         fi
     done
+fi
+
+# Prepend member node_modules/.bin directories to PATH
+if [ -d "$DMZ_WS/workspaces" ]; then
+    for ws_bin in "$DMZ_WS"/workspaces/*/node_modules/.bin; do
+        if [ -d "$ws_bin" ]; then
+            case ":$PATH:" in
+                *":$ws_bin:"*) ;;
+                *) export PATH="$ws_bin:$PATH" ;;
+            esac
+        fi
+    done
+fi
+if [ -d "$DMZ_WS/node_modules/.bin" ]; then
+    case ":$PATH:" in
+        *":$DMZ_WS/node_modules/.bin:"*) ;;
+        *) export PATH="$DMZ_WS/node_modules/.bin:$PATH" ;;
+    esac
 fi
 
 # Configure ecosystem environments
@@ -657,6 +782,16 @@ for /d %%D in ("%DMZ_WORKSPACE%\.dmz\toolchains\*") do (
     if exist "%%D\bin" (
         echo ;%PATH%; | findstr /I /C:";%%D\bin;" >nul || set "PATH=%%D\bin;%PATH%"
     )
+)
+
+for /d %%D in ("%DMZ_WORKSPACE%\workspaces\*") do (
+    if exist "%%D\node_modules\.bin" (
+        echo ;%PATH%; | findstr /I /C:";%%D\node_modules\.bin;" >nul || set "PATH=%%D\node_modules\.bin;%PATH%"
+    )
+)
+
+if exist "%DMZ_WORKSPACE%\node_modules\.bin" (
+    echo ;%PATH%; | findstr /I /C:";%DMZ_WORKSPACE%\node_modules\.bin;" >nul || set "PATH=%DMZ_WORKSPACE%\node_modules\.bin;%PATH%"
 )
 
 if exist "%DMZ_WORKSPACE%\.dmz\toolchains\rust" (
@@ -1202,7 +1337,21 @@ echo DMZ bundled toolchains activated.
                 let has_bundled_py = workspace_root.join(".dmz/toolchains/python").exists();
                 let member_venv = member_full_path.join(".venv");
 
-                if member_venv.exists() {
+                let depth = m
+                    .path
+                    .components()
+                    .filter(|c| matches!(c, std::path::Component::Normal(_)))
+                    .count();
+                let rel_prefix = if depth == 0 {
+                    ".".to_string()
+                } else {
+                    vec![".."; depth].join("/")
+                };
+
+                let py_bin_exists = member_venv.join("bin/python").exists()
+                    || member_venv.join("Scripts/python.exe").exists();
+
+                if member_venv.exists() && py_bin_exists {
                     let py_bin = if cfg!(windows) {
                         "${workspaceFolder}/.venv/Scripts/python.exe"
                     } else {
@@ -1211,19 +1360,25 @@ echo DMZ bundled toolchains activated.
                     py_settings["python.defaultInterpreterPath"] =
                         serde_json::Value::String(py_bin.to_string());
                 } else if has_bundled_py {
-                    let py_bin = if m_path_str == "." {
+                    let py_bin = if rel_prefix == "." {
                         if cfg!(windows) {
-                            "${workspaceFolder}/.dmz/toolchains/python/python.exe"
+                            "${workspaceFolder}/.dmz/toolchains/python/python.exe".to_string()
                         } else {
-                            "${workspaceFolder}/.dmz/toolchains/python/bin/python3"
+                            "${workspaceFolder}/.dmz/toolchains/python/bin/python3".to_string()
                         }
                     } else if cfg!(windows) {
-                        "${workspaceFolder}/../.dmz/toolchains/python/python.exe"
+                        format!(
+                            "${{workspaceFolder}}/{}/.dmz/toolchains/python/python.exe",
+                            rel_prefix
+                        )
                     } else {
-                        "${workspaceFolder}/../.dmz/toolchains/python/bin/python3"
+                        format!(
+                            "${{workspaceFolder}}/{}/.dmz/toolchains/python/bin/python3",
+                            rel_prefix
+                        )
                     };
                     py_settings["python.defaultInterpreterPath"] =
-                        serde_json::Value::String(py_bin.to_string());
+                        serde_json::Value::String(py_bin);
                 }
 
                 folder_entry["settings"] = py_settings;

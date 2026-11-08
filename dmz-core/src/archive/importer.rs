@@ -634,6 +634,40 @@ impl AirGapImporter {
         };
 
         for (dir, _role) in &target_dirs {
+            // 0. Member workspace parity symlinks (.dmz, dmz.lock, dmz-workspace.toml)
+            if dir != workspace_root {
+                let member_dmz = dir.join(".dmz");
+                if !member_dmz.exists() {
+                    let rel_dmz = Self::relative_path_between(dir, &workspace_root.join(".dmz"));
+                    #[cfg(unix)]
+                    let _ = std::os::unix::fs::symlink(&rel_dmz, &member_dmz);
+                    #[cfg(windows)]
+                    let _ = std::os::windows::fs::symlink_dir(&rel_dmz, &member_dmz);
+                }
+
+                let member_lock = dir.join("dmz.lock");
+                if !member_lock.exists() && workspace_root.join("dmz.lock").exists() {
+                    let rel_lock =
+                        Self::relative_path_between(dir, &workspace_root.join("dmz.lock"));
+                    #[cfg(unix)]
+                    let _ = std::os::unix::fs::symlink(&rel_lock, &member_lock);
+                    #[cfg(windows)]
+                    let _ = std::os::windows::fs::symlink_file(&rel_lock, &member_lock);
+                }
+
+                let member_manifest = dir.join("dmz-workspace.toml");
+                if !member_manifest.exists() && workspace_root.join("dmz-workspace.toml").exists() {
+                    let rel_manifest = Self::relative_path_between(
+                        dir,
+                        &workspace_root.join("dmz-workspace.toml"),
+                    );
+                    #[cfg(unix)]
+                    let _ = std::os::unix::fs::symlink(&rel_manifest, &member_manifest);
+                    #[cfg(windows)]
+                    let _ = std::os::windows::fs::symlink_file(&rel_manifest, &member_manifest);
+                }
+            }
+
             // 1. Cargo vendoring configuration: .cargo/config.toml
             let cargo_toml = dir.join("Cargo.toml");
             let tauri_cargo_toml = dir.join("src-tauri/Cargo.toml");
@@ -679,48 +713,62 @@ impl AirGapImporter {
                 dir.join("requirements.txt").is_file() || dir.join("pyproject.toml").is_file();
             let is_umbrella =
                 workspace_project.is_some() || workspace_root.join("dmz-workspace.toml").exists();
-            if has_python && is_umbrella {
-                let vscode_dir = dir.join(".vscode");
-                let _ = fs::create_dir_all(&vscode_dir);
-                let settings_file = vscode_dir.join("settings.json");
-                if !settings_file.exists() {
-                    let mut settings_map = serde_json::Map::new();
-                    let bundled_py = workspace_root.join(".dmz/toolchains/python");
-                    let member_venv = dir.join(".venv");
-                    if member_venv.exists() {
-                        let py_bin = if cfg!(windows) {
-                            "${workspaceFolder}/.venv/Scripts/python.exe"
-                        } else {
-                            "${workspaceFolder}/.venv/bin/python"
-                        };
-                        settings_map.insert(
-                            "python.defaultInterpreterPath".into(),
-                            serde_json::Value::String(py_bin.into()),
-                        );
-                    } else if bundled_py.exists() {
-                        let rel_py = Self::relative_path_between(dir, &bundled_py);
-                        let py_bin = if cfg!(windows) {
-                            format!("${{workspaceFolder}}/{}/python.exe", rel_py)
-                        } else {
-                            format!("${{workspaceFolder}}/{}/bin/python3", rel_py)
-                        };
-                        settings_map.insert(
-                            "python.defaultInterpreterPath".into(),
-                            serde_json::Value::String(py_bin),
-                        );
-                    }
-                    settings_map.insert(
-                        "python.terminal.activateEnvironment".into(),
-                        serde_json::Value::Bool(true),
+            if has_python {
+                let member_venv = dir.join(".venv");
+                if member_venv.is_dir() {
+                    let py_ver = crate::install::mappers::PyPiMapper::detect_python_version(dir);
+                    crate::install::mappers::PyPiMapper::hydrate_venv_environment(
+                        dir,
+                        &member_venv,
+                        &py_ver,
                     );
-                    if let Ok(content) =
-                        serde_json::to_string_pretty(&serde_json::Value::Object(settings_map))
-                    {
-                        let _ = fs::write(&settings_file, content);
-                        info!(
-                            settings = ?settings_file,
-                            "Wrote scoped Python IDE settings for workspace member"
+                }
+
+                if is_umbrella {
+                    let vscode_dir = dir.join(".vscode");
+                    let _ = fs::create_dir_all(&vscode_dir);
+                    let settings_file = vscode_dir.join("settings.json");
+                    if !settings_file.exists() {
+                        let mut settings_map = serde_json::Map::new();
+                        let bundled_py = workspace_root.join(".dmz/toolchains/python");
+                        let py_bin_exists = member_venv.join("bin/python").exists()
+                            || member_venv.join("Scripts/python.exe").exists();
+
+                        if member_venv.exists() && py_bin_exists {
+                            let py_bin = if cfg!(windows) {
+                                "${workspaceFolder}/.venv/Scripts/python.exe"
+                            } else {
+                                "${workspaceFolder}/.venv/bin/python"
+                            };
+                            settings_map.insert(
+                                "python.defaultInterpreterPath".into(),
+                                serde_json::Value::String(py_bin.into()),
+                            );
+                        } else if bundled_py.exists() {
+                            let rel_py = Self::relative_path_between(dir, &bundled_py);
+                            let py_bin = if cfg!(windows) {
+                                format!("${{workspaceFolder}}/{}/python.exe", rel_py)
+                            } else {
+                                format!("${{workspaceFolder}}/{}/bin/python3", rel_py)
+                            };
+                            settings_map.insert(
+                                "python.defaultInterpreterPath".into(),
+                                serde_json::Value::String(py_bin),
+                            );
+                        }
+                        settings_map.insert(
+                            "python.terminal.activateEnvironment".into(),
+                            serde_json::Value::Bool(true),
                         );
+                        if let Ok(content) =
+                            serde_json::to_string_pretty(&serde_json::Value::Object(settings_map))
+                        {
+                            let _ = fs::write(&settings_file, content);
+                            info!(
+                                settings = ?settings_file,
+                                "Wrote scoped Python IDE settings for workspace member"
+                            );
+                        }
                     }
                 }
             }

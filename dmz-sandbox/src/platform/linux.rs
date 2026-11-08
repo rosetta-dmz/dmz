@@ -21,16 +21,29 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     if !config.allow_network {
         unsafe {
             cmd.pre_exec(|| {
-                // First try unsharing network namespace directly (works when process has CAP_NET_ADMIN / root)
-                if unshare(CloneFlags::CLONE_NEWNET).is_err() {
-                    // Fall back to unprivileged user namespace + network namespace
-                    unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNET).map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::PermissionDenied,
-                            format!("Failed to unshare Linux network/user namespace: {}", e),
-                        )
-                    })?;
+                // Try unsharing user namespace + mount namespace + network namespace (Bazel/Nix style full isolation)
+                let flags_all =
+                    CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWNET;
+                if unshare(flags_all).is_err() {
+                    // Fall back to unprivileged user namespace + network namespace if mount namespace is restricted
+                    if unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNET).is_err() {
+                        // Fall back to network-only if process already has CAP_NET_ADMIN / root
+                        unshare(CloneFlags::CLONE_NEWNET).map_err(|e| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::PermissionDenied,
+                                format!("Failed to unshare Linux network/user namespace: {}", e),
+                            )
+                        })?;
+                    }
                 }
+                Ok(())
+            });
+        }
+    } else {
+        unsafe {
+            cmd.pre_exec(|| {
+                // Network allowed: unshare mount namespace if possible for filesystem containment
+                let _ = unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS);
                 Ok(())
             });
         }

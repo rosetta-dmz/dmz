@@ -13,6 +13,15 @@ impl ToolchainArchivePackager {
         tar_builder: &mut TarBuilder<W>,
         toolchains: &[DiscoveredToolchain],
     ) -> Result<Vec<ToolchainManifestEntry>, String> {
+        Self::package_with_epoch(tar_builder, toolchains, 315_532_800)
+    }
+
+    /// Package all provided discovered toolchains into the target tar archive with a deterministic timestamp.
+    pub fn package_with_epoch<W: std::io::Write>(
+        tar_builder: &mut TarBuilder<W>,
+        toolchains: &[DiscoveredToolchain],
+        deterministic_epoch: u64,
+    ) -> Result<Vec<ToolchainManifestEntry>, String> {
         let mut manifest_entries = Vec::new();
 
         for tc in toolchains {
@@ -27,8 +36,12 @@ impl ToolchainArchivePackager {
                 "Packaging toolchain into bundle"
             );
 
-            // Package binaries with executable permissions (0o755)
-            for (host_path, rel_path) in &tc.bin_files {
+            // Sort files for reproducible tar header order
+            let mut sorted_bins = tc.bin_files.clone();
+            sorted_bins.sort_by(|a, b| a.1.cmp(&b.1));
+
+            // Package binaries with executable permissions (0o755) and normalized ownership/timestamps
+            for (host_path, rel_path) in &sorted_bins {
                 let archive_entry_path = format!("{}/{}", base_archive_path, rel_path);
                 let mut file = fs::File::open(host_path).map_err(|e| {
                     format!(
@@ -45,6 +58,11 @@ impl ToolchainArchivePackager {
                 let mut header = tar::Header::new_gnu();
                 header.set_size(metadata.len());
                 header.set_mode(0o755);
+                header.set_mtime(deterministic_epoch);
+                header.set_uid(0);
+                header.set_gid(0);
+                let _ = header.set_username("");
+                let _ = header.set_groupname("");
                 header.set_cksum();
                 tar_builder
                     .append_data(&mut header, &archive_entry_path, &mut file)
@@ -59,8 +77,12 @@ impl ToolchainArchivePackager {
                 }
             }
 
+            // Sort library / runtime assets
+            let mut sorted_libs = tc.lib_files.clone();
+            sorted_libs.sort_by(|a, b| a.1.cmp(&b.1));
+
             // Package library / runtime assets (0o755 for executables/shared libraries, 0o644 for headers/data)
-            for (host_path, rel_path) in &tc.lib_files {
+            for (host_path, rel_path) in &sorted_libs {
                 let archive_entry_path = format!("{}/{}", base_archive_path, rel_path);
                 if let Ok(mut file) = fs::File::open(host_path) {
                     if let Ok(metadata) = file.metadata() {
@@ -79,6 +101,11 @@ impl ToolchainArchivePackager {
                         let mut header = tar::Header::new_gnu();
                         header.set_size(metadata.len());
                         header.set_mode(mode);
+                        header.set_mtime(deterministic_epoch);
+                        header.set_uid(0);
+                        header.set_gid(0);
+                        let _ = header.set_username("");
+                        let _ = header.set_groupname("");
                         header.set_cksum();
                         tar_builder
                             .append_data(&mut header, &archive_entry_path, &mut file)

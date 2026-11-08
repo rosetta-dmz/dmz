@@ -30,119 +30,24 @@ impl ToolchainDetector {
             return ecosystems;
         }
 
-        // Primary language ecosystems declared at workspace root
-        if workspace_root.join("Cargo.toml").is_file()
-            || workspace_root.join("Cargo.lock").is_file()
-        {
-            ecosystems.insert(ToolchainEcosystem::Rust);
-            Self::check_cargo_workspace_members(workspace_root, &mut ecosystems);
-            Self::check_cargo_build_tool_dependencies(workspace_root, &mut ecosystems);
-        }
-        if workspace_root.join("package.json").is_file()
-            || workspace_root.join("pnpm-workspace.yaml").is_file()
-            || workspace_root.join("pnpm-lock.yaml").is_file()
-            || workspace_root.join("yarn.lock").is_file()
-            || workspace_root.join("package-lock.json").is_file()
-            || workspace_root.join("bun.lockb").is_file()
-            || workspace_root.join("bunfig.toml").is_file()
-        {
-            ecosystems.insert(ToolchainEcosystem::Node);
-            Self::check_node_workspace_members(workspace_root, &mut ecosystems);
-        }
-        if workspace_root.join("go.mod").is_file() || workspace_root.join("go.work").is_file() {
-            ecosystems.insert(ToolchainEcosystem::Go);
-        }
-        if workspace_root.join("composer.json").is_file()
-            || workspace_root.join("composer.lock").is_file()
-        {
-            ecosystems.insert(ToolchainEcosystem::Php);
-        }
-        if workspace_root.join("Gemfile").is_file() || workspace_root.join("Gemfile.lock").is_file()
-        {
-            ecosystems.insert(ToolchainEcosystem::Ruby);
-        }
-        if workspace_root.join("requirements.txt").is_file()
-            || workspace_root.join("pyproject.toml").is_file()
-            || workspace_root.join("Pipfile").is_file()
-            || workspace_root.join("Pipfile.lock").is_file()
-            || workspace_root.join("setup.py").is_file()
-            || workspace_root.join("setup.cfg").is_file()
-            || workspace_root.join("poetry.lock").is_file()
-            || workspace_root.join("uv.lock").is_file()
-        {
-            ecosystems.insert(ToolchainEcosystem::Python);
-        }
+        // Detect ecosystems declared at workspace root
+        Self::detect_dir_ecosystems(workspace_root, &mut ecosystems);
 
-        // Native project manifests declared at workspace root
-        if workspace_root.join("CMakeLists.txt").is_file() {
-            ecosystems.insert(ToolchainEcosystem::CMake);
-            ecosystems.insert(ToolchainEcosystem::Cc);
-        }
-        if workspace_root.join("build.ninja").is_file() {
-            ecosystems.insert(ToolchainEcosystem::Ninja);
-            ecosystems.insert(ToolchainEcosystem::Cc);
-        }
-        if workspace_root.join("Makefile").is_file()
-            || workspace_root.join("GNUmakefile").is_file()
-            || workspace_root.join("makefile").is_file()
-        {
-            ecosystems.insert(ToolchainEcosystem::Make);
-            if Self::workspace_requires_c_compiler_for_make(workspace_root) {
-                ecosystems.insert(ToolchainEcosystem::Cc);
-            }
-        }
-
-        // Platform SDK project manifests declared at workspace root
-        if workspace_root.join("Package.swift").is_file()
-            || workspace_root.join("Podfile").is_file()
-            || workspace_root.join("Cartfile").is_file()
-        {
-            ecosystems.insert(ToolchainEcosystem::AppleSdk);
-            ecosystems.insert(ToolchainEcosystem::Cc);
-        }
-
-        // Android build manifests (declared at root or standard app module)
-        if workspace_root.join("Android.mk").is_file()
-            || workspace_root.join("Application.mk").is_file()
-            || workspace_root.join("app/src/main/jni/Android.mk").is_file()
-        {
-            ecosystems.insert(ToolchainEcosystem::AndroidNdk);
-            ecosystems.insert(ToolchainEcosystem::CMake);
-            ecosystems.insert(ToolchainEcosystem::Cc);
-        }
-        for gradle_name in &[
-            "build.gradle",
-            "build.gradle.kts",
-            "app/build.gradle",
-            "app/build.gradle.kts",
-        ] {
-            let p = workspace_root.join(gradle_name);
-            if p.is_file() {
-                if let Ok(content) = std::fs::read_to_string(&p) {
-                    if content.contains("ndkVersion")
-                        || content.contains("ndk {")
-                        || content.contains("externalNativeBuild")
-                    {
-                        ecosystems.insert(ToolchainEcosystem::AndroidNdk);
-                        ecosystems.insert(ToolchainEcosystem::CMake);
-                        ecosystems.insert(ToolchainEcosystem::Cc);
+        // Auto-discover declared multi-workspace members in dmz-workspace.toml
+        let manifest_path = workspace_root.join("dmz-workspace.toml");
+        if manifest_path.is_file() {
+            if let Ok(manifest) =
+                crate::workspace::WorkspaceProjectConfig::load_from_file(&manifest_path)
+            {
+                for member in &manifest.members {
+                    let member_dir = if member.path.is_absolute() {
+                        member.path.clone()
+                    } else {
+                        workspace_root.join(&member.path)
+                    };
+                    if member_dir.is_dir() {
+                        Self::detect_dir_ecosystems(&member_dir, &mut ecosystems);
                     }
-                }
-            }
-        }
-
-        // Check root directory entries for root project bundles (*.xcodeproj, *.xcworkspace, *.jucer)
-        if let Ok(entries) = std::fs::read_dir(workspace_root) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                if name_str.ends_with(".xcodeproj") || name_str.ends_with(".xcworkspace") {
-                    ecosystems.insert(ToolchainEcosystem::AppleSdk);
-                    ecosystems.insert(ToolchainEcosystem::Cc);
-                } else if name_str.ends_with(".jucer") {
-                    ecosystems.insert(ToolchainEcosystem::Juce);
-                    ecosystems.insert(ToolchainEcosystem::Cc);
-                    ecosystems.insert(ToolchainEcosystem::CMake);
                 }
             }
         }
@@ -202,6 +107,128 @@ impl ToolchainDetector {
         }
 
         ecosystems
+    }
+
+    /// Detects language and native build ecosystems in a specific project directory
+    pub fn detect_dir_ecosystems(dir: &Path, ecosystems: &mut HashSet<ToolchainEcosystem>) {
+        if !dir.exists() || !dir.is_dir() {
+            return;
+        }
+
+        // Primary language ecosystems declared in directory
+        if dir.join("Cargo.toml").is_file()
+            || dir.join("Cargo.lock").is_file()
+            || dir.join("src-tauri/Cargo.toml").is_file()
+        {
+            ecosystems.insert(ToolchainEcosystem::Rust);
+            Self::check_cargo_workspace_members(dir, ecosystems);
+            Self::check_cargo_build_tool_dependencies(dir, ecosystems);
+        }
+        if dir.join("package.json").is_file()
+            || dir.join("pnpm-workspace.yaml").is_file()
+            || dir.join("pnpm-lock.yaml").is_file()
+            || dir.join("yarn.lock").is_file()
+            || dir.join("package-lock.json").is_file()
+            || dir.join("bun.lockb").is_file()
+            || dir.join("bunfig.toml").is_file()
+        {
+            ecosystems.insert(ToolchainEcosystem::Node);
+            Self::check_node_workspace_members(dir, ecosystems);
+        }
+        if dir.join("go.mod").is_file() || dir.join("go.work").is_file() {
+            ecosystems.insert(ToolchainEcosystem::Go);
+        }
+        if dir.join("composer.json").is_file() || dir.join("composer.lock").is_file() {
+            ecosystems.insert(ToolchainEcosystem::Php);
+        }
+        if dir.join("Gemfile").is_file() || dir.join("Gemfile.lock").is_file() {
+            ecosystems.insert(ToolchainEcosystem::Ruby);
+        }
+        if dir.join("requirements.txt").is_file()
+            || dir.join("pyproject.toml").is_file()
+            || dir.join("Pipfile").is_file()
+            || dir.join("Pipfile.lock").is_file()
+            || dir.join("setup.py").is_file()
+            || dir.join("setup.cfg").is_file()
+            || dir.join("poetry.lock").is_file()
+            || dir.join("uv.lock").is_file()
+        {
+            ecosystems.insert(ToolchainEcosystem::Python);
+        }
+
+        // Native project manifests
+        if dir.join("CMakeLists.txt").is_file() {
+            ecosystems.insert(ToolchainEcosystem::CMake);
+            ecosystems.insert(ToolchainEcosystem::Cc);
+        }
+        if dir.join("build.ninja").is_file() {
+            ecosystems.insert(ToolchainEcosystem::Ninja);
+            ecosystems.insert(ToolchainEcosystem::Cc);
+        }
+        if dir.join("Makefile").is_file()
+            || dir.join("GNUmakefile").is_file()
+            || dir.join("makefile").is_file()
+        {
+            ecosystems.insert(ToolchainEcosystem::Make);
+            if Self::workspace_requires_c_compiler_for_make(dir) {
+                ecosystems.insert(ToolchainEcosystem::Cc);
+            }
+        }
+
+        // Platform SDK project manifests
+        if dir.join("Package.swift").is_file()
+            || dir.join("Podfile").is_file()
+            || dir.join("Cartfile").is_file()
+        {
+            ecosystems.insert(ToolchainEcosystem::AppleSdk);
+            ecosystems.insert(ToolchainEcosystem::Cc);
+        }
+
+        // Android build manifests
+        if dir.join("Android.mk").is_file()
+            || dir.join("Application.mk").is_file()
+            || dir.join("app/src/main/jni/Android.mk").is_file()
+        {
+            ecosystems.insert(ToolchainEcosystem::AndroidNdk);
+            ecosystems.insert(ToolchainEcosystem::CMake);
+            ecosystems.insert(ToolchainEcosystem::Cc);
+        }
+        for gradle_name in &[
+            "build.gradle",
+            "build.gradle.kts",
+            "app/build.gradle",
+            "app/build.gradle.kts",
+        ] {
+            let p = dir.join(gradle_name);
+            if p.is_file() {
+                if let Ok(content) = std::fs::read_to_string(&p) {
+                    if content.contains("ndkVersion")
+                        || content.contains("ndk {")
+                        || content.contains("externalNativeBuild")
+                    {
+                        ecosystems.insert(ToolchainEcosystem::AndroidNdk);
+                        ecosystems.insert(ToolchainEcosystem::CMake);
+                        ecosystems.insert(ToolchainEcosystem::Cc);
+                    }
+                }
+            }
+        }
+
+        // Check directory entries for project bundles (*.xcodeproj, *.xcworkspace, *.jucer)
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.ends_with(".xcodeproj") || name_str.ends_with(".xcworkspace") {
+                    ecosystems.insert(ToolchainEcosystem::AppleSdk);
+                    ecosystems.insert(ToolchainEcosystem::Cc);
+                } else if name_str.ends_with(".jucer") {
+                    ecosystems.insert(ToolchainEcosystem::Juce);
+                    ecosystems.insert(ToolchainEcosystem::Cc);
+                    ecosystems.insert(ToolchainEcosystem::CMake);
+                }
+            }
+        }
     }
 
     /// Returns true if the workspace root or any declared member explicitly contains `build.ninja`

@@ -188,9 +188,19 @@ impl PackageBuilder {
         let closure_json = serde_json::to_string_pretty(lockfile)
             .map_err(|e| BuildError::LockfileError(e.to_string()))?;
 
+        let epoch = std::env::var("SOURCE_DATE_EPOCH")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(315_532_800);
+
         let mut header = tar::Header::new_gnu();
         header.set_size(closure_json.len() as u64);
         header.set_mode(0o644);
+        header.set_mtime(epoch);
+        header.set_uid(0);
+        header.set_gid(0);
+        let _ = header.set_username("");
+        let _ = header.set_groupname("");
         header.set_cksum();
 
         tar.append_data(&mut header, ".dmz/closure.json", closure_json.as_bytes())
@@ -214,17 +224,28 @@ impl PackageBuilder {
         Self::append_dir_filtered(tar, workspace_dir, Path::new("app"))
     }
 
-    /// Recursively walks directory tree ignoring common non-reproducible artifacts
+    /// Recursively walks directory tree ignoring common non-reproducible artifacts, with sorted entries and normalized headers
     fn append_dir_filtered<W: Write>(
         tar: &mut TarBuilder<W>,
         src_dir: &Path,
         archive_prefix: &Path,
     ) -> Result<(), BuildError> {
+        let epoch = std::env::var("SOURCE_DATE_EPOCH")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(315_532_800);
+
         let entries = fs::read_dir(src_dir)
             .map_err(|e| BuildError::IoError(format!("Read directory failed: {}", e)))?;
 
+        let mut sorted_entries = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|e| BuildError::IoError(e.to_string()))?;
+            sorted_entries.push(entry);
+        }
+        sorted_entries.sort_by_key(|e| e.file_name());
+
+        for entry in sorted_entries {
             let path = entry.path();
             let file_name = entry.file_name();
             let name_str = file_name.to_string_lossy();
@@ -244,9 +265,46 @@ impl PackageBuilder {
             if path.is_dir() {
                 Self::append_dir_filtered(tar, &path, &rel_path)?;
             } else if path.is_file() {
-                tar.append_path_with_name(&path, &rel_path).map_err(|e| {
-                    BuildError::ArchiveError(format!("Failed to pack file {:?}: {}", path, e))
+                let mut file = File::open(&path).map_err(|e| {
+                    BuildError::IoError(format!("Failed to open {:?}: {}", path, e))
                 })?;
+                let metadata = file.metadata().map_err(|e| {
+                    BuildError::IoError(format!("Failed to read metadata {:?}: {}", path, e))
+                })?;
+
+                let is_executable = {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        metadata.permissions().mode() & 0o111 != 0
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let p_str = rel_path.to_string_lossy();
+                        p_str.ends_with(".exe")
+                            || p_str.ends_with(".bat")
+                            || p_str.ends_with(".cmd")
+                            || p_str.ends_with(".sh")
+                    }
+                };
+
+                let mode = if is_executable { 0o755 } else { 0o644 };
+
+                let mut header = tar::Header::new_gnu();
+                header.set_size(metadata.len());
+                header.set_mode(mode);
+                header.set_mtime(epoch);
+                header.set_uid(0);
+                header.set_gid(0);
+                let _ = header.set_username("");
+                let _ = header.set_groupname("");
+                header.set_cksum();
+
+                let normalized_path = rel_path.to_string_lossy().replace('\\', "/");
+                tar.append_data(&mut header, &normalized_path, &mut file)
+                    .map_err(|e| {
+                        BuildError::ArchiveError(format!("Failed to pack file {:?}: {}", path, e))
+                    })?;
             }
         }
 

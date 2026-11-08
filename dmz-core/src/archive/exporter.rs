@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use tar::Builder as TarBuilder;
 use tracing::{info, warn};
@@ -101,6 +101,39 @@ impl std::fmt::Display for ExportError {
 }
 
 impl std::error::Error for ExportError {}
+
+/// Transparent streaming writer calculating cryptographic SHA-256 in a single pass
+/// without intermediate memory buffering or post-compression disk re-reading.
+pub struct HashingWriter<W: Write> {
+    inner: W,
+    hasher: Sha256,
+}
+
+impl<W: Write> HashingWriter<W> {
+    pub fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+        }
+    }
+
+    pub fn finalize_hash(self) -> (W, String) {
+        let hash = format!("{:x}", self.hasher.finalize());
+        (self.inner, hash)
+    }
+}
+
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
 
 pub struct AirGapExporter;
 
@@ -264,19 +297,38 @@ impl AirGapExporter {
             }
         }
 
-        // Prepare archive output stream
+        // Compute reproducible timestamp (SOURCE_DATE_EPOCH -> git commit time -> 1980-01-01 DOS epoch)
+        let deterministic_epoch =
+            Self::resolve_deterministic_epoch(&workspace_root, vcs_provenance.as_ref());
+        info!(
+            epoch = deterministic_epoch,
+            "Configured reproducible archive timestamp"
+        );
+
+        // Prepare archive output stream with buffered I/O, streaming SHA-256 calculation, and multithreaded zstd
         let file = File::create(&effective_output)
             .map_err(|e| ExportError::IoError(format!("Failed to create export archive: {}", e)))?;
+        let buf_file = BufWriter::with_capacity(128 * 1024, file);
+        let hashing_writer = HashingWriter::new(buf_file);
 
-        let zstd_encoder = ZstdEncoder::new(file, config.zstd_level)
+        let mut zstd_encoder = ZstdEncoder::new(hashing_writer, config.zstd_level)
             .map_err(|e| ExportError::ArchiveError(format!("Failed to initialize zstd: {}", e)))?;
+
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get() as u32)
+            .unwrap_or(4)
+            .clamp(1, 16);
+        let _ = zstd_encoder.multithread(workers);
 
         let mut tar_builder = TarBuilder::new(zstd_encoder);
 
-        // Append lockfile
-        tar_builder
-            .append_path_with_name(&effective_lockfile, "dmz.lock")
-            .map_err(|e| ExportError::ArchiveError(format!("Failed to pack dmz.lock: {}", e)))?;
+        // Append lockfile with normalized header
+        Self::append_file_normalized(
+            &mut tar_builder,
+            &effective_lockfile,
+            "dmz.lock",
+            deterministic_epoch,
+        )?;
 
         // Append store items (if mode is Unified or DepsOnly)
         let mut packed_count = 0;
@@ -298,16 +350,16 @@ impl AirGapExporter {
                             &pkg_store_path,
                             &archive_dest,
                             false,
+                            deterministic_epoch,
                         )?;
                     } else {
-                        tar_builder
-                            .append_path_with_name(&pkg_store_path, &archive_dest)
-                            .map_err(|e| {
-                                ExportError::ArchiveError(format!(
-                                    "Failed to pack package {}: {}",
-                                    pkg_info.name, e
-                                ))
-                            })?;
+                        let normalized_dest = archive_dest.to_string_lossy().replace('\\', "/");
+                        Self::append_file_normalized(
+                            &mut tar_builder,
+                            &pkg_store_path,
+                            &normalized_dest,
+                            deterministic_epoch,
+                        )?;
                     }
                     packed_count += 1;
                 } else {
@@ -418,9 +470,20 @@ impl AirGapExporter {
                     "Packaging primary workspace files into workspaces namespace"
                 );
                 if let Some(ref changed_files) = changed_files_filter {
-                    Self::append_filtered_files(&mut tar_builder, &workspace_root, changed_files)?;
+                    Self::append_filtered_files(
+                        &mut tar_builder,
+                        &workspace_root,
+                        changed_files,
+                        deterministic_epoch,
+                    )?;
                 } else {
-                    Self::append_dir_all(&mut tar_builder, &workspace_root, &primary_dest, true)?;
+                    Self::append_dir_all(
+                        &mut tar_builder,
+                        &workspace_root,
+                        &primary_dest,
+                        true,
+                        deterministic_epoch,
+                    )?;
                 }
 
                 // 2. Package each Sidecar / Service Member into its dedicated workspaces/<sidecar_folder> namespace
@@ -442,6 +505,7 @@ impl AirGapExporter {
                                         host_path,
                                         &sidecar_dest,
                                         true,
+                                        deterministic_epoch,
                                     )?;
                                 }
                             }
@@ -460,6 +524,11 @@ impl AirGapExporter {
                     let mut header = tar::Header::new_gnu();
                     header.set_size(toml_str.len() as u64);
                     header.set_mode(0o644);
+                    header.set_mtime(deterministic_epoch);
+                    header.set_uid(0);
+                    header.set_gid(0);
+                    let _ = header.set_username("");
+                    let _ = header.set_groupname("");
                     header.set_cksum();
                     let _ = tar_builder.append_data(
                         &mut header,
@@ -535,7 +604,21 @@ impl AirGapExporter {
                             || workspace_root.join(".dmz/toolchains/python").exists();
                         let member_venv = host_dir.join(".venv");
 
-                        if member_venv.exists() {
+                        let depth = m
+                            .path
+                            .components()
+                            .filter(|c| matches!(c, std::path::Component::Normal(_)))
+                            .count();
+                        let rel_prefix = if depth == 0 {
+                            ".".to_string()
+                        } else {
+                            vec![".."; depth].join("/")
+                        };
+
+                        let py_bin_exists = member_venv.join("bin/python").exists()
+                            || member_venv.join("Scripts/python.exe").exists();
+
+                        if member_venv.exists() && py_bin_exists {
                             let py_bin = if cfg!(windows) {
                                 "${workspaceFolder}/.venv/Scripts/python.exe"
                             } else {
@@ -544,19 +627,27 @@ impl AirGapExporter {
                             py_settings["python.defaultInterpreterPath"] =
                                 serde_json::Value::String(py_bin.to_string());
                         } else if has_bundled_py {
-                            let py_bin = if folder_path == "." {
+                            let py_bin = if rel_prefix == "." {
                                 if cfg!(windows) {
                                     "${workspaceFolder}/.dmz/toolchains/python/python.exe"
+                                        .to_string()
                                 } else {
                                     "${workspaceFolder}/.dmz/toolchains/python/bin/python3"
+                                        .to_string()
                                 }
                             } else if cfg!(windows) {
-                                "${workspaceFolder}/../.dmz/toolchains/python/python.exe"
+                                format!(
+                                    "${{workspaceFolder}}/{}/.dmz/toolchains/python/python.exe",
+                                    rel_prefix
+                                )
                             } else {
-                                "${workspaceFolder}/../.dmz/toolchains/python/bin/python3"
+                                format!(
+                                    "${{workspaceFolder}}/{}/.dmz/toolchains/python/bin/python3",
+                                    rel_prefix
+                                )
                             };
                             py_settings["python.defaultInterpreterPath"] =
-                                serde_json::Value::String(py_bin.to_string());
+                                serde_json::Value::String(py_bin);
                         }
 
                         folder_entry["settings"] = py_settings;
@@ -603,6 +694,11 @@ impl AirGapExporter {
                     let mut header = tar::Header::new_gnu();
                     header.set_size(cw_bytes.len() as u64);
                     header.set_mode(0o644);
+                    header.set_mtime(deterministic_epoch);
+                    header.set_uid(0);
+                    header.set_gid(0);
+                    let _ = header.set_username("");
+                    let _ = header.set_groupname("");
                     header.set_cksum();
                     let _ = tar_builder.append_data(
                         &mut header,
@@ -709,6 +805,11 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
                 let mut header = tar::Header::new_gnu();
                 header.set_size(readme_content.len() as u64);
                 header.set_mode(0o644);
+                header.set_mtime(deterministic_epoch);
+                header.set_uid(0);
+                header.set_gid(0);
+                let _ = header.set_username("");
+                let _ = header.set_groupname("");
                 header.set_cksum();
                 let _ =
                     tar_builder.append_data(&mut header, "README.md", readme_content.as_bytes());
@@ -727,6 +828,7 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
                             &mut tar_builder,
                             &workspace_root,
                             changed_files,
+                            deterministic_epoch,
                         )?;
                     } else {
                         Self::append_dir_all(
@@ -734,6 +836,7 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
                             &workspace_root,
                             Path::new(""),
                             false,
+                            deterministic_epoch,
                         )?;
                     }
                 }
@@ -756,14 +859,12 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
                         head = %binfo.head_commit,
                         "Adding deterministic workspace.bundle to air-gap archive"
                     );
-                    tar_builder
-                        .append_path_with_name(&temp_bundle, "workspace.bundle")
-                        .map_err(|e| {
-                            ExportError::ArchiveError(format!(
-                                "Failed to pack workspace.bundle: {}",
-                                e
-                            ))
-                        })?;
+                    Self::append_file_normalized(
+                        &mut tar_builder,
+                        &temp_bundle,
+                        "workspace.bundle",
+                        deterministic_epoch,
+                    )?;
                     has_git_history = true;
                 }
                 Err(e) => {
@@ -776,10 +877,11 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
         let mut toolchain_manifest_entries = Vec::new();
         if config.with_toolchain {
             info!("Initiating host toolchain discovery and packaging");
-            match crate::toolchain::ToolchainPackager::package_toolchains_with_lockfile(
+            match crate::toolchain::ToolchainPackager::package_toolchains_with_epoch(
                 &workspace_root,
                 Some(&lockfile),
                 &mut tar_builder,
+                deterministic_epoch,
             ) {
                 Ok(entries) => {
                     info!(
@@ -815,10 +917,7 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
             workspace_project: final_ws_project.or_else(|| config.multi_workspace.clone()),
             closure_signature: lockfile.closure_signature.clone(),
             package_count: packed_count,
-            created_at_utc: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            created_at_utc: deterministic_epoch,
             archive_sha256: String::new(), // Populated post-compression
         };
 
@@ -828,6 +927,11 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
         let mut header = tar::Header::new_gnu();
         header.set_size(manifest_json.len() as u64);
         header.set_mode(0o644);
+        header.set_mtime(deterministic_epoch);
+        header.set_uid(0);
+        header.set_gid(0);
+        let _ = header.set_username("");
+        let _ = header.set_groupname("");
         header.set_cksum();
 
         tar_builder
@@ -840,28 +944,29 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
                 ExportError::ArchiveError(format!("Failed to embed airgap manifest: {}", e))
             })?;
 
-        // Finish streams and ensure file handle is fully closed
-        {
+        // Finish streams and finalize the single-pass cryptographic archive hash (zero disk re-reading)
+        let archive_sha256 = {
             let zstd_encoder = tar_builder.into_inner().map_err(|e| {
                 ExportError::ArchiveError(format!("Failed to finalize tar stream: {}", e))
             })?;
 
-            let mut inner_file = zstd_encoder
+            let mut hashing_writer = zstd_encoder
                 .finish()
                 .map_err(|e| format!("Failed to finish zstd compression: {}", e))
                 .map_err(ExportError::ArchiveError)?;
 
-            inner_file
+            hashing_writer
                 .flush()
                 .map_err(|e| ExportError::IoError(e.to_string()))?;
 
-            inner_file
+            let (mut inner_buf, computed_hash) = hashing_writer.finalize_hash();
+            inner_buf
+                .flush()
+                .map_err(|e| ExportError::IoError(e.to_string()))?;
+
+            computed_hash
         };
 
-        // Compute final archive checksum
-        let archive_sha256 = Self::calculate_file_sha256(&effective_output).map_err(|e| {
-            ExportError::IoError(format!("Failed to calculate archive hash: {}", e))
-        })?;
         let mut final_manifest = manifest;
         final_manifest.archive_sha256 = archive_sha256;
 
@@ -893,18 +998,86 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
         Ok(final_manifest)
     }
 
+    /// Resolves reproducible timestamp: SOURCE_DATE_EPOCH env var -> Git commit timestamp -> DOS/Bazel epoch (1980-01-01)
+    pub fn resolve_deterministic_epoch(workspace_root: &Path, _vcs: Option<&VcsProvenance>) -> u64 {
+        if let Ok(epoch_str) = std::env::var("SOURCE_DATE_EPOCH") {
+            if let Ok(epoch) = epoch_str.trim().parse::<u64>() {
+                return epoch;
+            }
+        }
+        if let Ok(Some(commit_time)) = GitProvider::get_commit_timestamp(workspace_root) {
+            return commit_time;
+        }
+        315_532_800 // 1980-01-01 00:00:00 UTC (standard DOS/Bazel reproducible epoch)
+    }
+
+    fn append_file_normalized<W: Write>(
+        tar: &mut TarBuilder<W>,
+        src_path: &Path,
+        dest_path: &str,
+        deterministic_epoch: u64,
+    ) -> Result<(), ExportError> {
+        let mut file = File::open(src_path).map_err(|e| {
+            ExportError::IoError(format!("Failed to open file {:?}: {}", src_path, e))
+        })?;
+        let metadata = file.metadata().map_err(|e| {
+            ExportError::IoError(format!("Failed to read metadata {:?}: {}", src_path, e))
+        })?;
+
+        let is_executable = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                metadata.permissions().mode() & 0o111 != 0
+            }
+            #[cfg(not(unix))]
+            {
+                dest_path.ends_with(".exe")
+                    || dest_path.ends_with(".bat")
+                    || dest_path.ends_with(".cmd")
+                    || dest_path.ends_with(".sh")
+            }
+        };
+
+        let mode = if is_executable { 0o755 } else { 0o644 };
+
+        let mut header = tar::Header::new_gnu();
+        header.set_size(metadata.len());
+        header.set_mode(mode);
+        header.set_mtime(deterministic_epoch);
+        header.set_uid(0);
+        header.set_gid(0);
+        let _ = header.set_username("");
+        let _ = header.set_groupname("");
+        header.set_cksum();
+
+        tar.append_data(&mut header, dest_path, &mut file)
+            .map_err(|e| {
+                ExportError::ArchiveError(format!("Failed to add file {}: {}", dest_path, e))
+            })?;
+
+        Ok(())
+    }
+
     fn append_dir_all<W: Write>(
         tar: &mut TarBuilder<W>,
         src_dir: &Path,
         dest_prefix: &Path,
         skip_manifest: bool,
+        deterministic_epoch: u64,
     ) -> Result<(), ExportError> {
         let entries = fs::read_dir(src_dir).map_err(|e| {
             ExportError::IoError(format!("Directory read failed {:?}: {}", src_dir, e))
         })?;
 
+        let mut sorted_entries = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|e| ExportError::IoError(e.to_string()))?;
+            sorted_entries.push(entry);
+        }
+        sorted_entries.sort_by_key(|e| e.file_name());
+
+        for entry in sorted_entries {
             let path = entry.path();
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
@@ -927,13 +1100,10 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
             let rel_dest = dest_prefix.join(name);
 
             if path.is_dir() {
-                Self::append_dir_all(tar, &path, &rel_dest, skip_manifest)?;
+                Self::append_dir_all(tar, &path, &rel_dest, skip_manifest, deterministic_epoch)?;
             } else {
                 let normalized_dest = rel_dest.to_string_lossy().replace('\\', "/");
-                tar.append_path_with_name(&path, &normalized_dest)
-                    .map_err(|e| {
-                        ExportError::ArchiveError(format!("Failed to add file {:?}: {}", path, e))
-                    })?;
+                Self::append_file_normalized(tar, &path, &normalized_dest, deterministic_epoch)?;
             }
         }
 
@@ -944,8 +1114,12 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
         tar: &mut TarBuilder<W>,
         workspace_root: &Path,
         files: &HashSet<PathBuf>,
+        deterministic_epoch: u64,
     ) -> Result<(), ExportError> {
-        for rel_path in files {
+        let mut sorted_files: Vec<_> = files.iter().collect();
+        sorted_files.sort();
+
+        for rel_path in sorted_files {
             // Skip .git, target, node_modules, dist, .dmz
             let starts_with_ignored = rel_path
                 .components()
@@ -967,13 +1141,12 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
             let full_path = workspace_root.join(rel_path);
             if full_path.is_file() {
                 let normalized_path = rel_path.to_string_lossy().replace('\\', "/");
-                tar.append_path_with_name(&full_path, &normalized_path)
-                    .map_err(|e| {
-                        ExportError::ArchiveError(format!(
-                            "Failed to add delta file {:?}: {}",
-                            rel_path, e
-                        ))
-                    })?;
+                Self::append_file_normalized(
+                    tar,
+                    &full_path,
+                    &normalized_path,
+                    deterministic_epoch,
+                )?;
             }
         }
         Ok(())

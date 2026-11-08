@@ -103,3 +103,77 @@ async fn test_fail_fast_readiness_on_premature_exit() {
         elapsed.as_millis()
     );
 }
+
+#[test]
+fn test_infer_member_execution_tauri_and_npm() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ws_path = temp_dir.path().join("tauri_member");
+    fs::create_dir_all(&ws_path).unwrap();
+
+    fs::write(
+        ws_path.join("package.json"),
+        r#"{"name": "desktop-ui", "scripts": {"tauri": "tauri"}}"#,
+    )
+    .unwrap();
+
+    let member = dmz_core::workspace::WorkspaceMember::new(
+        "ui",
+        &ws_path,
+        dmz_core::workspace::MemberRole::Sidecar,
+    );
+
+    let (cmd, args) = SidecarOrchestrator::infer_member_execution(&ws_path, &member).unwrap();
+    assert_eq!(cmd, "npm");
+    assert_eq!(args, vec!["run", "tauri", "dev"]);
+}
+
+#[test]
+fn test_infer_member_execution_python() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ws_path = temp_dir.path().join("py_member");
+    fs::create_dir_all(&ws_path).unwrap();
+
+    fs::write(ws_path.join("requirements.txt"), "fastapi\n").unwrap();
+    fs::write(ws_path.join("server.py"), "print('server')\n").unwrap();
+
+    let member = dmz_core::workspace::WorkspaceMember::new(
+        "backend",
+        &ws_path,
+        dmz_core::workspace::MemberRole::Sidecar,
+    );
+
+    let (cmd, args) = SidecarOrchestrator::infer_member_execution(&ws_path, &member).unwrap();
+    if cfg!(windows) {
+        assert_eq!(cmd, "python");
+    } else {
+        assert_eq!(cmd, "python3");
+    }
+    assert_eq!(args, vec!["server.py"]);
+}
+
+#[test]
+fn test_infer_member_execution_undetectable_fails_with_clear_message() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ws_path = temp_dir.path().join("empty_member");
+    fs::create_dir_all(&ws_path).unwrap();
+
+    let member = dmz_core::workspace::WorkspaceMember::new(
+        "unknown",
+        &ws_path,
+        dmz_core::workspace::MemberRole::Sidecar,
+    );
+
+    let res = SidecarOrchestrator::infer_member_execution(&ws_path, &member);
+    assert!(res.is_err());
+    let err_msg = res.unwrap_err();
+    assert!(
+        err_msg.contains("Unable to determine execution command for workspace member"),
+        "Expected error message, got: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("Specify \"exec_command\" and \"exec_args\" in dmz-workspace.toml"),
+        "Expected mention of dmz-workspace.toml, got: {}",
+        err_msg
+    );
+}

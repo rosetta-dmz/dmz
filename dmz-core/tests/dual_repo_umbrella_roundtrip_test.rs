@@ -289,6 +289,26 @@ fn test_dual_repo_umbrella_export_and_import_roundtrip() {
             "Root .vscode/settings.json must NOT contain python.defaultInterpreterPath for umbrella workspace"
         );
     }
+
+    // d) Member parity symlinks exist (.dmz, dmz-workspace.toml, dmz.lock)
+    assert!(
+        target_dir.join("workspaces/frontend/.dmz").exists(),
+        "Frontend member should have .dmz symlink"
+    );
+    assert!(
+        target_dir.join("workspaces/auth-service/.dmz").exists(),
+        "Sidecar member should have .dmz symlink"
+    );
+    assert!(
+        target_dir
+            .join("workspaces/frontend/dmz-workspace.toml")
+            .exists(),
+        "Frontend should have dmz-workspace.toml link"
+    );
+    assert!(
+        target_dir.join("workspaces/frontend/dmz.lock").exists(),
+        "Frontend should have dmz.lock link"
+    );
 }
 
 #[test]
@@ -442,4 +462,14 @@ fn test_dual_repo_umbrella_export_and_import_reversed_roles_python_primary_node_
     assert!(sidecar_cargo_conf.is_file());
     let cargo_conf_str = fs::read_to_string(&sidecar_cargo_conf).unwrap();
     assert!(cargo_conf_str.contains("replace-with = \"vendored-sources\""));
+
+    // d) Member parity symlinks exist (.dmz, dmz-workspace.toml, dmz.lock)
+    assert!(
+        target_dir.join("workspaces/backend/.dmz").exists(),
+        "Backend member should have .dmz symlink"
+    );
+    assert!(
+        target_dir.join("workspaces/ui-client/.dmz").exists(),
+        "UI member should have .dmz symlink"
+    );
 }

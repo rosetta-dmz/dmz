@@ -39,16 +39,22 @@ pub fn generate_seatbelt_profile(config: &SandboxConfig) -> String {
 
     let home = std::env::var("HOME").unwrap_or_else(|_| "/Users".to_string());
 
+    let has_bundled_toolchains = config.workspace_path.join(".dmz/toolchains").is_dir()
+        || config.closure_path.join("toolchains").is_dir();
+
     let mut user_toolchain_rules = String::new();
     let toolchain_dirs = [
         ".cargo", ".rustup", ".local", ".nvm", ".pnpm", ".pyenv", ".asdf", ".fnm", ".volta", "go",
         ".cache",
     ];
 
-    for dir in toolchain_dirs {
-        let p = format!("{}/{}", home, dir);
-        if std::path::Path::new(&p).exists() {
-            user_toolchain_rules.push_str(&format!("    (subpath \"{}\")\n", p));
+    // Only allow ambient user toolchains if bundled toolchains are not present in .dmz/toolchains
+    if !has_bundled_toolchains {
+        for dir in toolchain_dirs {
+            let p = format!("{}/{}", home, dir);
+            if std::path::Path::new(&p).exists() {
+                user_toolchain_rules.push_str(&format!("    (subpath \"{}\")\n", p));
+            }
         }
     }
 

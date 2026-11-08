@@ -270,18 +270,23 @@ impl NpmMapper {
 _BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
 _APP_DIR="$(cd "$_BIN_DIR/../.." && pwd)"
 _ROOT_DIR="$(cd "$_APP_DIR/.." && pwd)"
+_MASTER_DIR="$(cd "$_APP_DIR/../.." && pwd)"
 
 _NODE="${{DMZ_NODE:-node}}"
 if [ -f "$_APP_DIR/.dmz/toolchains/node/bin/node" ]; then
     _NODE="$_APP_DIR/.dmz/toolchains/node/bin/node"
 elif [ -f "$_ROOT_DIR/.dmz/toolchains/node/bin/node" ]; then
     _NODE="$_ROOT_DIR/.dmz/toolchains/node/bin/node"
+elif [ -f "$_MASTER_DIR/.dmz/toolchains/node/bin/node" ]; then
+    _NODE="$_MASTER_DIR/.dmz/toolchains/node/bin/node"
 fi
 
 if [ -f "$_APP_DIR/node_modules/{target}" ]; then
     exec "$_NODE" "$_APP_DIR/node_modules/{target}" "$@"
 elif [ -f "$_ROOT_DIR/node_modules/{target}" ]; then
     exec "$_NODE" "$_ROOT_DIR/node_modules/{target}" "$@"
+elif [ -f "$_MASTER_DIR/node_modules/{target}" ]; then
+    exec "$_NODE" "$_MASTER_DIR/node_modules/{target}" "$@"
 fi
 {fallback}"#,
                 cmd = cmd_name,
@@ -311,18 +316,23 @@ setlocal
 set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..\..") do set "APP_DIR=%%~fI"
 for %%I in ("%APP_DIR%\..") do set "ROOT_DIR=%%~fI"
+for %%I in ("%APP_DIR%\..\..") do set "MASTER_DIR=%%~fI"
 
 set "NODE_BIN=node"
 if exist "%APP_DIR%\.dmz\toolchains\node\bin\node.exe" (
     set "NODE_BIN=%APP_DIR%\.dmz\toolchains\node\bin\node.exe"
 ) else if exist "%ROOT_DIR%\.dmz\toolchains\node\bin\node.exe" (
     set "NODE_BIN=%ROOT_DIR%\.dmz\toolchains\node\bin\node.exe"
+) else if exist "%MASTER_DIR%\.dmz\toolchains\node\bin\node.exe" (
+    set "NODE_BIN=%MASTER_DIR%\.dmz\toolchains\node\bin\node.exe"
 )
 
 if exist "%APP_DIR%\node_modules\{target}" (
     "%NODE_BIN%" "%APP_DIR%\node_modules\{target}" %*
 ) else if exist "%ROOT_DIR%\node_modules\{target}" (
     "%NODE_BIN%" "%ROOT_DIR%\node_modules\{target}" %*
+) else if exist "%MASTER_DIR%\node_modules\{target}" (
+    "%NODE_BIN%" "%MASTER_DIR%\node_modules\{target}" %*
 ) else (
     {fallback}
 )
@@ -380,6 +390,22 @@ if (Test-Path $appTarget) {{
         target_dir: &Path,
         pkg_name: &str,
     ) -> Result<(), super::InstallError> {
+        let parent_store = archive_path.parent().unwrap_or(archive_path);
+        let cache_unpacked = parent_store.join(".unpacked");
+
+        if cache_unpacked.join("package.json").exists() {
+            // Instant CoW reflink or hardlink clone from unpacked cache
+            let _ = fs::create_dir_all(target_dir);
+            super::fast_clone::FastClone::clone_dir_recursive(&cache_unpacked, target_dir)
+                .map_err(|e| {
+                    super::InstallError::MapperError(format!(
+                        "Failed to fast-clone package {}: {}",
+                        pkg_name, e
+                    ))
+                })?;
+            return Ok(());
+        }
+
         super::archive::SafeArchiveExtractor::extract(archive_path, target_dir).map_err(|e| {
             super::InstallError::MapperError(format!(
                 "Failed to unpack package {}: {}",
@@ -401,6 +427,11 @@ if (Test-Path $appTarget) {{
                 }
             }
             let _ = fs::remove_dir_all(&package_subdir);
+        }
+
+        // Seed the extracted structure in the store for instant subsequent member fast-cloning
+        if !cache_unpacked.exists() {
+            let _ = super::fast_clone::FastClone::clone_dir_recursive(target_dir, &cache_unpacked);
         }
 
         Ok(())
@@ -857,7 +888,108 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
         let pth_file = root_site_packages.join("dmz_store.pth");
         let _ = fs::write(pth_file, format!("{}\n", venv_site_packages.display()));
 
+        // Hydrate runnable python interpreter launcher and pyvenv.cfg
+        Self::hydrate_venv_environment(workspace_path, &root_venv, &py_ver);
+
         Ok(())
+    }
+
+    /// Hydrates runnable python interpreter launcher scripts and configuration into .venv
+    pub fn hydrate_venv_environment(_workspace_path: &Path, root_venv: &Path, py_ver: &str) {
+        let venv_bin = root_venv.join("bin");
+        let venv_scripts = root_venv.join("Scripts");
+        let _ = fs::create_dir_all(&venv_bin);
+        let _ = fs::create_dir_all(&venv_scripts);
+
+        // 1. pyvenv.cfg
+        let pyvenv_cfg = root_venv.join("pyvenv.cfg");
+        if !pyvenv_cfg.exists() {
+            let ver_clean = py_ver.trim_start_matches("python");
+            let cfg_content = format!(
+                "home = /usr/bin\ninclude-system-site-packages = false\nversion = {}.0\n",
+                ver_clean
+            );
+            let _ = fs::write(&pyvenv_cfg, cfg_content);
+        }
+
+        // 2. Unix launcher: root_venv/bin/python and root_venv/bin/python3
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let sh_content = format!(
+                r#"#!/bin/sh
+VENV_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export VIRTUAL_ENV="$VENV_DIR"
+export PATH="$VENV_DIR/bin:$PATH"
+export PYTHONPATH="$VENV_DIR/lib/{py_ver}/site-packages:$PYTHONPATH"
+
+# Check bundled toolchain python
+_PY=""
+if [ -x "$VENV_DIR/../.dmz/toolchains/python/bin/python3" ]; then
+    _PY="$VENV_DIR/../.dmz/toolchains/python/bin/python3"
+elif [ -x "$VENV_DIR/../../.dmz/toolchains/python/bin/python3" ]; then
+    _PY="$VENV_DIR/../../.dmz/toolchains/python/bin/python3"
+elif [ -x "$VENV_DIR/.dmz/toolchains/python/bin/python3" ]; then
+    _PY="$VENV_DIR/.dmz/toolchains/python/bin/python3"
+elif command -v python3 >/dev/null 2>&1; then
+    _PY="python3"
+elif command -v python >/dev/null 2>&1; then
+    _PY="python"
+fi
+
+if [ -n "$_PY" ]; then
+    exec "$_PY" "$@"
+else
+    echo "DMZ Error: No Python interpreter found in bundled toolchains or system PATH." >&2
+    exit 1
+fi
+"#,
+                py_ver = py_ver
+            );
+
+            for name in &["python", "python3"] {
+                let bin_path = venv_bin.join(name);
+                if !bin_path.exists() && fs::write(&bin_path, &sh_content).is_ok() {
+                    let _ = fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755));
+                }
+            }
+
+            // Also create activate script
+            let activate_path = venv_bin.join("activate");
+            if !activate_path.exists() {
+                let activate_content = r#"VIRTUAL_ENV="$(cd "$(dirname "$0")/.." && pwd)"
+export VIRTUAL_ENV
+_OLD_PATH="$PATH"
+PATH="$VIRTUAL_ENV/bin:$PATH"
+export PATH
+"#;
+                let _ = fs::write(&activate_path, activate_content);
+            }
+        }
+
+        // 3. Windows launcher: root_venv/Scripts/python.bat
+        let cmd_path = venv_scripts.join("python.bat");
+        if !cmd_path.exists() {
+            let cmd_content = format!(
+                r#"@echo off
+set "VENV_DIR=%~dp0.."
+set "VIRTUAL_ENV=%VENV_DIR%"
+set "PATH=%VENV_DIR%\Scripts;%PATH%"
+set "PYTHONPATH=%VENV_DIR%\lib\{py_ver}\site-packages;%PYTHONPATH%"
+
+set "_PY=python"
+if exist "%VENV_DIR%\..\.dmz\toolchains\python\python.exe" (
+    set "_PY=%VENV_DIR%\..\.dmz\toolchains\python\python.exe"
+) else if exist "%VENV_DIR%\..\..\.dmz\toolchains\python\python.exe" (
+    set "_PY=%VENV_DIR%\..\..\.dmz\toolchains\python\python.exe"
+)
+
+"%_PY%" %*
+"#,
+                py_ver = py_ver
+            );
+            let _ = fs::write(&cmd_path, cmd_content);
+        }
     }
 }
 
