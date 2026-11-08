@@ -637,34 +637,75 @@ impl AirGapImporter {
             // 0. Member workspace parity symlinks (.dmz, dmz.lock, dmz-workspace.toml)
             if dir != workspace_root {
                 let member_dmz = dir.join(".dmz");
+                let root_dmz = workspace_root.join(".dmz");
                 if !member_dmz.exists() {
-                    let rel_dmz = Self::relative_path_between(dir, &workspace_root.join(".dmz"));
+                    let rel_dmz = Self::relative_path_between(dir, &root_dmz);
                     #[cfg(unix)]
                     let _ = std::os::unix::fs::symlink(&rel_dmz, &member_dmz);
                     #[cfg(windows)]
-                    let _ = std::os::windows::fs::symlink_dir(&rel_dmz, &member_dmz);
+                    {
+                        let _ = fs::create_dir_all(&root_dmz);
+                        let rel_dmz_win = rel_dmz.replace('/', "\\");
+                        let linked = std::os::windows::fs::symlink_dir(&rel_dmz_win, &member_dmz)
+                            .or_else(|_| std::os::windows::fs::symlink_dir(&root_dmz, &member_dmz))
+                            .is_ok();
+                        let junctioned = if !linked {
+                            let member_str = member_dmz.to_string_lossy().replace('/', "\\");
+                            let root_str = root_dmz.to_string_lossy().replace('/', "\\");
+                            let clean_member = member_str.trim_start_matches(r"\\?\");
+                            let clean_root = root_str.trim_start_matches(r"\\?\");
+                            std::process::Command::new("cmd")
+                                .args(["/C", "mklink", "/J", clean_member, clean_root])
+                                .output()
+                                .map(|o| o.status.success() && member_dmz.exists())
+                                .unwrap_or(false)
+                        } else {
+                            true
+                        };
+                        if !junctioned && !member_dmz.exists() {
+                            let _ = fs::create_dir_all(&member_dmz);
+                            let _ = Self::copy_dir_contents(&root_dmz, &member_dmz, false);
+                        }
+                    }
                 }
 
                 let member_lock = dir.join("dmz.lock");
-                if !member_lock.exists() && workspace_root.join("dmz.lock").exists() {
-                    let rel_lock =
-                        Self::relative_path_between(dir, &workspace_root.join("dmz.lock"));
+                let root_lock = workspace_root.join("dmz.lock");
+                if !member_lock.exists() && root_lock.exists() {
+                    let rel_lock = Self::relative_path_between(dir, &root_lock);
                     #[cfg(unix)]
                     let _ = std::os::unix::fs::symlink(&rel_lock, &member_lock);
                     #[cfg(windows)]
-                    let _ = std::os::windows::fs::symlink_file(&rel_lock, &member_lock);
+                    {
+                        let rel_lock_win = rel_lock.replace('/', "\\");
+                        if std::os::windows::fs::symlink_file(&rel_lock_win, &member_lock).is_err()
+                            && std::os::windows::fs::symlink_file(&root_lock, &member_lock).is_err()
+                        {
+                            let _ = std::fs::hard_link(&root_lock, &member_lock)
+                                .or_else(|_| std::fs::copy(&root_lock, &member_lock).map(|_| ()));
+                        }
+                    }
                 }
 
                 let member_manifest = dir.join("dmz-workspace.toml");
-                if !member_manifest.exists() && workspace_root.join("dmz-workspace.toml").exists() {
-                    let rel_manifest = Self::relative_path_between(
-                        dir,
-                        &workspace_root.join("dmz-workspace.toml"),
-                    );
+                let root_manifest = workspace_root.join("dmz-workspace.toml");
+                if !member_manifest.exists() && root_manifest.exists() {
+                    let rel_manifest = Self::relative_path_between(dir, &root_manifest);
                     #[cfg(unix)]
                     let _ = std::os::unix::fs::symlink(&rel_manifest, &member_manifest);
                     #[cfg(windows)]
-                    let _ = std::os::windows::fs::symlink_file(&rel_manifest, &member_manifest);
+                    {
+                        let rel_manifest_win = rel_manifest.replace('/', "\\");
+                        if std::os::windows::fs::symlink_file(&rel_manifest_win, &member_manifest)
+                            .is_err()
+                            && std::os::windows::fs::symlink_file(&root_manifest, &member_manifest)
+                                .is_err()
+                        {
+                            let _ = std::fs::hard_link(&root_manifest, &member_manifest).or_else(
+                                |_| std::fs::copy(&root_manifest, &member_manifest).map(|_| ()),
+                            );
+                        }
+                    }
                 }
             }
 
