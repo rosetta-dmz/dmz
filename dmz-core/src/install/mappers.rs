@@ -85,6 +85,9 @@ impl NpmMapper {
         if root_pkg_json.is_file() {
             Self::discover_and_link_from_root_manifest(&root_pkg_json, &bin_dir);
         }
+
+        // 3. Ensure node_modules/.modules.yaml exists so pnpm recognizes packages as installed
+        PnpmMapper::ensure_modules_yaml(workspace_path);
     }
 
     /// Recursively scans `node_modules/` (up to 2 levels for scoped packages) and materializes shims
@@ -269,7 +272,19 @@ impl NpmMapper {
 # DMZ Hermetic CLI shim: {cmd}
 _BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
 _APP_DIR="$(cd "$_BIN_DIR/../.." && pwd)"
-_ROOT_DIR="$(cd "$_APP_DIR/.." && pwd)"
+_ROOT_DIR="$_APP_DIR"
+_CUR="$_APP_DIR"
+while [ -n "$_CUR" ] && [ "$_CUR" != "/" ] && [ "$_CUR" != "." ]; do
+    if [ -f "$_CUR/dmz-workspace.toml" ] || [ -f "$_CUR/dmz.toml" ] || [ -d "$_CUR/.dmz/toolchains" ]; then
+        _ROOT_DIR="$_CUR"
+        break
+    fi
+    _PARENT="$(cd "$_CUR/.." 2>/dev/null && pwd)"
+    if [ "$_PARENT" = "$_CUR" ]; then
+        break
+    fi
+    _CUR="$_PARENT"
+done
 
 _NODE="${{DMZ_NODE:-node}}"
 if [ -f "$_APP_DIR/.dmz/toolchains/node/bin/node" ]; then
@@ -282,6 +297,14 @@ if [ -f "$_APP_DIR/node_modules/{target}" ]; then
     exec "$_NODE" "$_APP_DIR/node_modules/{target}" "$@"
 elif [ -f "$_ROOT_DIR/node_modules/{target}" ]; then
     exec "$_NODE" "$_ROOT_DIR/node_modules/{target}" "$@"
+elif [ -f "$_APP_DIR/node_modules/@tauri-apps/cli/main.js" ]; then
+    exec "$_NODE" "$_APP_DIR/node_modules/@tauri-apps/cli/main.js" "$@"
+elif [ -f "$_ROOT_DIR/node_modules/@tauri-apps/cli/main.js" ]; then
+    exec "$_NODE" "$_ROOT_DIR/node_modules/@tauri-apps/cli/main.js" "$@"
+elif [ -f "$_APP_DIR/node_modules/@tauri-apps/cli/bin/tauri.js" ]; then
+    exec "$_NODE" "$_APP_DIR/node_modules/@tauri-apps/cli/bin/tauri.js" "$@"
+elif [ -f "$_ROOT_DIR/node_modules/@tauri-apps/cli/bin/tauri.js" ]; then
+    exec "$_NODE" "$_ROOT_DIR/node_modules/@tauri-apps/cli/bin/tauri.js" "$@"
 fi
 {fallback}"#,
                 cmd = cmd_name,
@@ -310,7 +333,18 @@ fi
 setlocal
 set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..\..") do set "APP_DIR=%%~fI"
-for %%I in ("%APP_DIR%\..") do set "ROOT_DIR=%%~fI"
+set "ROOT_DIR=%APP_DIR%"
+if exist "%APP_DIR%\dmz-workspace.toml" (
+    set "ROOT_DIR=%APP_DIR%"
+) else if exist "%APP_DIR%\..\dmz-workspace.toml" (
+    for %%I in ("%APP_DIR%\..") do set "ROOT_DIR=%%~fI"
+) else if exist "%APP_DIR%\..\..\dmz-workspace.toml" (
+    for %%I in ("%APP_DIR%\..\..") do set "ROOT_DIR=%%~fI"
+) else if exist "%APP_DIR%\..\.dmz" (
+    for %%I in ("%APP_DIR%\..") do set "ROOT_DIR=%%~fI"
+) else if exist "%APP_DIR%\..\..\.dmz" (
+    for %%I in ("%APP_DIR%\..\..") do set "ROOT_DIR=%%~fI"
+)
 
 set "NODE_BIN=node"
 if exist "%APP_DIR%\.dmz\toolchains\node\bin\node.exe" (
@@ -323,6 +357,14 @@ if exist "%APP_DIR%\node_modules\{target}" (
     "%NODE_BIN%" "%APP_DIR%\node_modules\{target}" %*
 ) else if exist "%ROOT_DIR%\node_modules\{target}" (
     "%NODE_BIN%" "%ROOT_DIR%\node_modules\{target}" %*
+) else if exist "%APP_DIR%\node_modules\@tauri-apps\cli\main.js" (
+    "%NODE_BIN%" "%APP_DIR%\node_modules\@tauri-apps\cli\main.js" %*
+) else if exist "%ROOT_DIR%\node_modules\@tauri-apps\cli\main.js" (
+    "%NODE_BIN%" "%ROOT_DIR%\node_modules\@tauri-apps\cli\main.js" %*
+) else if exist "%APP_DIR%\node_modules\@tauri-apps\cli\bin\tauri.js" (
+    "%NODE_BIN%" "%APP_DIR%\node_modules\@tauri-apps\cli\bin\tauri.js" %*
+) else if exist "%ROOT_DIR%\node_modules\@tauri-apps\cli\bin\tauri.js" (
+    "%NODE_BIN%" "%ROOT_DIR%\node_modules\@tauri-apps\cli\bin\tauri.js" %*
 ) else (
     {fallback}
 )
@@ -345,7 +387,18 @@ if exist "%APP_DIR%\node_modules\{target}" (
                 r#"#!/usr/bin/env pwsh
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $appDir = Split-Path -Parent (Split-Path -Parent $scriptDir)
-$rootDir = Split-Path -Parent $appDir
+$rootDir = $appDir
+if (Test-Path (Join-Path $appDir "dmz-workspace.toml")) {{
+    $rootDir = $appDir
+}} elseif (Test-Path (Join-Path (Split-Path -Parent $appDir) "dmz-workspace.toml")) {{
+    $rootDir = Split-Path -Parent $appDir
+}} elseif (Test-Path (Join-Path (Split-Path -Parent (Split-Path -Parent $appDir)) "dmz-workspace.toml")) {{
+    $rootDir = Split-Path -Parent (Split-Path -Parent $appDir)
+}} elseif (Test-Path (Join-Path (Split-Path -Parent $appDir) ".dmz")) {{
+    $rootDir = Split-Path -Parent $appDir
+}} elseif (Test-Path (Join-Path (Split-Path -Parent (Split-Path -Parent $appDir)) ".dmz")) {{
+    $rootDir = Split-Path -Parent (Split-Path -Parent $appDir)
+}}
 
 $nodeBin = "node"
 $appNode = Join-Path $appDir ".dmz\toolchains\node\bin\node.exe"
@@ -358,11 +411,17 @@ if (Test-Path $appNode) {{
 
 $appTarget = Join-Path $appDir "node_modules\{target}"
 $rootTarget = Join-Path $rootDir "node_modules\{target}"
+$appTauriMain = Join-Path $appDir "node_modules\@tauri-apps\cli\main.js"
+$rootTauriMain = Join-Path $rootDir "node_modules\@tauri-apps\cli\main.js"
 
 if (Test-Path $appTarget) {{
     & $nodeBin $appTarget $args
 }} elseif (Test-Path $rootTarget) {{
     & $nodeBin $rootTarget $args
+}} elseif (Test-Path $appTauriMain) {{
+    & $nodeBin $appTauriMain $args
+}} elseif (Test-Path $rootTauriMain) {{
+    & $nodeBin $rootTauriMain $args
 }} else {{
     {fallback}
 }}
@@ -448,7 +507,9 @@ impl PnpmMapper {
         #[cfg(unix)]
         {
             use std::os::unix::fs::symlink;
-            symlink(&virtual_store_dir, &root_link_dir).map_err(|e| {
+            let abs_virtual_store =
+                std::fs::canonicalize(&virtual_store_dir).unwrap_or(virtual_store_dir);
+            symlink(&abs_virtual_store, &root_link_dir).map_err(|e| {
                 super::InstallError::MapperError(format!(
                     "Failed to create pnpm symlink for {}: {}",
                     pkg.name, e
@@ -469,7 +530,47 @@ impl PnpmMapper {
             }
         }
 
+        Self::ensure_modules_yaml(workspace_path);
+
         Ok(())
+    }
+
+    /// Writes node_modules/.modules.yaml so that pnpm CLI recognizes node_modules as installed
+    /// and avoids the error: "Local package.json exists, but node_modules missing, did you mean to install?"
+    pub fn ensure_modules_yaml(workspace_path: &Path) {
+        let nm_dir = workspace_path.join("node_modules");
+        if !nm_dir.is_dir() {
+            let _ = fs::create_dir_all(&nm_dir);
+        }
+        let modules_yaml_path = nm_dir.join(".modules.yaml");
+        if !modules_yaml_path.exists() {
+            let is_pnpm_store = nm_dir.join(".pnpm").is_dir();
+            let node_linker = if is_pnpm_store { "isolated" } else { "hoisted" };
+            let content = format!(
+                r#"# Generated by DMZ offline installer
+alreadyPinnedVersions: {{}}
+hoistedDependencies: {{}}
+included:
+  dependencies: true
+  devDependencies: true
+  optionalDependencies: true
+injectedDeps: {{}}
+layoutVersion: 5
+nodeLinker: {node_linker}
+packageManager: pnpm
+pendingBuilds: []
+prunedAt: '2026-01-01T00:00:00.000Z'
+publicHoistPattern: []
+registries:
+  default: https://registry.npmjs.org/
+skipped: []
+storeDir: .pnpm-store
+virtualStoreDir: .pnpm
+virtualStoreDirMaxLength: 120
+"#
+            );
+            let _ = fs::write(modules_yaml_path, content);
+        }
     }
 }
 
@@ -995,4 +1096,39 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_pnpm_ensure_modules_yaml() {
+        let temp = tempdir().unwrap();
+        let ws = temp.path();
+
+        // 1. Should create node_modules/.modules.yaml with isolated linker when .pnpm exists
+        fs::create_dir_all(ws.join("node_modules/.pnpm")).unwrap();
+        PnpmMapper::ensure_modules_yaml(ws);
+
+        let yaml_path = ws.join("node_modules/.modules.yaml");
+        assert!(yaml_path.is_file());
+        let content = fs::read_to_string(&yaml_path).unwrap();
+        assert!(content.contains("nodeLinker: isolated"));
+        assert!(content.contains("packageManager: pnpm"));
+        assert!(content.contains("virtualStoreDir: .pnpm"));
+
+        // 2. Hydration should also ensure .modules.yaml and tauri shim
+        let temp2 = tempdir().unwrap();
+        let ws2 = temp2.path();
+        fs::write(
+            ws2.join("package.json"),
+            r#"{"name": "test", "devDependencies": {"@tauri-apps/cli": "^2.0.0"}, "scripts": {"tauri": "tauri"}}"#,
+        )
+        .unwrap();
+        NpmMapper::hydrate_workspace_bin_shims(ws2);
+        assert!(ws2.join("node_modules/.modules.yaml").is_file());
+        assert!(ws2.join("node_modules/.bin/tauri").is_file());
+    }
 }

@@ -16,8 +16,128 @@ impl ResolverEngine {
         Self::resolve_workspace_with_target(workspace_dir, None)
     }
 
-    /// Scans project workspace, auto-resolves dependencies, and tags the target platform
+    /// Scans project workspace, auto-resolves dependencies, and tags the target platform.
+    /// Automatically detects `dmz-workspace.toml` for multi-repository / companion workspaces.
     pub fn resolve_workspace_with_target(
+        workspace_dir: &Path,
+        target_platform: Option<String>,
+    ) -> Result<DmzLockfile, String> {
+        let manifest_file = workspace_dir.join("dmz-workspace.toml");
+        if manifest_file.is_file() {
+            if let Ok(project) =
+                crate::workspace::WorkspaceProjectConfig::load_from_file(&manifest_file)
+            {
+                let layouts = project.resolve_member_layouts(workspace_dir, Some(&manifest_file));
+                if !layouts.is_empty() && layouts.iter().all(|l| l.host_path.is_dir()) {
+                    return Self::resolve_multi_workspace(
+                        workspace_dir,
+                        &project,
+                        Some(&manifest_file),
+                        target_platform,
+                    );
+                }
+            }
+        }
+
+        Self::resolve_single_workspace_with_target(workspace_dir, target_platform)
+    }
+
+    /// Resolves dependencies across all members of a multi-repository `WorkspaceProjectConfig`,
+    /// tagging each package with its canonical `member_id` and recording workspace metadata.
+    pub fn resolve_multi_workspace(
+        workspace_dir: &Path,
+        project: &crate::workspace::WorkspaceProjectConfig,
+        manifest_path: Option<&Path>,
+        target_platform: Option<String>,
+    ) -> Result<DmzLockfile, String> {
+        let layouts = project.resolve_member_layouts(workspace_dir, manifest_path);
+        if layouts.is_empty() {
+            return Self::resolve_single_workspace_with_target(workspace_dir, target_platform);
+        }
+
+        info!(
+            project = %project.name,
+            members = layouts.len(),
+            "Resolving multi-workspace dependencies across all declared members"
+        );
+
+        let mut merged_packages = Vec::new();
+        let mut workspaces_meta = Vec::new();
+
+        for layout in &layouts {
+            if !layout.host_path.is_dir() {
+                return Err(format!(
+                    "Workspace member '{}' directory does not exist at {:?}",
+                    layout.id, layout.host_path
+                ));
+            }
+
+            let member_cfg = project.find_member(&layout.id);
+            match Self::resolve_single_workspace_with_target(
+                &layout.host_path,
+                target_platform.clone(),
+            ) {
+                Ok(member_lock) => {
+                    let member_sig = member_lock.closure_signature.clone();
+                    for (_, mut pkg) in member_lock.packages {
+                        pkg.member_id = Some(layout.id.clone());
+                        merged_packages.push(pkg);
+                    }
+                    workspaces_meta.push(crate::resolver::lockfile::WorkspaceMetadata {
+                        id: layout.id.clone(),
+                        path: member_cfg
+                            .map(|m| m.path.display().to_string())
+                            .unwrap_or_else(|| layout.host_path.display().to_string()),
+                        role: layout.role.to_string(),
+                        ecosystem: member_cfg.and_then(|m| m.ecosystem.clone()),
+                        closure_signature: Some(member_sig),
+                    });
+                }
+                Err(e) if layouts.len() > 1 && e.contains("resolved 0 packages") => {
+                    info!(
+                        member = %layout.id,
+                        path = ?layout.host_path,
+                        "Member has 0 external dependencies; continuing multi-workspace resolution"
+                    );
+                    workspaces_meta.push(crate::resolver::lockfile::WorkspaceMetadata {
+                        id: layout.id.clone(),
+                        path: member_cfg
+                            .map(|m| m.path.display().to_string())
+                            .unwrap_or_else(|| layout.host_path.display().to_string()),
+                        role: layout.role.to_string(),
+                        ecosystem: member_cfg.and_then(|m| m.ecosystem.clone()),
+                        closure_signature: None,
+                    });
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Dependency resolution failed for member '{}' ({:?}): {}",
+                        layout.id, layout.host_path, e
+                    ));
+                }
+            }
+        }
+
+        if merged_packages.is_empty() {
+            return Err(
+                "Fail-Fast Guardrail: Multi-workspace scan detected manifests, but resolved 0 packages across all members."
+                    .to_string(),
+            );
+        }
+
+        let mut unified_lock = DmzLockfile::with_platform(merged_packages, target_platform);
+        if let Ok(Some(prov)) = crate::vcs::GitProvider::get_provenance(workspace_dir) {
+            unified_lock.vcs = Some(prov);
+        }
+        for meta in workspaces_meta {
+            unified_lock.add_workspace(meta);
+        }
+
+        Ok(unified_lock)
+    }
+
+    /// Scans a single project workspace directory, auto-resolves dependencies, and tags the target platform
+    pub fn resolve_single_workspace_with_target(
         workspace_dir: &Path,
         target_platform: Option<String>,
     ) -> Result<DmzLockfile, String> {
@@ -251,9 +371,9 @@ impl ResolverEngine {
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-        for (map_key, pkg) in lockfile.packages.clone() {
+        for pkg in lockfile.packages.values_mut() {
             // --- SKIP LOCAL PATH DEPENDENCIES & WORKSPACE MEMBERS ---
-            if pkg.version.starts_with("path:") || pkg.version.contains("path") {
+            if pkg.version.starts_with("path:") {
                 info!(name = %pkg.name, version = %pkg.version, "Skipping remote download for local path dependency/workspace member");
                 continue;
             }
@@ -303,6 +423,34 @@ impl ResolverEngine {
             let pkg_dir = store_path.join(&safe_pkg_name);
             std::fs::create_dir_all(&pkg_dir)
                 .map_err(|e| format!("Failed to create package directory: {}", e))?;
+
+            let artifact_filename = format!("{}-{}.archive", safe_pkg_name, clean_version);
+            let artifact_path = pkg_dir.join(&artifact_filename);
+
+            // --- STORE ARTIFACT CACHE HIT CHECK ---
+            if artifact_path.is_file() && !pkg.sha256.is_empty() {
+                let mut identity_hasher = Sha256::new();
+                identity_hasher.update(format!("{}:{}", pkg.name, pkg.version).as_bytes());
+                let placeholder_hash = format!("{:x}", identity_hasher.finalize());
+
+                if pkg.sha256 != placeholder_hash {
+                    if let Ok(mut cached_file) = std::fs::File::open(&artifact_path) {
+                        let mut cache_hasher = Sha256::new();
+                        if std::io::copy(&mut cached_file, &mut cache_hasher).is_ok() {
+                            let cached_digest = format!("{:x}", cache_hasher.finalize());
+                            if cached_digest == pkg.sha256 {
+                                info!(
+                                    name = %pkg.name,
+                                    version = %clean_version,
+                                    sha256 = %cached_digest,
+                                    "Store artifact cache hit verified; skipping download"
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
 
             let download_url = match &pkg.source_url {
                 Some(url) => url.clone(),
@@ -394,12 +542,10 @@ impl ResolverEngine {
                         }
 
                         if resolved_url.is_empty() {
+                            let first_char = pkg.name.chars().next().unwrap_or('_');
                             format!(
                                 "https://files.pythonhosted.org/packages/source/{}/{}/{}-{}.tar.gz",
-                                &pkg.name[..1],
-                                pkg.name,
-                                pkg.name,
-                                clean_version
+                                first_char, pkg.name, pkg.name, clean_version
                             )
                         } else {
                             resolved_url
@@ -418,7 +564,7 @@ impl ResolverEngine {
                 },
             };
 
-            let response = client
+            let mut response = client
                 .get(&download_url)
                 .send()
                 .map_err(|e| format!("HTTP request failed for {}: {}", download_url, e))?;
@@ -431,29 +577,48 @@ impl ResolverEngine {
                 ));
             }
 
-            let bytes = response
-                .bytes()
-                .map_err(|e| format!("Failed to read response bytes for {}: {}", pkg.name, e))?;
-
+            // Stream response in 64 KB chunks to a temporary .part file while computing SHA-256
+            let part_path = pkg_dir.join(format!("{}.part", artifact_filename));
+            let part_file = std::fs::File::create(&part_path)
+                .map_err(|e| format!("Failed to create staging file for {}: {}", pkg.name, e))?;
+            let mut writer = std::io::BufWriter::new(part_file);
             let mut hasher = Sha256::new();
-            hasher.update(&bytes);
+            let mut buffer = [0u8; 65536];
+
+            loop {
+                let n = std::io::Read::read(&mut response, &mut buffer).map_err(|e| {
+                    let _ = std::fs::remove_file(&part_path);
+                    format!("Failed to stream response bytes for {}: {}", pkg.name, e)
+                })?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..n]);
+                std::io::Write::write_all(&mut writer, &buffer[..n]).map_err(|e| {
+                    let _ = std::fs::remove_file(&part_path);
+                    format!("Failed to write artifact chunk for {}: {}", pkg.name, e)
+                })?;
+            }
+
+            std::io::Write::flush(&mut writer)
+                .map_err(|e| format!("Failed to flush artifact file for {}: {}", pkg.name, e))?;
+            drop(writer);
+
+            std::fs::rename(&part_path, &artifact_path).map_err(|e| {
+                let _ = std::fs::remove_file(&part_path);
+                format!("Failed to finalize artifact file for {}: {}", pkg.name, e)
+            })?;
+
             let computed_hash = format!("{:x}", hasher.finalize());
 
-            let mut updated_pkg = pkg.clone();
-            updated_pkg.sha256 = computed_hash.clone();
-
-            let artifact_filename = format!("{}-{}.archive", safe_pkg_name, clean_version);
-            let artifact_path = pkg_dir.join(artifact_filename);
-            std::fs::write(&artifact_path, &bytes)
-                .map_err(|e| format!("Failed to write artifact file for {}: {}", pkg.name, e))?;
+            pkg.sha256 = computed_hash;
 
             let meta_path = pkg_dir.join("metadata.json");
-            let meta_data = serde_json::to_string_pretty(&updated_pkg).unwrap_or_default();
+            let meta_data = serde_json::to_string_pretty(&pkg).unwrap_or_default();
             std::fs::write(&meta_path, meta_data)
                 .map_err(|e| format!("Failed to write package metadata: {}", e))?;
 
             fetched_count += 1;
-            lockfile.packages.insert(map_key, updated_pkg);
             info!(name = %pkg.name, version = %clean_version, "Successfully downloaded, verified, and cached artifact");
         }
 

@@ -35,26 +35,121 @@ pub struct SidecarPairConfig {
     pub allow_network: bool,
 }
 
+struct ManagedChild {
+    child: Child,
+    #[cfg(unix)]
+    pgid: Option<i32>,
+}
+
+impl ManagedChild {
+    fn new(child: Child) -> Self {
+        #[cfg(unix)]
+        let pgid = child.id().map(|id| id as i32);
+        Self {
+            child,
+            #[cfg(unix)]
+            pgid,
+        }
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
+    }
+
+    async fn graceful_shutdown(&mut self, grace_period: Duration) {
+        if let Ok(Some(_)) = self.child.try_wait() {
+            return;
+        }
+
+        #[cfg(unix)]
+        {
+            if let Some(pgid) = self.pgid {
+                // SAFETY: `pgid` is a positive process group ID created via `cmd.process_group(0)` for this child.
+                unsafe {
+                    // Send SIGTERM to entire process group
+                    libc::killpg(pgid, libc::SIGTERM);
+                }
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            let _ = self.child.kill().await;
+            return;
+        }
+
+        tokio::select! {
+            _ = self.child.wait() => {
+                info!("Process exited gracefully");
+            }
+            _ = sleep(grace_period) => {
+                warn!(
+                    "Process failed to exit gracefully within {:?}; sending SIGKILL to process group",
+                    grace_period
+                );
+                #[cfg(unix)]
+                {
+                    if let Some(pgid) = self.pgid {
+                        // SAFETY: `pgid` is a positive process group ID created via `cmd.process_group(0)` for this child.
+                        unsafe {
+                            libc::killpg(pgid, libc::SIGKILL);
+                        }
+                    }
+                }
+                let _ = self.child.kill().await;
+            }
+        }
+    }
+}
+
+impl Drop for ManagedChild {
+    fn drop(&mut self) {
+        if let Ok(None) = self.child.try_wait() {
+            #[cfg(unix)]
+            if let Some(pgid) = self.pgid {
+                // SAFETY: `pgid` is a positive process group ID created via `cmd.process_group(0)` for this child.
+                unsafe {
+                    libc::killpg(pgid, libc::SIGKILL);
+                }
+            }
+            let _ = self.child.start_kill();
+        }
+    }
+}
+
 struct ActivePair {
     config: SidecarPairConfig,
     socket_path: PathBuf,
-    sidecar_child: Child,
-    primary_child: Option<Child>,
+    sidecar_children: Vec<(String, ManagedChild)>,
+    primary_child: Option<ManagedChild>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SidecarOrchestrator {
     state: Arc<RwLock<SidecarLifecycleState>>,
     active_pair: Arc<RwLock<Option<ActivePair>>>,
     active_socket: Arc<RwLock<Option<PathBuf>>>,
+    last_error: Arc<RwLock<Option<String>>>,
+    exit_tx: Arc<tokio::sync::watch::Sender<Option<std::process::ExitStatus>>>,
+    exit_rx: tokio::sync::watch::Receiver<Option<std::process::ExitStatus>>,
+}
+
+impl Default for SidecarOrchestrator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SidecarOrchestrator {
     pub fn new() -> Self {
+        let (exit_tx, exit_rx) = tokio::sync::watch::channel(None);
         Self {
             state: Arc::new(RwLock::new(SidecarLifecycleState::Idle)),
             active_pair: Arc::new(RwLock::new(None)),
             active_socket: Arc::new(RwLock::new(None)),
+            last_error: Arc::new(RwLock::new(None)),
+            exit_tx: Arc::new(exit_tx),
+            exit_rx,
         }
     }
 
@@ -64,6 +159,27 @@ impl SidecarOrchestrator {
 
     pub async fn current_socket_path(&self) -> Option<PathBuf> {
         self.active_socket.read().await.clone()
+    }
+
+    pub async fn last_error(&self) -> Option<String> {
+        self.last_error.read().await.clone()
+    }
+
+    pub async fn reset_state(&self) {
+        *self.state.write().await = SidecarLifecycleState::Idle;
+        *self.last_error.write().await = None;
+        let _ = self.exit_tx.send_replace(None);
+        let mut guard = self.active_pair.write().await;
+        if let Some(mut pair) = guard.take() {
+            if let Some(mut prim) = pair.primary_child.take() {
+                prim.graceful_shutdown(Duration::from_millis(500)).await;
+            }
+            for (_, mut sc) in pair.sidecar_children.into_iter().rev() {
+                sc.graceful_shutdown(Duration::from_millis(500)).await;
+            }
+            let _ = cleanup_stale_socket(&pair.socket_path);
+        }
+        *self.active_socket.write().await = None;
     }
 
     /// Prepare POSIX safe socket path and remove stale dead sockets from previous runs
@@ -95,6 +211,23 @@ impl SidecarOrchestrator {
         timeout_ms: u64,
         mut child: Option<&mut Child>,
     ) -> Result<(), String> {
+        if timeout_ms == 0 {
+            // Zero timeout explicitly requests skipping socket probe (process alive check only)
+            if let Some(ref mut c) = child {
+                if let Ok(Some(exit_status)) = c.try_wait() {
+                    return Err(format!(
+                        "Companion service process exited prematurely with status {}",
+                        exit_status
+                    ));
+                }
+            }
+            info!(
+                path = ?socket_path,
+                "Readiness gate timeout is 0ms; socket probe skipped, verified process active"
+            );
+            return Ok(());
+        }
+
         let start = std::time::Instant::now();
         let timeout = Duration::from_millis(timeout_ms);
         let mut backoff = Duration::from_millis(25);
@@ -112,7 +245,14 @@ impl SidecarOrchestrator {
 
             #[cfg(unix)]
             {
-                if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
+                let connected = tokio::time::timeout(
+                    Duration::from_millis(200),
+                    tokio::net::UnixStream::connect(socket_path),
+                )
+                .await
+                .is_ok_and(|res| res.is_ok());
+
+                if connected {
                     info!(
                         path = ?socket_path,
                         elapsed_ms = start.elapsed().as_millis(),
@@ -173,7 +313,112 @@ impl SidecarOrchestrator {
         ))
     }
 
-    /// Orchestrate KEP-753 sequential execution of primary app and companion sidecar.
+    async fn poll_socket_readiness_for_managed_children(
+        socket_path: &Path,
+        timeout_ms: u64,
+        children: &mut [(String, ManagedChild)],
+    ) -> Result<(), String> {
+        if timeout_ms == 0 {
+            for (id, child) in children.iter_mut() {
+                if let Ok(Some(exit_status)) = child.try_wait() {
+                    return Err(format!(
+                        "Companion service '{}' exited prematurely with status {}",
+                        id, exit_status
+                    ));
+                }
+            }
+            info!(
+                path = ?socket_path,
+                "Readiness gate timeout is 0ms; socket probe skipped, verified companion process(es) active"
+            );
+            return Ok(());
+        }
+
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_millis(timeout_ms);
+        let mut backoff = Duration::from_millis(25);
+
+        while start.elapsed() < timeout {
+            for (id, child) in children.iter_mut() {
+                if let Ok(Some(exit_status)) = child.try_wait() {
+                    return Err(format!(
+                        "Companion service '{}' exited prematurely with status {}",
+                        id, exit_status
+                    ));
+                }
+            }
+
+            #[cfg(unix)]
+            {
+                let connected = tokio::time::timeout(
+                    Duration::from_millis(200),
+                    tokio::net::UnixStream::connect(socket_path),
+                )
+                .await
+                .is_ok_and(|res| res.is_ok());
+
+                if connected {
+                    info!(
+                        path = ?socket_path,
+                        elapsed_ms = start.elapsed().as_millis(),
+                        "Sidecar IPC socket verified ready (KEP-753 Gate passed)"
+                    );
+                    return Ok(());
+                }
+            }
+
+            #[cfg(windows)]
+            {
+                let path_str = socket_path.to_string_lossy();
+                if path_str.starts_with(r"\\.\pipe\") {
+                    match std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(socket_path)
+                    {
+                        Ok(_) => {
+                            info!(
+                                path = ?socket_path,
+                                elapsed_ms = start.elapsed().as_millis(),
+                                "Sidecar Named Pipe verified ready"
+                            );
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            if let Some(code) = e.raw_os_error() {
+                                if code == 231 || code == 5 {
+                                    info!(
+                                        path = ?socket_path,
+                                        code = code,
+                                        elapsed_ms = start.elapsed().as_millis(),
+                                        "Sidecar Named Pipe verified ready (active server detected)"
+                                    );
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                } else if socket_path.exists() {
+                    info!(
+                        path = ?socket_path,
+                        elapsed_ms = start.elapsed().as_millis(),
+                        "Sidecar socket file verified ready"
+                    );
+                    return Ok(());
+                }
+            }
+
+            sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_millis(250));
+        }
+
+        Err(format!(
+            "Sidecar readiness probe TIMED OUT after {}ms waiting for socket {:?}",
+            timeout_ms, socket_path
+        ))
+    }
+
+    /// Orchestrate KEP-753 sequential execution of primary app and companion sidecars.
     pub async fn start_pair(&self, config: SidecarPairConfig) -> Result<PathBuf, String> {
         let current = self.current_state().await;
         if current == SidecarLifecycleState::Running
@@ -183,63 +428,102 @@ impl SidecarOrchestrator {
             return Err("A sidecar workspace pair is already active".to_string());
         }
 
+        // Reset previous error & exit channel
+        *self.last_error.write().await = None;
+        let _ = self.exit_tx.send_replace(None);
+
         // Prepare safe socket
         *self.state.write().await = SidecarLifecycleState::CleaningStaleSocket;
         let socket_id = &config.project.ipc.socket_id;
-        let sock_path = Self::prepare_safe_socket(&config.workspace_root, socket_id)?;
+        let sock_path = match Self::prepare_safe_socket(&config.workspace_root, socket_id) {
+            Ok(p) => p,
+            Err(e) => {
+                *self.state.write().await = SidecarLifecycleState::Failed;
+                *self.last_error.write().await = Some(e.clone());
+                return Err(e);
+            }
+        };
         *self.active_socket.write().await = Some(sock_path.clone());
 
         // Identify sidecar and primary members
-        let sidecar_member = config
-            .project
-            .sidecars()
-            .first()
-            .copied()
-            .cloned()
-            .ok_or_else(|| "No sidecar member found in workspace configuration".to_string())?;
+        let sidecar_members: Vec<WorkspaceMember> =
+            config.project.sidecars().into_iter().cloned().collect();
+        if sidecar_members.is_empty() {
+            let err = format!(
+                "No sidecar or service member found in workspace '{}' (has {} members). At least one member must have role 'sidecar' or 'service'.",
+                config.project.name,
+                config.project.members.len()
+            );
+            *self.state.write().await = SidecarLifecycleState::Failed;
+            *self.last_error.write().await = Some(err.clone());
+            return Err(err);
+        }
 
-        let primary_member = config
-            .project
-            .primary_member()
-            .cloned()
-            .ok_or_else(|| "No primary member found in workspace configuration".to_string())?;
-
-        // KEP-753 Phase I: Spawn Sidecar Process
-        *self.state.write().await = SidecarLifecycleState::SpawningSidecar;
-        info!(
-            sidecar_id = %sidecar_member.id,
-            socket = ?sock_path,
-            "KEP-753 Phase I: Spawning companion sidecar process"
-        );
-
-        let mut sidecar_child = match self
-            .spawn_member_process(&config.workspace_root, &sidecar_member, &sock_path, &config)
-            .await
-        {
-            Ok(child) => child,
-            Err(e) => {
+        let primary_member = match config.project.primary_member().cloned() {
+            Some(m) => m,
+            None => {
+                let err = format!(
+                    "No primary member found in workspace '{}'. At least one member must have role 'primary'.",
+                    config.project.name
+                );
                 *self.state.write().await = SidecarLifecycleState::Failed;
-                return Err(format!("Failed to spawn sidecar: {}", e));
+                *self.last_error.write().await = Some(err.clone());
+                return Err(err);
             }
         };
+
+        let abort_grace =
+            Duration::from_millis(config.project.ipc.drain_timeout_ms.clamp(500, 2000));
+
+        // KEP-753 Phase I: Spawn all declared Sidecar / Service Processes
+        *self.state.write().await = SidecarLifecycleState::SpawningSidecar;
+        let mut sidecar_children: Vec<(String, ManagedChild)> =
+            Vec::with_capacity(sidecar_members.len());
+
+        for sidecar_member in &sidecar_members {
+            info!(
+                sidecar_id = %sidecar_member.id,
+                socket = ?sock_path,
+                "KEP-753 Phase I: Spawning companion sidecar process"
+            );
+
+            match self
+                .spawn_member_process(&config.workspace_root, sidecar_member, &sock_path, &config)
+                .await
+            {
+                Ok(child) => {
+                    sidecar_children.push((sidecar_member.id.clone(), child));
+                }
+                Err(e) => {
+                    let err = format!("Failed to spawn sidecar '{}': {}", sidecar_member.id, e);
+                    *self.state.write().await = SidecarLifecycleState::Failed;
+                    *self.last_error.write().await = Some(err.clone());
+                    for (_, mut prev_sc) in sidecar_children.into_iter().rev() {
+                        prev_sc.graceful_shutdown(abort_grace).await;
+                    }
+                    let _ = cleanup_stale_socket(&sock_path);
+                    return Err(err);
+                }
+            }
+        }
 
         // KEP-753 Readiness Probe Gate (Fail-fast with child process monitoring)
         *self.state.write().await = SidecarLifecycleState::ProbingSocketReadiness;
         let readiness_timeout = config.project.ipc.readiness_timeout_ms;
-        let abort_grace =
-            Duration::from_millis(config.project.ipc.drain_timeout_ms.clamp(500, 2000));
 
-        if let Err(err) = Self::poll_socket_readiness_with_child(
+        if let Err(err) = Self::poll_socket_readiness_for_managed_children(
             &sock_path,
             readiness_timeout,
-            Some(&mut sidecar_child),
+            &mut sidecar_children,
         )
         .await
         {
             warn!(error = %err, "Readiness probe failed; aborting startup");
             *self.state.write().await = SidecarLifecycleState::Failed;
-            // Clean up sidecar process
-            Self::terminate_child_process(sidecar_child, abort_grace).await;
+            *self.last_error.write().await = Some(err.clone());
+            for (_, mut sc) in sidecar_children.into_iter().rev() {
+                sc.graceful_shutdown(abort_grace).await;
+            }
             let _ = cleanup_stale_socket(&sock_path);
             return Err(err);
         }
@@ -260,21 +544,26 @@ impl SidecarOrchestrator {
         {
             Ok(child) => Some(child),
             Err(e) => {
-                warn!(error = %e, "Failed to spawn primary application; tearing down sidecar");
+                let err = format!("Failed to spawn primary app '{}': {}", primary_member.id, e);
+                warn!(error = %e, "Failed to spawn primary application; tearing down sidecar(s)");
                 *self.state.write().await = SidecarLifecycleState::Failed;
-                Self::terminate_child_process(sidecar_child, abort_grace).await;
+                *self.last_error.write().await = Some(err.clone());
+                for (_, mut sc) in sidecar_children.into_iter().rev() {
+                    sc.graceful_shutdown(abort_grace).await;
+                }
                 let _ = cleanup_stale_socket(&sock_path);
-                return Err(format!("Failed to spawn primary app: {}", e));
+                return Err(err);
             }
         };
 
         // Transition to Running
         *self.state.write().await = SidecarLifecycleState::Running;
+        *self.last_error.write().await = None;
 
         let active = ActivePair {
             config,
             socket_path: sock_path.clone(),
-            sidecar_child,
+            sidecar_children,
             primary_child,
         };
 
@@ -284,41 +573,51 @@ impl SidecarOrchestrator {
         let state_ref = self.state.clone();
         let pair_ref = self.active_pair.clone();
         let socket_ref = self.active_socket.clone();
+        let last_error_ref = self.last_error.clone();
+        let exit_tx_ref = self.exit_tx.clone();
 
         tokio::spawn(async move {
-            Self::watchdog_loop(state_ref, pair_ref, socket_ref).await;
+            Self::watchdog_loop(state_ref, pair_ref, socket_ref, last_error_ref, exit_tx_ref).await;
         });
 
         Ok(sock_path)
     }
 
     /// KEP-753 Phase III: Reverse Graceful Teardown Sequence.
-    /// Terminates primary application first $\rightarrow$ allows drain window $\rightarrow$ terminates sidecar.
+    /// Terminates primary application first $\rightarrow$ allows drain window $\rightarrow$ terminates sidecars.
     pub async fn stop_pair(&self) -> Result<(), String> {
         let mut guard = self.active_pair.write().await;
         let Some(mut pair) = guard.take() else {
             *self.state.write().await = SidecarLifecycleState::Stopped;
+            self.exit_tx.send_modify(|_| {});
             return Ok(());
         };
+        drop(guard);
 
         let drain_timeout = Duration::from_millis(pair.config.project.ipc.drain_timeout_ms);
 
         // Drain & Terminate Primary App
         *self.state.write().await = SidecarLifecycleState::DrainingPrimary;
-        if let Some(primary_child) = pair.primary_child.take() {
+        if let Some(mut primary_child) = pair.primary_child.take() {
             info!("KEP-753 Phase III: Signaling primary application to drain and terminate");
-            Self::terminate_child_process(primary_child, drain_timeout).await;
+            primary_child.graceful_shutdown(drain_timeout).await;
         }
 
-        // Terminate Sidecar Process
+        // Terminate Sidecar Processes in reverse startup order
         *self.state.write().await = SidecarLifecycleState::TerminatingSidecar;
-        info!("KEP-753 Phase III: Terminating companion sidecar process");
-        Self::terminate_child_process(pair.sidecar_child, drain_timeout).await;
+        for (id, mut sc) in pair.sidecar_children.into_iter().rev() {
+            info!(
+                sidecar_id = %id,
+                "KEP-753 Phase III: Terminating companion sidecar process"
+            );
+            sc.graceful_shutdown(drain_timeout).await;
+        }
 
         // Unlink socket
         let _ = cleanup_stale_socket(&pair.socket_path);
         *self.active_socket.write().await = None;
         *self.state.write().await = SidecarLifecycleState::Stopped;
+        self.exit_tx.send_modify(|_| {});
 
         info!("Sidecar workspace pair stopped cleanly; zero residual sockets");
         Ok(())
@@ -330,62 +629,50 @@ impl SidecarOrchestrator {
         member: &WorkspaceMember,
         sock_path: &Path,
         config: &SidecarPairConfig,
-    ) -> Result<Child, String> {
-        let member_dir = if member.path.is_absolute() {
-            member.path.clone()
-        } else {
-            workspace_root.join(&member.path)
-        };
-
-        let exec_cmd = member.exec_command.clone().unwrap_or_else(|| {
-            if member_dir.join("package.json").is_file() {
-                "npm".to_string()
-            } else if member_dir.join("src-tauri/Cargo.toml").is_file()
-                || member_dir.join("Cargo.toml").is_file()
-            {
-                "cargo".to_string()
-            } else if member_dir.join("requirements.txt").is_file()
-                || member_dir.join("pyproject.toml").is_file()
-            {
-                if cfg!(windows) {
-                    "python".to_string()
+    ) -> Result<ManagedChild, String> {
+        let member_dir = config
+            .project
+            .resolve_member_layouts(workspace_root, None)
+            .into_iter()
+            .find(|l| l.member.id == member.id)
+            .map(|l| l.host_path)
+            .unwrap_or_else(|| {
+                if member.path.is_absolute() {
+                    member.path.clone()
                 } else {
-                    "python3".to_string()
+                    workspace_root.join(&member.path)
                 }
-            } else {
-                match member.role {
-                    MemberRole::Primary | MemberRole::Member => {
-                        if cfg!(windows) {
-                            "cmd.exe".to_string()
-                        } else {
-                            "/bin/sh".to_string()
-                        }
-                    }
-                    MemberRole::Sidecar | MemberRole::Service => {
-                        if cfg!(windows) {
-                            "python".to_string()
-                        } else {
-                            "python3".to_string()
-                        }
-                    }
-                }
-            }
-        });
+            });
+        let member_dir = std::fs::canonicalize(&member_dir).unwrap_or(member_dir);
+        if !member_dir.exists() {
+            return Err(format!(
+                "Workspace member directory does not exist: {:?}",
+                member_dir
+            ));
+        }
+
+        let (exec_cmd, default_args) = member.resolve_command(&member_dir, workspace_root)?;
 
         let mut cmd = Command::new(&exec_cmd);
-
-        if let Some(ref args) = member.exec_args {
-            cmd.args(args);
+        if !default_args.is_empty() {
+            cmd.args(&default_args);
         }
 
         // Put process in its own process group on Unix so children don't become zombies
         #[cfg(unix)]
         cmd.process_group(0);
 
-        // Inject socket environment variable
-        cmd.env(&config.project.ipc.env_var, sock_path);
-        cmd.env("DMZ_SIDECAR_SOCK", sock_path);
         cmd.current_dir(&member_dir);
+
+        // Inject unified hermetic environment (toolchains, .venv, node_modules/.bin, IPC socket, offline flags)
+        let envs = config.project.build_member_env(
+            workspace_root,
+            &member_dir,
+            sock_path,
+            config.allow_network,
+        );
+        cmd.envs(envs);
+        cmd.env_remove("PYTHONHOME");
 
         // Pipe stdout and stderr for multiplexed logging
         cmd.stdout(std::process::Stdio::piped());
@@ -422,70 +709,66 @@ impl SidecarOrchestrator {
             });
         }
 
-        Ok(child)
+        Ok(ManagedChild::new(child))
     }
 
-    async fn terminate_child_process(mut child: Child, grace_period: Duration) {
-        #[cfg(unix)]
-        {
-            if let Some(pid) = child.id() {
-                unsafe {
-                    // Send SIGTERM to entire process group
-                    libc::killpg(pid as i32, libc::SIGTERM);
-                }
-            }
-        }
-
-        #[cfg(windows)]
-        {
-            let _ = child.kill().await;
-            return;
-        }
-
-        tokio::select! {
-            _ = child.wait() => {
-                info!("Process exited gracefully");
-            }
-            _ = sleep(grace_period) => {
-                warn!("Process failed to exit gracefully within {:?}; sending SIGKILL to process group", grace_period);
-                #[cfg(unix)]
-                {
-                    if let Some(pid) = child.id() {
-                        unsafe {
-                            libc::killpg(pid as i32, libc::SIGKILL);
-                        }
-                    }
-                }
-                let _ = child.kill().await;
-            }
-        }
-    }
-
-    /// Awaits termination of the primary child process if active
+    /// Awaits termination of the primary child process without removing its handle from `ActivePair`.
+    /// This ensures `stop_pair()` can still drain and terminate the primary process group on `Ctrl+C`.
     pub async fn wait_for_exit(&self) -> Result<std::process::ExitStatus, String> {
-        let mut child_to_wait = {
-            let mut guard = self.active_pair.write().await;
-            if let Some(ref mut pair) = *guard {
-                pair.primary_child.take()
-            } else {
-                None
-            }
-        };
+        let mut rx = self.exit_rx.clone();
 
-        if let Some(ref mut child) = child_to_wait {
-            child.wait().await.map_err(|e| format!("Wait error: {}", e))
-        } else {
-            Err("No active primary child to wait on".to_string())
+        if let Some(status) = *rx.borrow_and_update() {
+            return Ok(status);
         }
+
+        {
+            let guard = self.active_pair.read().await;
+            let has_primary = guard.as_ref().is_some_and(|p| p.primary_child.is_some());
+            if !has_primary {
+                if let Some(status) = *rx.borrow() {
+                    return Ok(status);
+                }
+                return Err("No active primary child to wait on".to_string());
+            }
+        }
+
+        loop {
+            if rx.changed().await.is_err() {
+                break;
+            }
+            if let Some(status) = *rx.borrow_and_update() {
+                return Ok(status);
+            }
+            let current_state = *self.state.read().await;
+            if current_state == SidecarLifecycleState::Failed {
+                let err = self
+                    .last_error
+                    .read()
+                    .await
+                    .clone()
+                    .unwrap_or_else(|| "Companion sidecar failed".to_string());
+                return Err(err);
+            }
+            if current_state == SidecarLifecycleState::Stopped {
+                if let Some(status) = *rx.borrow() {
+                    return Ok(status);
+                }
+                return Err("Workspace pair stopped".to_string());
+            }
+        }
+
+        Err("Watchdog channel closed before primary exit".to_string())
     }
 
     async fn watchdog_loop(
         state: Arc<RwLock<SidecarLifecycleState>>,
         pair: Arc<RwLock<Option<ActivePair>>>,
         socket: Arc<RwLock<Option<PathBuf>>>,
+        last_error: Arc<RwLock<Option<String>>>,
+        exit_tx: Arc<tokio::sync::watch::Sender<Option<std::process::ExitStatus>>>,
     ) {
         loop {
-            sleep(Duration::from_millis(500)).await;
+            sleep(Duration::from_millis(50)).await;
 
             let mut guard = pair.write().await;
             let Some(ref mut active) = *guard else {
@@ -499,29 +782,59 @@ impl SidecarOrchestrator {
                         status = ?status.code(),
                         "Primary application exited; triggering sidecar teardown"
                     );
+                    let pair_val = guard.take().unwrap();
                     drop(guard);
-                    // Trigger teardown
-                    let mut guard = pair.write().await;
-                    if let Some(pair_val) = guard.take() {
-                        let drain_timeout =
-                            Duration::from_millis(pair_val.config.project.ipc.drain_timeout_ms);
-                        *state.write().await = SidecarLifecycleState::TerminatingSidecar;
-                        Self::terminate_child_process(pair_val.sidecar_child, drain_timeout).await;
-                        let _ = cleanup_stale_socket(&pair_val.socket_path);
-                        *socket.write().await = None;
-                        *state.write().await = SidecarLifecycleState::Stopped;
+
+                    let drain_timeout =
+                        Duration::from_millis(pair_val.config.project.ipc.drain_timeout_ms);
+                    *state.write().await = SidecarLifecycleState::TerminatingSidecar;
+                    for (_, mut sc) in pair_val.sidecar_children.into_iter().rev() {
+                        sc.graceful_shutdown(drain_timeout).await;
                     }
+                    let _ = cleanup_stale_socket(&pair_val.socket_path);
+                    *socket.write().await = None;
+                    *state.write().await = SidecarLifecycleState::Stopped;
+                    let _ = exit_tx.send(Some(status));
                     break;
                 }
             }
 
-            // Check whether sidecar crashed unexpectedly
-            if let Ok(Some(status)) = active.sidecar_child.try_wait() {
+            // Check whether any companion sidecar crashed unexpectedly
+            let mut crashed_sidecar = None;
+            for (id, sc) in active.sidecar_children.iter_mut() {
+                if let Ok(Some(status)) = sc.try_wait() {
+                    crashed_sidecar = Some((id.clone(), status));
+                    break;
+                }
+            }
+
+            if let Some((crashed_id, status)) = crashed_sidecar {
+                let err = format!(
+                    "Companion sidecar '{}' crashed unexpectedly with status {:?}",
+                    crashed_id,
+                    status.code()
+                );
                 error!(
+                    sidecar_id = %crashed_id,
                     exit_code = ?status.code(),
                     "Companion sidecar crashed unexpectedly while primary application was active!"
                 );
+                let mut pair_val = guard.take().unwrap();
+                drop(guard);
+
+                let drain_timeout =
+                    Duration::from_millis(pair_val.config.project.ipc.drain_timeout_ms);
+                if let Some(mut prim) = pair_val.primary_child.take() {
+                    prim.graceful_shutdown(drain_timeout).await;
+                }
+                for (_, mut sc) in pair_val.sidecar_children.into_iter().rev() {
+                    sc.graceful_shutdown(drain_timeout).await;
+                }
+                let _ = cleanup_stale_socket(&pair_val.socket_path);
+                *socket.write().await = None;
+                *last_error.write().await = Some(err);
                 *state.write().await = SidecarLifecycleState::Failed;
+                exit_tx.send_modify(|_| {});
                 break;
             }
         }

@@ -275,82 +275,72 @@ pub fn run_resolve(
             eprintln!("\x1b[33m[DMZ POSIX ADVISORY]\x1b[0m {}", posix_warn);
         }
 
-        let prim_lock =
-            match ResolverEngine::resolve_workspace_with_target(&workspace, target.clone()) {
-                Ok(lock) => lock,
+        let manifest_path = workspace.join("dmz-workspace.toml");
+        let project_cfg = if manifest_path.is_file() {
+            match dmz_core::workspace::WorkspaceProjectConfig::load_from_file(&manifest_path) {
+                Ok(cfg) => cfg,
                 Err(e) => {
-                    error!("Primary workspace dependency resolution failed: {}", e);
+                    error!("Failed to parse {:?}: {}", manifest_path, e);
                     exit(1);
                 }
-            };
-
-        let sidecar_lock = match ResolverEngine::resolve_workspace_with_target(sc_path, target) {
-            Ok(lock) => lock,
-            Err(e) => {
-                error!("Sidecar workspace dependency resolution failed: {}", e);
-                exit(1);
             }
-        };
+        } else {
+            let ws_canon = std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
+            let sc_canon = std::fs::canonicalize(sc_path).unwrap_or_else(|_| sc_path.clone());
+            let prim_id = ws_canon
+                .file_name()
+                .and_then(|n| n.to_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("primary");
+            let sc_id = sc_canon
+                .file_name()
+                .and_then(|n| n.to_str())
+                .filter(|s| !s.is_empty() && *s != prim_id)
+                .unwrap_or("sidecar");
 
-        // Merge locked packages with workspace member IDs
-        let mut merged_packages = Vec::new();
-        for (_, mut pkg) in prim_lock.packages {
-            pkg.member_id = Some("primary".to_string());
-            merged_packages.push(pkg);
-        }
-        for (_, mut pkg) in sidecar_lock.packages {
-            pkg.member_id = Some("sidecar".to_string());
-            merged_packages.push(pkg);
-        }
-
-        let mut unified_lock = dmz_core::resolver::lockfile::DmzLockfile::new(merged_packages);
-        unified_lock.add_workspace(dmz_core::resolver::lockfile::WorkspaceMetadata {
-            id: "primary".to_string(),
-            path: workspace.display().to_string(),
-            role: "primary".to_string(),
-            ecosystem: None,
-            closure_signature: None,
-        });
-        unified_lock.add_workspace(dmz_core::resolver::lockfile::WorkspaceMetadata {
-            id: "sidecar".to_string(),
-            path: sc_path.display().to_string(),
-            role: "sidecar".to_string(),
-            ecosystem: None,
-            closure_signature: None,
-        });
-
-        if let Err(e) = unified_lock.save(&effective_output) {
-            error!("Failed to save lockfile: {}", e);
-            exit(1);
-        }
-
-        // Auto-generate dmz-workspace.toml if absent
-        let manifest_path = workspace.join("dmz-workspace.toml");
-        if !manifest_path.exists() {
-            let primary_m = dmz_core::workspace::WorkspaceMember::new(
-                "primary",
-                &workspace,
+            let mut primary_m = dmz_core::workspace::WorkspaceMember::new(
+                prim_id,
+                Path::new("."),
                 dmz_core::workspace::MemberRole::Primary,
             );
-            let sidecar_m = dmz_core::workspace::WorkspaceMember::new(
-                "sidecar",
+            primary_m.populate_detected_defaults(&ws_canon, &ws_canon);
+
+            let mut sidecar_m = dmz_core::workspace::WorkspaceMember::new(
+                sc_id,
                 sc_path,
                 dmz_core::workspace::MemberRole::Sidecar,
             );
-            let proj_name = workspace
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("project");
-            let project_cfg = dmz_core::workspace::WorkspaceProjectConfig::new(
-                proj_name,
+            sidecar_m.populate_detected_defaults(&sc_canon, &ws_canon);
+
+            let cfg = dmz_core::workspace::WorkspaceProjectConfig::new(
+                prim_id,
                 vec![primary_m, sidecar_m],
             );
-            if let Ok(()) = project_cfg.save_to_file(&manifest_path) {
+            if let Ok(()) = cfg.save_to_file(&manifest_path) {
                 info!(
                     "Auto-generated dual-repo project manifest at {:?}",
                     manifest_path
                 );
             }
+            cfg
+        };
+
+        let unified_lock = match ResolverEngine::resolve_multi_workspace(
+            &workspace,
+            &project_cfg,
+            Some(&manifest_path),
+            target,
+        ) {
+            Ok(lock) => lock,
+            Err(e) => {
+                error!("Multi-workspace dependency resolution failed: {}", e);
+                exit(1);
+            }
+        };
+
+        if let Err(e) = unified_lock.save(&effective_output) {
+            error!("Failed to save lockfile: {}", e);
+            exit(1);
         }
 
         info!(
@@ -601,11 +591,66 @@ pub fn run_bundle(args: BundleArgs) {
         args.store
     };
 
+    let multi_workspace =
+        dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(&ws_canon)
+            .map(|(cfg, _)| cfg)
+            .or_else(|| {
+                args.sidecar.as_ref().map(|sc| {
+                    let sc_canon = std::fs::canonicalize(sc).unwrap_or_else(|_| sc.clone());
+                    let prim_id = ws_canon
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("primary");
+                    let sc_id = sc_canon
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .filter(|s| !s.is_empty() && *s != prim_id)
+                        .unwrap_or("sidecar");
+
+                    let mut primary = dmz_core::workspace::WorkspaceMember::new(
+                        prim_id,
+                        Path::new("."),
+                        dmz_core::workspace::MemberRole::Primary,
+                    );
+                    primary.populate_detected_defaults(&ws_canon, &ws_canon);
+
+                    let mut sidecar_m = dmz_core::workspace::WorkspaceMember::new(
+                        sc_id,
+                        sc,
+                        dmz_core::workspace::MemberRole::Sidecar,
+                    );
+                    sidecar_m.populate_detected_defaults(&sc_canon, &ws_canon);
+
+                    let cfg = dmz_core::workspace::WorkspaceProjectConfig::new(
+                        prim_id,
+                        vec![primary, sidecar_m],
+                    );
+                    let manifest_path = ws_canon.join("dmz-workspace.toml");
+                    if !manifest_path.exists() {
+                        let _ = cfg.save_to_file(&manifest_path);
+                    }
+                    cfg
+                })
+            });
+
     // Resolve manifests if lockfile is missing or refresh_lock is requested
     let should_resolve = args.refresh_lock || !effective_lockfile.exists();
     if should_resolve {
         info!("Resolving workspace dependency manifests at {:?}", ws_canon);
-        match ResolverEngine::resolve_workspace_with_target(&ws_canon, args.target.clone()) {
+        let resolve_res = if let Some(ref project_cfg) = multi_workspace {
+            let manifest_file = ws_canon.join("dmz-workspace.toml");
+            ResolverEngine::resolve_multi_workspace(
+                &ws_canon,
+                project_cfg,
+                manifest_file.is_file().then_some(manifest_file.as_path()),
+                args.target.clone(),
+            )
+        } else {
+            ResolverEngine::resolve_workspace_with_target(&ws_canon, args.target.clone())
+        };
+
+        match resolve_res {
             Ok(resolved_lockfile) => {
                 if let Err(e) = resolved_lockfile.save(&effective_lockfile) {
                     error!("Failed to write lockfile {:?}: {}", effective_lockfile, e);
@@ -656,32 +701,6 @@ pub fn run_bundle(args: BundleArgs) {
     } else {
         args.output
     };
-
-    let multi_workspace =
-        dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(&ws_canon)
-            .map(|(cfg, _)| cfg)
-            .or_else(|| {
-                args.sidecar.as_ref().map(|sc| {
-                    let primary = dmz_core::workspace::WorkspaceMember::new(
-                        "primary",
-                        &ws_canon,
-                        dmz_core::workspace::MemberRole::Primary,
-                    );
-                    let sidecar_m = dmz_core::workspace::WorkspaceMember::new(
-                        "sidecar",
-                        sc,
-                        dmz_core::workspace::MemberRole::Sidecar,
-                    );
-                    let proj_name = ws_canon
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("project");
-                    dmz_core::workspace::WorkspaceProjectConfig::new(
-                        proj_name,
-                        vec![primary, sidecar_m],
-                    )
-                })
-            });
 
     let config = ExportConfig {
         workspace_path: ws_canon,
@@ -897,65 +916,85 @@ pub fn run_import(
                 "Running automated ecosystem verification for workspace {:?}",
                 ws_canon
             );
-            let registry = EcosystemRegistry::new();
-            let active = registry.discover_active(&ws_canon);
-            for eco in active {
-                if let Some(cmd) = eco.verification_command(&ws_canon) {
-                    info!(
-                        "Running verification for '{}': {} {}",
-                        eco.name(),
-                        cmd.program,
-                        cmd.args.join(" ")
-                    );
+            verify_workspace_ecosystems(&ws_canon, &effective_store, no_sandbox);
+            info!("All ecosystem verifications passed successfully!");
+        }
+    }
+}
 
-                    // Inject bundled toolchain paths if available
-                    let mut toolchain_envs = std::collections::HashMap::new();
-                    dmz_core::toolchain::ToolchainPackager::inject_toolchain_paths(
-                        &ws_canon,
-                        &mut toolchain_envs,
-                    );
+fn verify_workspace_ecosystems(ws_canon: &Path, closure_path: &Path, no_sandbox: bool) {
+    let registry = EcosystemRegistry::new();
+    let mut member_roots = Vec::new();
+    if let Some((project, manifest_path)) =
+        dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(ws_canon)
+    {
+        for layout in project.resolve_member_layouts(ws_canon, Some(&manifest_path)) {
+            if layout.host_path.is_dir() && !member_roots.contains(&layout.host_path) {
+                member_roots.push(layout.host_path);
+            }
+        }
+    }
+    if member_roots.is_empty() {
+        member_roots.push(ws_canon.to_path_buf());
+    }
 
-                    let status_res = if no_sandbox {
-                        info!("Executing verification unsandboxed (--no-sandbox requested)");
-                        let mut proc_cmd = std::process::Command::new(&cmd.program);
-                        proc_cmd.args(&cmd.args).current_dir(&ws_canon);
-                        for (k, v) in toolchain_envs {
-                            proc_cmd.env(k, v);
-                        }
-                        proc_cmd.status().map_err(|e| e.to_string())
-                    } else {
-                        info!("Executing verification inside zero-network sandbox");
-                        let config = SandboxConfig {
-                            workspace_path: ws_canon.clone(),
-                            closure_path: effective_store.clone(),
-                            command: cmd.program.clone(),
-                            args: cmd.args.clone(),
-                            envs: toolchain_envs.into_iter().collect(),
-                            allow_network: false,
-                            ipc_socket_path: None,
-                        };
-                        run_sandboxed(&config).map_err(|e| e.to_string())
+    for member_root in member_roots {
+        let active = registry.discover_active(&member_root);
+        for eco in active {
+            if let Some(cmd) = eco.verification_command(&member_root) {
+                info!(
+                    "Running verification for '{}' in {:?}: {} {}",
+                    eco.name(),
+                    member_root,
+                    cmd.program,
+                    cmd.args.join(" ")
+                );
+
+                let mut toolchain_envs = std::collections::HashMap::new();
+                dmz_core::toolchain::ToolchainPackager::inject_toolchain_paths(
+                    ws_canon,
+                    &mut toolchain_envs,
+                );
+
+                let status_res = if no_sandbox {
+                    info!("Executing verification unsandboxed (--no-sandbox requested)");
+                    let mut proc_cmd = std::process::Command::new(&cmd.program);
+                    proc_cmd.args(&cmd.args).current_dir(&member_root);
+                    for (k, v) in toolchain_envs {
+                        proc_cmd.env(k, v);
+                    }
+                    proc_cmd.status().map_err(|e| e.to_string())
+                } else {
+                    info!("Executing verification inside zero-network sandbox");
+                    let config = SandboxConfig {
+                        workspace_path: member_root.clone(),
+                        closure_path: closure_path.to_path_buf(),
+                        command: cmd.program.clone(),
+                        args: cmd.args.clone(),
+                        envs: toolchain_envs.into_iter().collect(),
+                        allow_network: false,
+                        ipc_socket_path: None,
                     };
+                    run_sandboxed(&config).map_err(|e| e.to_string())
+                };
 
-                    match status_res {
-                        Ok(status) => {
-                            if !status.success() {
-                                error!("Ecosystem verification failed for '{}'", eco.name());
-                                exit(1);
-                            }
-                        }
-                        Err(e) => {
-                            error!(
-                                "Failed to execute sandboxed verification command for '{}': {}. Pass --no-sandbox to bypass sandbox containment if required by your environment.",
-                                eco.name(),
-                                e
-                            );
+                match status_res {
+                    Ok(status) => {
+                        if !status.success() {
+                            error!("Ecosystem verification failed for '{}'", eco.name());
                             exit(1);
                         }
                     }
+                    Err(e) => {
+                        error!(
+                            "Failed to execute sandboxed verification command for '{}': {}. Pass --no-sandbox to bypass sandbox containment if required by your environment.",
+                            eco.name(),
+                            e
+                        );
+                        exit(1);
+                    }
                 }
             }
-            info!("All ecosystem verifications passed successfully!");
         }
     }
 }
@@ -989,23 +1028,34 @@ pub fn run_shell(
         );
     }
 
-    // Resolve shell binary: user option -> $SHELL -> /bin/sh
-    let shell_cmd =
-        shell.unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()));
+    // Resolve shell binary cross-platform: user option -> $SHELL/$COMSPEC -> /bin/sh or cmd.exe
+    let shell_cmd = shell.unwrap_or_else(|| {
+        if cfg!(windows) {
+            std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
+        } else {
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+        }
+    });
 
-    // Assemble command arguments (-c string vs interactive)
+    // Assemble command arguments (/C vs -c string vs interactive)
     let mut final_args = args;
     if let Some(cmd_str) = command {
-        final_args.insert(0, "-c".to_string());
+        let exec_flag = if cfg!(windows) && shell_cmd.to_lowercase().contains("cmd") {
+            "/C"
+        } else {
+            "-c"
+        };
+        final_args.insert(0, exec_flag.to_string());
         final_args.insert(1, cmd_str);
     }
 
     // Prepare environment variables
-    let mut envs: std::collections::HashMap<String, String> = std::env::vars().collect();
     let abs_workspace = std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
-    envs.insert(
-        "DMZ_WORKSPACE".to_string(),
-        abs_workspace.display().to_string(),
+    let mut envs = dmz_core::workspace::WorkspaceProjectConfig::default().build_member_env(
+        &abs_workspace,
+        &abs_workspace,
+        std::path::Path::new(""),
+        allow_network,
     );
     envs.insert(
         "DMZ_STORE".to_string(),
@@ -1018,17 +1068,6 @@ pub fn run_shell(
             abs_workspace.join(".dmz/store").display().to_string()
         },
     );
-    envs.insert(
-        "CARGO_HOME".to_string(),
-        abs_workspace.join(".cargo").display().to_string(),
-    );
-    envs.insert(
-        "NODE_PATH".to_string(),
-        abs_workspace.join("node_modules").display().to_string(),
-    );
-
-    // Inject bundled toolchain paths if available (.dmz/toolchains/*/bin)
-    dmz_core::toolchain::ToolchainPackager::inject_toolchain_paths(&abs_workspace, &mut envs);
 
     let is_sandbox = !no_sandbox;
     envs.insert(
@@ -1186,64 +1225,8 @@ pub fn run_ecosystem(action: EcosystemAction) {
         } => {
             info!("Verifying workspace ecosystems at {:?}", workspace);
             let ws_canon = std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
-            let registry = EcosystemRegistry::new();
-            let active = registry.discover_active(&ws_canon);
-            for eco in active {
-                if let Some(cmd) = eco.verification_command(&ws_canon) {
-                    info!(
-                        "Running verification for '{}': {} {}",
-                        eco.name(),
-                        cmd.program,
-                        cmd.args.join(" ")
-                    );
-
-                    let mut toolchain_envs = std::collections::HashMap::new();
-                    dmz_core::toolchain::ToolchainPackager::inject_toolchain_paths(
-                        &ws_canon,
-                        &mut toolchain_envs,
-                    );
-
-                    let status_res = if no_sandbox {
-                        info!("Executing verification unsandboxed (--no-sandbox requested)");
-                        let mut proc_cmd = std::process::Command::new(&cmd.program);
-                        proc_cmd.args(&cmd.args).current_dir(&ws_canon);
-                        for (k, v) in toolchain_envs {
-                            proc_cmd.env(k, v);
-                        }
-                        proc_cmd.status().map_err(|e| e.to_string())
-                    } else {
-                        info!("Executing verification inside zero-network sandbox");
-                        let closure_path = ws_canon.join(".dmz/store");
-                        let config = SandboxConfig {
-                            workspace_path: ws_canon.clone(),
-                            closure_path,
-                            command: cmd.program.clone(),
-                            args: cmd.args.clone(),
-                            envs: toolchain_envs.into_iter().collect(),
-                            allow_network: false,
-                            ipc_socket_path: None,
-                        };
-                        run_sandboxed(&config).map_err(|e| e.to_string())
-                    };
-
-                    match status_res {
-                        Ok(status) => {
-                            if !status.success() {
-                                error!("Ecosystem verification failed for '{}'", eco.name());
-                                exit(1);
-                            }
-                        }
-                        Err(e) => {
-                            error!(
-                                "Failed to execute sandboxed verification command for '{}': {}. Pass --no-sandbox to bypass sandbox containment if required by your environment.",
-                                eco.name(),
-                                e
-                            );
-                            exit(1);
-                        }
-                    }
-                }
-            }
+            let closure_path = ws_canon.join(".dmz/store");
+            verify_workspace_ecosystems(&ws_canon, &closure_path, no_sandbox);
             info!("All ecosystem verifications passed successfully!");
         }
     }
@@ -1306,71 +1289,16 @@ pub fn run_run(args: RunArgs) {
         (cfg, args.workspace.clone())
     };
 
-    // Auto-detect or apply command override for all members without an explicit command
-    for member in &mut project_config.members {
-        if member.role == dmz_core::workspace::MemberRole::Primary {
-            if let Some(ref cmd) = args.command {
+    // Apply CLI command override to the primary member if provided;
+    // otherwise SidecarOrchestrator delegates to WorkspaceMember::resolve_command.
+    if let Some(ref cmd) = args.command {
+        for member in &mut project_config.members {
+            if member.role == dmz_core::workspace::MemberRole::Primary {
                 member.exec_command = Some(cmd.clone());
                 if !args.args.is_empty() {
                     member.exec_args = Some(args.args.clone());
                 }
-                continue;
-            }
-        }
-
-        if member.exec_command.is_none() {
-            let member_dir = if member.path.is_absolute() {
-                member.path.clone()
-            } else {
-                effective_workspace_root.join(&member.path)
-            };
-            let member_dir = std::fs::canonicalize(&member_dir).unwrap_or(member_dir);
-
-            let pkg_json_path = member_dir.join("package.json");
-            let cargo_toml_path = member_dir.join("Cargo.toml");
-            let tauri_cargo_path = member_dir.join("src-tauri/Cargo.toml");
-            let py_req_path = member_dir.join("requirements.txt");
-            let pyproject_path = member_dir.join("pyproject.toml");
-
-            if pkg_json_path.is_file() {
-                if let Ok(content) = std::fs::read_to_string(&pkg_json_path) {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                        let scripts = val.get("scripts").and_then(|s| s.as_object());
-                        if let Some(sc) = scripts {
-                            if sc.contains_key("tauri") {
-                                member.exec_command = Some("npm".to_string());
-                                member.exec_args = Some(vec![
-                                    "run".to_string(),
-                                    "tauri".to_string(),
-                                    "dev".to_string(),
-                                ]);
-                            } else if sc.contains_key("dev") {
-                                member.exec_command = Some("npm".to_string());
-                                member.exec_args = Some(vec!["run".to_string(), "dev".to_string()]);
-                            } else if sc.contains_key("start") {
-                                member.exec_command = Some("npm".to_string());
-                                member.exec_args =
-                                    Some(vec!["run".to_string(), "start".to_string()]);
-                            }
-                        }
-                    }
-                }
-            } else if tauri_cargo_path.is_file() || cargo_toml_path.is_file() {
-                member.exec_command = Some("cargo".to_string());
-                member.exec_args = Some(vec!["run".to_string()]);
-            } else if py_req_path.is_file() || pyproject_path.is_file() {
-                member.exec_command = Some(if cfg!(windows) {
-                    "python".to_string()
-                } else {
-                    "python3".to_string()
-                });
-                if member_dir.join("server.py").is_file() {
-                    member.exec_args = Some(vec!["server.py".to_string()]);
-                } else if member_dir.join("main.py").is_file() {
-                    member.exec_args = Some(vec!["main.py".to_string()]);
-                } else if member_dir.join("app.py").is_file() {
-                    member.exec_args = Some(vec!["app.py".to_string()]);
-                }
+                break;
             }
         }
     }

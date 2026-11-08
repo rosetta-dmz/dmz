@@ -100,15 +100,9 @@ impl ToolchainEnv {
         }
 
         if toolchains_dir.join("python").exists() {
-            let py_dir = toolchains_dir.join("python");
-            let has_py_bin = py_dir.join("bin/python3").exists()
-                || py_dir.join("bin/python").exists()
-                || py_dir.join("bin/pip").exists()
-                || py_dir.join("python.exe").exists();
-            let has_stdlib = py_dir.join("lib").exists() || py_dir.join("Lib").exists();
-            if has_py_bin && has_stdlib {
-                env_map.insert("PYTHONHOME".into(), py_dir.to_string_lossy().to_string());
-            }
+            // Do not set PYTHONHOME: setting PYTHONHOME poisons standard library resolution
+            // ("Fatal Python error: failed to import encodings module") across mismatched runtimes.
+            env_map.remove("PYTHONHOME");
         }
 
         if toolchains_dir.join("node").exists() {

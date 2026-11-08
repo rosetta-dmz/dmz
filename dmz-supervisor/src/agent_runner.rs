@@ -1,8 +1,8 @@
 use dmz_sandbox::agent::AgentSandbox;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, RwLock};
+use tokio::process::Command;
+use tokio::sync::{oneshot, RwLock};
 use tracing::info;
 
 #[derive(Debug, Clone)]
@@ -18,7 +18,25 @@ pub struct AgentConfig {
 pub struct ActiveAgent {
     pub config: AgentConfig,
     pub sandbox: AgentSandbox,
-    pub child_process: Arc<Mutex<Child>>,
+    kill_tx: Option<oneshot::Sender<oneshot::Sender<()>>>,
+    #[cfg(unix)]
+    pgid: Option<i32>,
+}
+
+impl Drop for ActiveAgent {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.pgid {
+            // SAFETY: `pid` is a positive process group ID created via `cmd.process_group(0)` for this agent.
+            unsafe {
+                libc::killpg(pid, libc::SIGKILL);
+            }
+        }
+        if let Some(kill_tx) = self.kill_tx.take() {
+            let (ack_tx, _) = oneshot::channel();
+            let _ = kill_tx.send(ack_tx);
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -62,20 +80,29 @@ impl AgentRunner {
             .envs(&config.envs)
             .env("DMZ_AGENT_ID", &agent_id)
             .env("DMZ_AGENT_SCRATCHPAD", &scratchpad_dir)
-            .current_dir(&scratchpad_dir);
+            .current_dir(&scratchpad_dir)
+            .kill_on_drop(true);
+
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         info!(agent = %agent_id, scratchpad = ?scratchpad_dir, "Launching agent process tree");
 
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("Failed to spawn agent process: {}", e))?;
 
-        let child_arc = Arc::new(Mutex::new(child));
+        #[cfg(unix)]
+        let pgid = child.id().map(|id| id as i32);
+
+        let (kill_tx, kill_rx) = oneshot::channel::<oneshot::Sender<()>>();
 
         let active_agent = ActiveAgent {
             config: config.clone(),
             sandbox,
-            child_process: child_arc.clone(),
+            kill_tx: Some(kill_tx),
+            #[cfg(unix)]
+            pgid,
         };
 
         {
@@ -83,33 +110,63 @@ impl AgentRunner {
             agents.insert(agent_id.clone(), active_agent);
         }
 
-        // Spawn asynchronous background watcher to monitor exit status and trigger cleanup
+        // Spawn cancel-safe event-driven watcher to monitor exit status or termination signal
         let agents_ref = self.active_agents.clone();
         let agent_id_clone = agent_id.clone();
 
         tokio::spawn(async move {
-            let mut child_guard = child_arc.lock().await;
-            let _ = child_guard.wait().await;
-            drop(child_guard);
-
-            info!(agent = %agent_id_clone, "Agent process exited; purging volatile scratchpad");
-
-            let mut guard = agents_ref.write().await;
-            if let Some(_removed_agent) = guard.remove(&agent_id_clone) {
-                info!(agent = %agent_id_clone, "AI Agent sandbox memory completely wiped");
+            tokio::select! {
+                _ = child.wait() => {
+                    info!(agent = %agent_id_clone, "Agent process exited; purging volatile scratchpad");
+                    let mut guard = agents_ref.write().await;
+                    if let Some(_removed_agent) = guard.remove(&agent_id_clone) {
+                        info!(agent = %agent_id_clone, "AI Agent sandbox memory completely wiped");
+                    }
+                }
+                res = kill_rx => {
+                    #[cfg(unix)]
+                    if let Some(pid) = pgid {
+                        // SAFETY: `pid` is a positive process group ID created via `cmd.process_group(0)` for this agent.
+                        unsafe {
+                            libc::killpg(pid, libc::SIGTERM);
+                        }
+                    }
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    #[cfg(unix)]
+                    if let Some(pid) = pgid {
+                        // SAFETY: `pid` is a positive process group ID created via `cmd.process_group(0)` for this agent.
+                        unsafe {
+                            libc::killpg(pid, libc::SIGKILL);
+                        }
+                    }
+                    if let Ok(ack_tx) = res {
+                        let _ = ack_tx.send(());
+                    }
+                }
             }
         });
 
         Ok(())
     }
 
-    /// Terminate an agent explicitly
+    /// Terminate an agent explicitly without lock contention
     pub async fn terminate_agent(&self, agent_id: &str) -> Result<(), String> {
-        let mut agents = self.active_agents.write().await;
-        if let Some(agent) = agents.remove(agent_id) {
+        let removed = {
+            let mut agents = self.active_agents.write().await;
+            agents.remove(agent_id)
+        };
+
+        if let Some(mut agent) = removed {
             info!(agent = %agent_id, "Killing active AI agent process tree");
-            let mut child = agent.child_process.lock().await;
-            let _ = child.kill().await;
+            if let Some(kill_tx) = agent.kill_tx.take() {
+                let (ack_tx, ack_rx) = oneshot::channel();
+                if kill_tx.send(ack_tx).is_ok() {
+                    let _ = ack_rx.await;
+                }
+            }
+            drop(agent);
+            info!(agent = %agent_id, "AI Agent sandbox memory completely wiped");
             Ok(())
         } else {
             Err(format!("Agent '{}' not found", agent_id))

@@ -210,11 +210,19 @@ For developers using the visual desktop interface (`dmz-gui`), the multi-repo wo
 
 ### Step 5: Live Supervised Execution in Supervisor IPC
 1. Navigate to the **Supervisor IPC** page.
-2. Click **Launch Workspace Pair**:
+2. In the **Target Umbrella Workspace** card:
+   * Confirm or browse to your imported umbrella workspace root directory.
+   * Verify the green indicator showing `dmz-workspace.toml` loaded with your Primary and Sidecar member IDs.
+3. (Optional) In the telemetry grid, adjust the **Readiness Gate Timeout** slider:
+   * Keep default (10,000 ms) for Unix domain socket sidecars.
+   * Set to `0 ms` to skip the socket probe if your companion service uses HTTP/REST or another protocol.
+4. Click **Launch Workspace Pair**:
    * Wires directly into real `SidecarOrchestrator` execution on background Tokio runtime.
+   * Auto-detects member run commands and injects hermetic `.dmz/toolchains` into PATH while stripping `PYTHONHOME`.
    * **Stage Highlights:** Live-transitions across `Clean Socket` $\rightarrow$ `Spawning Services` $\rightarrow$ `Readiness Probe` $\rightarrow$ `Services Ready` $\rightarrow$ `Active Bridge`.
    * Real socket path, byte length, and error telemetry are displayed live.
-3. Click **Stop Pair (Graceful Drain)**:
+   * If a launch or readiness issue occurs, a red alert banner displays the exact error message with a **Dismiss & Reset to Standby** button to reset the state cleanly.
+5. Click **Stop Pair (Graceful Drain)**:
    * Triggers real reverse graceful drain: stops client application $\rightarrow$ drains active IPC $\rightarrow$ terminates companion services and unlinks socket.
 
 ---

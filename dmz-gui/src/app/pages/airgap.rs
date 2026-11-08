@@ -1,5 +1,7 @@
 use eframe::egui;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{channel, Receiver};
+use std::thread;
 
 use super::super::components;
 use dmz_core::archive::exporter::ExportMode as CoreExportMode;
@@ -24,6 +26,16 @@ impl From<GuiExportMode> for CoreExportMode {
     }
 }
 
+pub(super) enum AirGapTaskOutcome {
+    Success(String),
+    Failure(String),
+    ImportSuccess {
+        status_message: String,
+        workspace_path: String,
+    },
+    ImportFailure(String),
+}
+
 pub(super) struct AirGapState {
     archive_path: String,
     store_dir: String,
@@ -34,6 +46,7 @@ pub(super) struct AirGapState {
     verify_closure: bool,
     with_toolchain: bool,
     show_export_tip: bool,
+    pub(super) active_task: Option<(String, Receiver<AirGapTaskOutcome>)>,
 }
 
 impl Default for AirGapState {
@@ -48,7 +61,14 @@ impl Default for AirGapState {
             verify_closure: true,
             with_toolchain: true,
             show_export_tip: true,
+            active_task: None,
         }
+    }
+}
+
+impl AirGapState {
+    pub(super) fn is_busy(&self) -> bool {
+        self.active_task.is_some()
     }
 }
 
@@ -59,6 +79,39 @@ pub(super) fn show(
     lockfile_path: &mut String,
     status_message: &mut String,
 ) {
+    if let Some((ref label, ref rx)) = state.active_task {
+        match rx.try_recv() {
+            Ok(outcome) => {
+                match outcome {
+                    AirGapTaskOutcome::Success(msg) => {
+                        *status_message = msg;
+                    }
+                    AirGapTaskOutcome::Failure(err) => {
+                        *status_message = err;
+                    }
+                    AirGapTaskOutcome::ImportSuccess {
+                        status_message: msg,
+                        workspace_path: new_ws,
+                    } => {
+                        *status_message = msg;
+                        *workspace_path = new_ws;
+                    }
+                    AirGapTaskOutcome::ImportFailure(err) => {
+                        *status_message = err;
+                    }
+                }
+                state.active_task = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ui.ctx().request_repaint();
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                *status_message = format!("Air-gap operation '{label}' terminated unexpectedly.");
+                state.active_task = None;
+            }
+        }
+    }
+
     components::page_header(ui, "Air-Gap Manager");
 
     components::section(ui, |ui| {
@@ -182,159 +235,192 @@ pub(super) fn show(
             "Package compiler toolchains into bundle",
         );
 
+        let is_busy = state.is_busy();
         ui.add_space(12.0);
         ui.horizontal_wrapped(|ui| {
-            if components::action_button(ui, "Export Bundle", true).clicked() {
-                let workspace = PathBuf::from(&*workspace_path);
-                let ws_canon =
-                    std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
+            ui.add_enabled_ui(!is_busy, |ui| {
+                if components::action_button(ui, "Export Bundle", true).clicked() {
+                    let workspace = PathBuf::from(&*workspace_path);
+                    let ws_canon =
+                        std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
 
-                let lockfile = if Path::new(&*lockfile_path).is_relative() {
-                    ws_canon.join(&*lockfile_path)
-                } else {
-                    PathBuf::from(&*lockfile_path)
-                };
-                let store = if Path::new(&state.store_dir).is_relative() {
-                    ws_canon.join(&state.store_dir)
-                } else {
-                    PathBuf::from(&state.store_dir)
-                };
-                let output = if Path::new(&state.archive_path).is_relative() {
-                    ws_canon.join(&state.archive_path)
-                } else {
-                    PathBuf::from(&state.archive_path)
-                };
-                let target_opt = if state.target_platform.trim().is_empty() {
-                    None
-                } else {
-                    Some(state.target_platform.trim().to_string())
-                };
+                    let lockfile = if Path::new(&*lockfile_path).is_relative() {
+                        ws_canon.join(&*lockfile_path)
+                    } else {
+                        PathBuf::from(&*lockfile_path)
+                    };
+                    let store = if Path::new(&state.store_dir).is_relative() {
+                        ws_canon.join(&state.store_dir)
+                    } else {
+                        PathBuf::from(&state.store_dir)
+                    };
+                    let output = if Path::new(&state.archive_path).is_relative() {
+                        ws_canon.join(&state.archive_path)
+                    } else {
+                        PathBuf::from(&state.archive_path)
+                    };
+                    let target_opt = if state.target_platform.trim().is_empty() {
+                        None
+                    } else {
+                        Some(state.target_platform.trim().to_string())
+                    };
 
-                // Resolve manifests if lockfile missing
-                if !lockfile.exists() {
-                    match ResolverEngine::resolve_workspace_with_target(
-                        &ws_canon,
-                        target_opt.clone(),
-                    ) {
-                        Ok(resolved) => {
-                            let _ = resolved.save(&lockfile);
+                    let zstd_level = state.zstd_level;
+                    let export_mode = state.export_mode;
+                    let with_toolchain = state.with_toolchain;
+                    let (tx, rx) = channel();
+                    let ctx = ui.ctx().clone();
+                    state.active_task = Some(("Exporting air-gap bundle...".to_string(), rx));
+
+                    thread::spawn(move || {
+                        if !lockfile.exists() {
+                            match ResolverEngine::resolve_workspace_with_target(
+                                &ws_canon,
+                                target_opt.clone(),
+                            ) {
+                                Ok(resolved) => {
+                                    let _ = resolved.save(&lockfile);
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(AirGapTaskOutcome::Failure(format!(
+                                        "Bundle failed during resolution: {e}"
+                                    )));
+                                    ctx.request_repaint();
+                                    return;
+                                }
+                            }
                         }
-                        Err(e) => {
-                            *status_message = format!("Bundle failed during resolution: {e}");
+
+                        if let Err(e) = ResolverEngine::fetch_dependencies(&lockfile, &store) {
+                            let _ = tx.send(AirGapTaskOutcome::Failure(format!(
+                                "Bundle failed during dependency fetch: {e}"
+                            )));
+                            ctx.request_repaint();
                             return;
                         }
-                    }
-                }
 
-                // Fetch dependencies
-                if let Err(e) = ResolverEngine::fetch_dependencies(&lockfile, &store) {
-                    *status_message = format!("Bundle failed during dependency fetch: {e}");
-                    return;
-                }
+                        let multi_workspace =
+                            dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(
+                                &ws_canon,
+                            )
+                            .map(|(cfg, _)| cfg);
 
-                let multi_workspace =
-                    dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(
-                        &ws_canon,
-                    )
-                    .map(|(cfg, _)| cfg);
-
-                // Export
-                let config = ExportConfig {
-                    workspace_path: ws_canon,
-                    lockfile_path: lockfile,
-                    store_dir: store,
-                    output_path: output,
-                    zstd_level: state.zstd_level,
-                    mode: state.export_mode.into(),
-                    target_platform: target_opt,
-                    with_toolchain: state.with_toolchain,
-                    multi_workspace,
-                    ..Default::default()
-                };
-
-                match AirGapExporter::export(&config) {
-                    Ok(manifest) => {
-                        let ws_info = if let Some(ref proj) = manifest.workspace_project {
-                            format!(" [Dual-Workspace: {} members]", proj.members.len())
-                        } else {
-                            String::new()
+                        let config = ExportConfig {
+                            workspace_path: ws_canon,
+                            lockfile_path: lockfile,
+                            store_dir: store,
+                            output_path: output,
+                            zstd_level,
+                            mode: export_mode.into(),
+                            target_platform: target_opt,
+                            with_toolchain,
+                            multi_workspace,
+                            ..Default::default()
                         };
-                        *status_message = format!(
-                            "Bundle created successfully! Packages: {}, SHA256: {}{}",
-                            manifest.package_count,
-                            &manifest.archive_sha256[..12.min(manifest.archive_sha256.len())],
-                            ws_info
-                        );
-                    }
-                    Err(error) => {
-                        *status_message = format!("Bundle Export Failed: {error}");
-                    }
-                }
-            }
 
-            if components::action_button(ui, "Export Archive", false).clicked() {
-                let workspace = PathBuf::from(&*workspace_path);
-                let ws_canon =
-                    std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
-
-                let lockfile = if Path::new(&*lockfile_path).is_relative() {
-                    ws_canon.join(&*lockfile_path)
-                } else {
-                    PathBuf::from(&*lockfile_path)
-                };
-                let store = if Path::new(&state.store_dir).is_relative() {
-                    ws_canon.join(&state.store_dir)
-                } else {
-                    PathBuf::from(&state.store_dir)
-                };
-                let output = if Path::new(&state.archive_path).is_relative() {
-                    ws_canon.join(&state.archive_path)
-                } else {
-                    PathBuf::from(&state.archive_path)
-                };
-                let target_opt = if state.target_platform.trim().is_empty() {
-                    None
-                } else {
-                    Some(state.target_platform.trim().to_string())
-                };
-
-                let multi_workspace =
-                    dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(
-                        &ws_canon,
-                    )
-                    .map(|(cfg, _)| cfg);
-
-                let config = ExportConfig {
-                    workspace_path: ws_canon,
-                    lockfile_path: lockfile,
-                    store_dir: store,
-                    output_path: output,
-                    zstd_level: state.zstd_level,
-                    mode: state.export_mode.into(),
-                    target_platform: target_opt,
-                    with_toolchain: state.with_toolchain,
-                    multi_workspace,
-                    ..Default::default()
-                };
-
-                match AirGapExporter::export(&config) {
-                    Ok(manifest) => {
-                        let ws_info = if let Some(ref proj) = manifest.workspace_project {
-                            format!(" [Dual-Workspace: {} members]", proj.members.len())
-                        } else {
-                            String::new()
+                        let outcome = match AirGapExporter::export(&config) {
+                            Ok(manifest) => {
+                                let ws_info = if let Some(ref proj) = manifest.workspace_project {
+                                    format!(" [Dual-Workspace: {} members]", proj.members.len())
+                                } else {
+                                    String::new()
+                                };
+                                AirGapTaskOutcome::Success(format!(
+                                    "Bundle created successfully! Packages: {}, SHA256: {}{}",
+                                    manifest.package_count,
+                                    &manifest.archive_sha256[..12.min(manifest.archive_sha256.len())],
+                                    ws_info
+                                ))
+                            }
+                            Err(error) => {
+                                AirGapTaskOutcome::Failure(format!("Bundle Export Failed: {error}"))
+                            }
                         };
-                        *status_message = format!(
-                            "Exported {} packages to archive (SHA256: {}){}",
-                            manifest.package_count,
-                            &manifest.archive_sha256[..12.min(manifest.archive_sha256.len())],
-                            ws_info
-                        );
-                    }
-                    Err(error) => {
-                        *status_message = format!("Export Failed: {error}");
-                    }
+                        let _ = tx.send(outcome);
+                        ctx.request_repaint();
+                    });
                 }
+
+                if components::action_button(ui, "Export Archive", false).clicked() {
+                    let workspace = PathBuf::from(&*workspace_path);
+                    let ws_canon =
+                        std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
+
+                    let lockfile = if Path::new(&*lockfile_path).is_relative() {
+                        ws_canon.join(&*lockfile_path)
+                    } else {
+                        PathBuf::from(&*lockfile_path)
+                    };
+                    let store = if Path::new(&state.store_dir).is_relative() {
+                        ws_canon.join(&state.store_dir)
+                    } else {
+                        PathBuf::from(&state.store_dir)
+                    };
+                    let output = if Path::new(&state.archive_path).is_relative() {
+                        ws_canon.join(&state.archive_path)
+                    } else {
+                        PathBuf::from(&state.archive_path)
+                    };
+                    let target_opt = if state.target_platform.trim().is_empty() {
+                        None
+                    } else {
+                        Some(state.target_platform.trim().to_string())
+                    };
+
+                    let zstd_level = state.zstd_level;
+                    let export_mode = state.export_mode;
+                    let with_toolchain = state.with_toolchain;
+                    let (tx, rx) = channel();
+                    let ctx = ui.ctx().clone();
+                    state.active_task = Some(("Exporting air-gap archive...".to_string(), rx));
+
+                    thread::spawn(move || {
+                        let multi_workspace =
+                            dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(
+                                &ws_canon,
+                            )
+                            .map(|(cfg, _)| cfg);
+
+                        let config = ExportConfig {
+                            workspace_path: ws_canon,
+                            lockfile_path: lockfile,
+                            store_dir: store,
+                            output_path: output,
+                            zstd_level,
+                            mode: export_mode.into(),
+                            target_platform: target_opt,
+                            with_toolchain,
+                            multi_workspace,
+                            ..Default::default()
+                        };
+
+                        let outcome = match AirGapExporter::export(&config) {
+                            Ok(manifest) => {
+                                let ws_info = if let Some(ref proj) = manifest.workspace_project {
+                                    format!(" [Dual-Workspace: {} members]", proj.members.len())
+                                } else {
+                                    String::new()
+                                };
+                                AirGapTaskOutcome::Success(format!(
+                                    "Exported {} packages to archive (SHA256: {}){}",
+                                    manifest.package_count,
+                                    &manifest.archive_sha256[..12.min(manifest.archive_sha256.len())],
+                                    ws_info
+                                ))
+                            }
+                            Err(error) => {
+                                AirGapTaskOutcome::Failure(format!("Export Failed: {error}"))
+                            }
+                        };
+                        let _ = tx.send(outcome);
+                        ctx.request_repaint();
+                    });
+                }
+            });
+
+            if let Some((ref label, _)) = state.active_task {
+                ui.add_space(8.0);
+                components::inline_spinner_status(ui, label);
             }
         });
     });
@@ -396,97 +482,129 @@ pub(super) fn show(
         });
 
         ui.add_space(12.0);
-        if components::action_button(ui, "Import & Verify Archive", false).clicked() {
-            let workspace = PathBuf::from(&*workspace_path);
-            let _ = std::fs::create_dir_all(&workspace);
-            let ws_canon = std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
+        let is_busy = state.is_busy();
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(!is_busy, |ui| {
+                if components::action_button(ui, "Import & Verify Archive", false).clicked() {
+                    let workspace = PathBuf::from(&*workspace_path);
+                    let _ = std::fs::create_dir_all(&workspace);
+                    let ws_canon =
+                        std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
 
-            let archive_raw = Path::new(&state.archive_path);
-            let archive = if archive_raw.is_relative() {
-                if ws_canon.join(archive_raw).exists() {
-                    ws_canon.join(archive_raw)
-                } else if archive_raw.exists() {
-                    std::fs::canonicalize(archive_raw).unwrap_or_else(|_| archive_raw.to_path_buf())
-                } else {
-                    ws_canon.join(archive_raw)
-                }
-            } else {
-                archive_raw.to_path_buf()
-            };
-
-            if !archive.exists() {
-                *status_message = format!(
-                    "Archive file not found at {:?}. Click 'Open Archive...' to select a valid .tar.zst package.",
-                    archive
-                );
-                return;
-            }
-
-            let store = if Path::new(&state.store_dir).is_relative() {
-                ws_canon.join(&state.store_dir)
-            } else {
-                PathBuf::from(&state.store_dir)
-            };
-
-            let config = ImportConfig {
-                archive_path: archive,
-                target_store_dir: store.clone(),
-                target_workspace_dir: ws_canon.clone(),
-                verify_closure_hash: state.verify_closure,
-            };
-
-            match AirGapImporter::import(&config) {
-                Ok(result) => {
-                    let mut msg = format!(
-                        "Imported {} files into store. Verified Closure: {}",
-                        result.imported_packages,
-                        &result.closure_signature[..12.min(result.closure_signature.len())]
-                    );
-                    if let Some(ref proj) = result.workspace_project {
-                        msg.push_str(&format!(
-                            " · Dual-Workspace '{}' ({} members) active",
-                            proj.name,
-                            proj.members.len()
-                        ));
-                    }
-
-                    if let Some(ref wp) = result.workspace_project {
-                        msg.push_str(&format!(
-                            " · Restored dual-workspace umbrella ({} members: primary='{}'). Open via .code-workspace",
-                            wp.members.len(),
-                            wp.primary_member()
-                                .map(|m| m.path.display().to_string())
-                                .unwrap_or_else(|| "primary".to_string())
-                        ));
-                    }
-
-                    if state.auto_install {
-                        let lockfile = result.workspace_path.join("dmz.lock");
-                        let install_config = InstallConfig {
-                            workspace_path: result.workspace_path.clone(),
-                            lockfile_path: lockfile,
-                            store_dir: result.store_path.clone(),
-                        };
-                        match InstallerEngine::install(&install_config) {
-                            Ok(count) => {
-                                msg.push_str(&format!(
-                                    " · Materialized {} packages into workspace offline",
-                                    count
-                                ));
-                            }
-                            Err(e) => {
-                                msg.push_str(&format!(" · Offline install error: {}", e));
-                            }
+                    let archive_raw = Path::new(&state.archive_path);
+                    let archive = if archive_raw.is_relative() {
+                        if ws_canon.join(archive_raw).exists() {
+                            ws_canon.join(archive_raw)
+                        } else if archive_raw.exists() {
+                            std::fs::canonicalize(archive_raw)
+                                .unwrap_or_else(|_| archive_raw.to_path_buf())
+                        } else {
+                            ws_canon.join(archive_raw)
                         }
+                    } else {
+                        archive_raw.to_path_buf()
+                    };
+
+                    if !archive.exists() {
+                        *status_message = format!(
+                            "Archive file not found at {:?}. Click 'Open Archive...' to select a valid .tar.zst package.",
+                            archive
+                        );
+                        return;
                     }
 
-                    *status_message = msg;
+                    let store = if Path::new(&state.store_dir).is_relative() {
+                        ws_canon.join(&state.store_dir)
+                    } else {
+                        PathBuf::from(&state.store_dir)
+                    };
+
+                    let verify_closure = state.verify_closure;
+                    let auto_install = state.auto_install;
+                    let (tx, rx) = channel();
+                    let ctx = ui.ctx().clone();
+                    state.active_task =
+                        Some(("Importing and verifying archive...".to_string(), rx));
+
+                    thread::spawn(move || {
+                        let config = ImportConfig {
+                            archive_path: archive,
+                            target_store_dir: store.clone(),
+                            target_workspace_dir: ws_canon.clone(),
+                            verify_closure_hash: verify_closure,
+                        };
+
+                        let outcome = match AirGapImporter::import(&config) {
+                            Ok(result) => {
+                                let mut msg = format!(
+                                    "Imported {} files into store. Verified Closure: {}",
+                                    result.imported_packages,
+                                    &result.closure_signature
+                                        [..12.min(result.closure_signature.len())]
+                                );
+                                if let Some(ref proj) = result.workspace_project {
+                                    msg.push_str(&format!(
+                                        " · Dual-Workspace '{}' ({} members) active",
+                                        proj.name,
+                                        proj.members.len()
+                                    ));
+                                }
+
+                                if let Some(ref wp) = result.workspace_project {
+                                    msg.push_str(&format!(
+                                        " · Restored dual-workspace umbrella ({} members: primary='{}'). Open via .code-workspace",
+                                        wp.members.len(),
+                                        wp.primary_member()
+                                            .map(|m| m.path.display().to_string())
+                                            .unwrap_or_else(|| "primary".to_string())
+                                    ));
+                                }
+
+                                let new_ws = result.workspace_path.display().to_string();
+
+                                if auto_install {
+                                    let lockfile = result.workspace_path.join("dmz.lock");
+                                    let install_config = InstallConfig {
+                                        workspace_path: result.workspace_path.clone(),
+                                        lockfile_path: lockfile,
+                                        store_dir: result.store_path.clone(),
+                                    };
+                                    match InstallerEngine::install(&install_config) {
+                                        Ok(count) => {
+                                            msg.push_str(&format!(
+                                                " · Materialized {} packages into workspace offline",
+                                                count
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            msg.push_str(&format!(
+                                                " · Offline install error: {}",
+                                                e
+                                            ));
+                                        }
+                                    }
+                                }
+
+                                AirGapTaskOutcome::ImportSuccess {
+                                    status_message: msg,
+                                    workspace_path: new_ws,
+                                }
+                            }
+                            Err(error) => {
+                                AirGapTaskOutcome::ImportFailure(format!("Import Failed: {error}"))
+                            }
+                        };
+                        let _ = tx.send(outcome);
+                        ctx.request_repaint();
+                    });
                 }
-                Err(error) => {
-                    *status_message = format!("Import Failed: {error}");
-                }
+            });
+
+            if let Some((ref label, _)) = state.active_task {
+                ui.add_space(8.0);
+                components::inline_spinner_status(ui, label);
             }
-        }
+        });
     });
 }
 
