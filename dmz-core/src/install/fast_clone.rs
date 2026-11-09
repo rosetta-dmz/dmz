@@ -46,8 +46,9 @@ impl FastClone {
                 // Linux ioctl request type varies across libc implementations:
                 // `c_ulong` (u64) on glibc, `c_int` (i32) on musl/Android.
                 const FICLONE: u64 = 0x40049409;
-                let ret =
-                    unsafe { libc::ioctl(dst_file.as_raw_fd(), FICLONE as _, src_file.as_raw_fd()) };
+                let ret = unsafe {
+                    libc::ioctl(dst_file.as_raw_fd(), FICLONE as _, src_file.as_raw_fd())
+                };
                 if ret == 0 {
                     return Ok(());
                 }
