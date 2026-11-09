@@ -224,7 +224,11 @@ fn test_pypi_wheel_abi_scoring() {
 fn test_toolchain_ecosystem_command_resolution() -> anyhow::Result<()> {
     let temp = tempdir()?;
     let ws_path = temp.path().join("workspace");
-    let rust_bin_dir = ws_path.join(".dmz/toolchains/rust/bin");
+    let rust_bin_dir = ws_path
+        .join(".dmz")
+        .join("toolchains")
+        .join("rust")
+        .join("bin");
     fs::create_dir_all(&rust_bin_dir)?;
     let cargo_bin = rust_bin_dir.join("cargo");
     fs::write(&cargo_bin, "#!/bin/sh\necho mock cargo\n")?;
@@ -236,7 +240,10 @@ fn test_toolchain_ecosystem_command_resolution() -> anyhow::Result<()> {
     }
 
     let cmd = CommandSpec::new("cargo", vec!["check".into()]).resolve_in_workspace(&ws_path);
-    assert_eq!(cmd.program, cargo_bin.to_string_lossy());
+    assert_eq!(
+        cmd.program.replace('\\', "/"),
+        cargo_bin.to_string_lossy().replace('\\', "/")
+    );
 
     // When toolchain is not bundled, program remains unchanged
     let cmd_ambient = CommandSpec::new("nonexistent_tool", vec!["--version".into()])

@@ -20,7 +20,7 @@ impl CommandSpec {
 
     /// Resolves the command program path, checking bundled `.dmz/toolchains` first before falling back to system binary
     pub fn resolve_in_workspace(&self, workspace_root: &Path) -> Self {
-        let toolchains_dir = workspace_root.join(".dmz/toolchains");
+        let toolchains_dir = workspace_root.join(".dmz").join("toolchains");
         if toolchains_dir.is_dir() {
             if let Ok(entries) = std::fs::read_dir(&toolchains_dir) {
                 for entry in entries.flatten() {
