@@ -8,9 +8,9 @@ pub struct FastClone;
 
 impl FastClone {
     /// Fast-clones a file from `src` to `dst`.
-    /// 1. Tries OS-native Copy-on-Write reflink (APFS `clonefile` / Linux `ioctl(FICLONE)`).
-    /// 2. If unsupported, tries `std::fs::hard_link`.
-    /// 3. If hard_link fails (cross-device/permissions), falls back to `std::fs::copy`.
+    /// Tries OS-native Copy-on-Write reflink (APFS `clonefile` / Linux `ioctl(FICLONE)`).
+    /// When unsupported, tries `std::fs::hard_link`.
+    /// When hard_link fails (cross-device/permissions), falls back to `std::fs::copy`.
     pub fn clone_file(src: &Path, dst: &Path) -> io::Result<()> {
         if dst.exists() || fs::symlink_metadata(dst).is_ok() {
             let _ = fs::remove_file(dst);
