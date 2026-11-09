@@ -8,9 +8,9 @@ pub struct FastClone;
 
 impl FastClone {
     /// Fast-clones a file from `src` to `dst`.
-    /// 1. Tries OS-native Copy-on-Write reflink (APFS `clonefile` / Linux `ioctl(FICLONE)`).
-    /// 2. If unsupported, tries `std::fs::hard_link`.
-    /// 3. If hard_link fails (cross-device/permissions), falls back to `std::fs::copy`.
+    /// Tries OS-native Copy-on-Write reflink (APFS `clonefile` / Linux `ioctl(FICLONE)`).
+    /// When unsupported, tries `std::fs::hard_link`.
+    /// When hard_link fails (cross-device/permissions), falls back to `std::fs::copy`.
     pub fn clone_file(src: &Path, dst: &Path) -> io::Result<()> {
         if dst.exists() || fs::symlink_metadata(dst).is_ok() {
             let _ = fs::remove_file(dst);
@@ -46,8 +46,9 @@ impl FastClone {
                 // Linux ioctl request type varies across libc implementations:
                 // `c_ulong` (u64) on glibc, `c_int` (i32) on musl/Android.
                 const FICLONE: u64 = 0x40049409;
-                let ret =
-                    unsafe { libc::ioctl(dst_file.as_raw_fd(), FICLONE as _, src_file.as_raw_fd()) };
+                let ret = unsafe {
+                    libc::ioctl(dst_file.as_raw_fd(), FICLONE as _, src_file.as_raw_fd())
+                };
                 if ret == 0 {
                     return Ok(());
                 }
