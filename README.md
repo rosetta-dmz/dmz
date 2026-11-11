@@ -15,19 +15,9 @@ Of course, it's still recommended to use a daemon when necessary (Docker, Podman
 - **Engine-Driven Verification:** Programmatically validates imported workspaces using native ecosystem rules via `dmz ecosystem verify`.
 - **Supervisor & IPC Sockets:** Manages collateral stack services and exposes local API sockets for tool and IDE integrations.
 
-![Resolver](images/Resolver.png)
-
-![Workspace Sandbox](images/Workspace-Sandbox.png)
-
-![Agent Sandbox](images/Agent-Sandbox.png)
-
 ![Air-Gap Manager](images/Air-Gap-Manager.png)
 
-![Version Control](images/Version-Control.png)
-
-![Supervisor IPC](images/Supervisor-IPC.png)
-
-![Settings](images/Settings.png)
+![Settings](images/themes/Dark.png)
 ---
 
 ## Installation & Quick Start
