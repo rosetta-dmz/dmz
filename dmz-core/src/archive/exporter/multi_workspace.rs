@@ -251,7 +251,11 @@ pub fn package_multi_workspace_umbrella<W: Write>(
             };
 
             let py_bin_exists = member_venv.join("bin/python").exists()
-                || member_venv.join("Scripts/python.exe").exists();
+                || member_venv.join("bin/python3").exists()
+                || member_venv.join("Scripts/python.exe").exists()
+                || member_venv.join("Scripts/python.bat").exists()
+                || member_venv.join("Scripts/python.cmd").exists()
+                || member_venv.join("pyvenv.cfg").exists();
 
             if (member_venv.exists() && py_bin_exists) || has_locked_pypi {
                 let py_bin = if cfg!(windows) {

@@ -297,12 +297,9 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
         );
         let _ = fs::write(&pyvenv_cfg, cfg_content);
 
-        // 2. Unix launcher: root_venv/bin/python and root_venv/bin/python3
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let sh_content = format!(
-                r#"#!/bin/sh
+        // 2. Unix & Git Bash / MSYS2 launcher: root_venv/bin/python and root_venv/bin/python3
+        let sh_content = format!(
+            r#"#!/bin/sh
 VENV_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 export VIRTUAL_ENV="$VENV_DIR"
 export PATH="$VENV_DIR/bin:$PATH"
@@ -344,32 +341,33 @@ else
     exit 1
 fi
 "#,
-                py_ver = py_ver
-            );
+            py_ver = py_ver
+        );
 
-            for name in &["python", "python3"] {
-                let bin_path = venv_bin.join(name);
-                let _ = fs::remove_file(&bin_path);
-                if fs::write(&bin_path, &sh_content).is_ok() {
+        for name in &["python", "python3"] {
+            let bin_path = venv_bin.join(name);
+            let _ = fs::remove_file(&bin_path);
+            if fs::write(&bin_path, &sh_content).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
                     let _ = fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755));
                 }
             }
+        }
 
-            // Also create activate script
-            let activate_path = venv_bin.join("activate");
-            let _ = fs::remove_file(&activate_path);
-            let activate_content = r#"VIRTUAL_ENV="$(cd "$(dirname "$0")/.." && pwd)"
+        // Also create activate script
+        let activate_path = venv_bin.join("activate");
+        let _ = fs::remove_file(&activate_path);
+        let activate_content = r#"VIRTUAL_ENV="$(cd "$(dirname "$0")/.." && pwd)"
 export VIRTUAL_ENV
 _OLD_PATH="$PATH"
 PATH="$VIRTUAL_ENV/bin:$PATH"
 export PATH
 "#;
-            let _ = fs::write(&activate_path, activate_content);
-        }
+        let _ = fs::write(&activate_path, activate_content);
 
-        // 3. Windows launcher: root_venv/Scripts/python.bat
-        let cmd_path = venv_scripts.join("python.bat");
-        let _ = fs::remove_file(&cmd_path);
+        // 3. Windows launcher: root_venv/Scripts/python.bat and python.cmd
         let cmd_content = format!(
             r#"@echo off
 set "VENV_DIR=%~dp0.."
@@ -390,6 +388,10 @@ if exist "%VENV_DIR%\..\.dmz\toolchains\python\python.exe" (
 "#,
             py_ver = py_ver
         );
-        let _ = fs::write(&cmd_path, cmd_content);
+        for name in &["python.bat", "python.cmd"] {
+            let cmd_path = venv_scripts.join(name);
+            let _ = fs::remove_file(&cmd_path);
+            let _ = fs::write(&cmd_path, &cmd_content);
+        }
     }
 }

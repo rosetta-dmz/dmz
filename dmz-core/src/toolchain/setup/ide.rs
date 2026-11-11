@@ -300,7 +300,11 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), String> {
             || workspace_root.join("Pipfile").is_file();
         let member_venv = workspace_root.join(".venv");
         let has_valid_venv = member_venv.join("bin/python").exists()
-            || member_venv.join("Scripts/python.exe").exists();
+            || member_venv.join("bin/python3").exists()
+            || member_venv.join("Scripts/python.exe").exists()
+            || member_venv.join("Scripts/python.bat").exists()
+            || member_venv.join("Scripts/python.cmd").exists()
+            || member_venv.join("pyvenv.cfg").exists();
 
         if !is_umbrella && (!is_umbrella_member || has_python_project || has_valid_venv) {
             if has_valid_venv {
@@ -483,7 +487,11 @@ pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), String
             };
 
             let py_bin_exists = member_venv.join("bin/python").exists()
-                || member_venv.join("Scripts/python.exe").exists();
+                || member_venv.join("bin/python3").exists()
+                || member_venv.join("Scripts/python.exe").exists()
+                || member_venv.join("Scripts/python.bat").exists()
+                || member_venv.join("Scripts/python.cmd").exists()
+                || member_venv.join("pyvenv.cfg").exists();
 
             if member_venv.exists() && py_bin_exists {
                 let py_bin = if cfg!(windows) {

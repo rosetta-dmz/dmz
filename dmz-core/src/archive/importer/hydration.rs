@@ -230,7 +230,11 @@ pub fn hydrate_offline_dependencies(
 
                 let bundled_py = workspace_root.join(".dmz/toolchains/python");
                 let py_bin_exists = member_venv.join("bin/python").exists()
-                    || member_venv.join("Scripts/python.exe").exists();
+                    || member_venv.join("bin/python3").exists()
+                    || member_venv.join("Scripts/python.exe").exists()
+                    || member_venv.join("Scripts/python.bat").exists()
+                    || member_venv.join("Scripts/python.cmd").exists()
+                    || member_venv.join("pyvenv.cfg").exists();
 
                 if member_venv.exists() && py_bin_exists {
                     let py_bin = if cfg!(windows) {
