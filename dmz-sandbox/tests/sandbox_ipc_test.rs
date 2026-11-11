@@ -84,6 +84,10 @@ fn test_sandbox_socket_path_length_limit_rejection() {
         PlatformError::SeatbeltError(msg) | PlatformError::NamespaceError(msg) => {
             assert!(msg.contains("sun_path limit"));
         }
-        other => panic!("Expected sun_path limit rejection, got: {:?}", other),
+        #[cfg(windows)]
+        PlatformError::WindowsError(msg) => {
+            assert!(msg.contains("Named Pipe format"));
+        }
+        other => panic!("Expected socket path rejection, got: {:?}", other),
     }
 }
