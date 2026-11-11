@@ -78,7 +78,7 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
                         ifr.ifr_name[1] = b'o' as libc::c_char;
                         ifr.ifr_ifru.ifru_flags =
                             (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
-                        let _ = libc::ioctl(sock, libc::SIOCSIFFLAGS, &ifr);
+                        let _ = libc::ioctl(sock, libc::SIOCSIFFLAGS as _, &ifr);
                         let _ = libc::close(sock);
                     }
                 }
