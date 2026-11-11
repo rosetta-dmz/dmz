@@ -184,6 +184,7 @@ fn inject_path_fallbacks(env_map: &mut HashMap<String, String>, workspace: &Path
         workspace.join(".dmz").join("toolchains").is_dir() || closure.join("toolchains").is_dir();
 
     if !has_bundled_toolchains && !home.is_empty() {
+        #[allow(unused_mut)]
         let mut toolchain_bins = vec![
             format!("{}/.cargo/bin", home),
             format!("{}/.local/bin", home),

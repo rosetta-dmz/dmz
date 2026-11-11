@@ -70,9 +70,18 @@ impl ToolchainArchivePackager {
                 if let Ok(sym_meta) = fs::symlink_metadata(host_path) {
                     if sym_meta.file_type().is_symlink() {
                         if let Ok(link_target) = fs::read_link(host_path) {
-                            // Only preserve self-contained relative symlinks (e.g. clang++ -> clang).
-                            // If the symlink is absolute (e.g. rustup shims pointing to ~/.rustup/toolchains/...),
+                            // Only preserve self-contained relative symlinks if the target actually exists
+                            // in this packaged bundle (e.g. clang++ -> clang in the same bin/ directory).
+                            // If the symlink is absolute or points outside the bundle (e.g. rustup shims),
                             // it must be dereferenced and bundled so air-gap targets have the genuine binary.
+                            let target_rel = Path::new(rel_path)
+                                .parent()
+                                .unwrap_or(Path::new(""))
+                                .join(&link_target);
+                            let target_in_bundle =
+                                sorted_bins.iter().any(|(_, r)| Path::new(r) == target_rel)
+                                    || tc.lib_files.iter().any(|(_, r)| Path::new(r) == target_rel);
+
                             if !link_target.is_absolute()
                                 && !link_target.components().any(|c| {
                                     matches!(
@@ -82,6 +91,7 @@ impl ToolchainArchivePackager {
                                             | std::path::Component::Prefix(_)
                                     )
                                 })
+                                && target_in_bundle
                             {
                                 let mut header = tar::Header::new_gnu();
                                 header.set_entry_type(tar::EntryType::Symlink);
@@ -179,6 +189,14 @@ impl ToolchainArchivePackager {
                 if let Ok(sym_meta) = fs::symlink_metadata(host_path) {
                     if sym_meta.file_type().is_symlink() {
                         if let Ok(link_target) = fs::read_link(host_path) {
+                            let target_rel = Path::new(rel_path)
+                                .parent()
+                                .unwrap_or(Path::new(""))
+                                .join(&link_target);
+                            let target_in_bundle =
+                                sorted_libs.iter().any(|(_, r)| Path::new(r) == target_rel)
+                                    || sorted_bins.iter().any(|(_, r)| Path::new(r) == target_rel);
+
                             if !link_target.is_absolute()
                                 && !link_target.components().any(|c| {
                                     matches!(
@@ -188,6 +206,7 @@ impl ToolchainArchivePackager {
                                             | std::path::Component::Prefix(_)
                                     )
                                 })
+                                && target_in_bundle
                             {
                                 let mut header = tar::Header::new_gnu();
                                 header.set_entry_type(tar::EntryType::Symlink);

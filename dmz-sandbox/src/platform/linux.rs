@@ -65,7 +65,7 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
             // C. Prevent mount event leakage to host mount namespace
             if libc::mount(
                 std::ptr::null(),
-                b"/\0".as_ptr() as *const libc::c_char,
+                c"/".as_ptr(),
                 std::ptr::null(),
                 libc::MS_REC | libc::MS_PRIVATE,
                 std::ptr::null(),

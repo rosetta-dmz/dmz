@@ -14,7 +14,7 @@ struct JobHandle(HANDLE);
 
 impl Drop for JobHandle {
     fn drop(&mut self) {
-        if !self.0.is_null() {
+        if self.0 != 0 {
             // `self.0` is a valid non-null Win32 Job Object handle owned exclusively by `JobHandle`.
             unsafe {
                 CloseHandle(self.0);
@@ -58,7 +58,7 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     // Passing null security attributes and null name creates an unnamed Win32 Job Object.
     let job = unsafe {
         let h = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-        if h.is_null() {
+        if h == 0 {
             return Err(PlatformError::WindowsError(format!(
                 "Failed to create Win32 Job Object: {}",
                 std::io::Error::last_os_error()

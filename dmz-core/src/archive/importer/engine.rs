@@ -367,8 +367,11 @@ impl AirGapImporter {
 
                 unpack_tar_entry_contained(&mut entry, effective_store, rel_path)?;
                 imported_count += 1;
-            } else if path.starts_with("toolchains") {
-                let rel_path = path.strip_prefix("toolchains").unwrap_or(&path);
+            } else if path.starts_with("toolchains") || path.starts_with(".dmz/toolchains") {
+                let rel_path = path
+                    .strip_prefix(".dmz/toolchains")
+                    .or_else(|_| path.strip_prefix("toolchains"))
+                    .unwrap_or(&path);
                 if rel_path.as_os_str().is_empty() {
                     continue;
                 }
