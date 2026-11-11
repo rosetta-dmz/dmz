@@ -239,7 +239,12 @@ pub(super) fn show(
         ui.add_space(12.0);
         ui.horizontal_wrapped(|ui| {
             ui.add_enabled_ui(!is_busy, |ui| {
-                if components::action_button(ui, "Export Bundle", true).clicked() {
+                if components::action_button(ui, "Bundle (Fetch)", true)
+                    .on_hover_text(
+                        "Resolve dependencies, fetch remote packages into .dmz/store, and export archive (requires network)",
+                    )
+                    .clicked()
+                {
                     let workspace = PathBuf::from(&*workspace_path);
                     let ws_canon =
                         std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
@@ -270,14 +275,32 @@ pub(super) fn show(
                     let with_toolchain = state.with_toolchain;
                     let (tx, rx) = channel();
                     let ctx = ui.ctx().clone();
-                    state.active_task = Some(("Exporting air-gap bundle...".to_string(), rx));
+                    state.active_task = Some((
+                        "Bundling air-gap closure (fetching dependencies)...".to_string(),
+                        rx,
+                    ));
 
                     thread::spawn(move || {
+                        let multi_workspace =
+                            dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile(
+                                &ws_canon, &lockfile,
+                            );
+
                         if !lockfile.exists() {
-                            match ResolverEngine::resolve_workspace_with_target(
-                                &ws_canon,
-                                target_opt.clone(),
-                            ) {
+                            let resolve_res = if let Some(ref mws) = multi_workspace {
+                                ResolverEngine::resolve_multi_workspace_with_target(
+                                    &ws_canon,
+                                    mws,
+                                    target_opt.clone(),
+                                )
+                            } else {
+                                ResolverEngine::resolve_workspace_with_target(
+                                    &ws_canon,
+                                    target_opt.clone(),
+                                )
+                            };
+
+                            match resolve_res {
                                 Ok(resolved) => {
                                     let _ = resolved.save(&lockfile);
                                 }
@@ -298,11 +321,6 @@ pub(super) fn show(
                             ctx.request_repaint();
                             return;
                         }
-
-                        let multi_workspace =
-                            dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile(
-                                &ws_canon, &lockfile,
-                            );
 
                         let config = ExportConfig {
                             workspace_path: ws_canon,
@@ -341,7 +359,12 @@ pub(super) fn show(
                     });
                 }
 
-                if components::action_button(ui, "Export Archive", false).clicked() {
+                if components::action_button(ui, "Export (Local)", false)
+                    .on_hover_text(
+                        "Export directly from existing local .dmz/store with zero network access (fully offline)",
+                    )
+                    .clicked()
+                {
                     let workspace = PathBuf::from(&*workspace_path);
                     let ws_canon =
                         std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
@@ -372,7 +395,10 @@ pub(super) fn show(
                     let with_toolchain = state.with_toolchain;
                     let (tx, rx) = channel();
                     let ctx = ui.ctx().clone();
-                    state.active_task = Some(("Exporting air-gap archive...".to_string(), rx));
+                    state.active_task = Some((
+                        "Exporting air-gap archive from local store...".to_string(),
+                        rx,
+                    ));
 
                     thread::spawn(move || {
                         let multi_workspace =
@@ -429,7 +455,7 @@ pub(super) fn show(
         ui.add_space(12.0);
         components::dismissable_toast(
             ui,
-            "Level 3 is the default. Higher levels can reduce transfer size at the cost of build time. Select Export Bundle to automatically resolve and fetch dependencies before export, or Export Archive to package an already-cached local store directly.",
+            "Level 3 is the default. Higher levels can reduce transfer size at the cost of build time. Select Bundle (Fetch) to automatically resolve and fetch dependencies before export, or Export (Local) to package an already-cached local store directly with zero network access.",
             &mut state.show_export_tip,
         );
     }
