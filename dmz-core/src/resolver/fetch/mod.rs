@@ -426,12 +426,24 @@ mod tests {
             }),
         ];
 
-        // On a macOS host with target None (defaults to host, which on Apple Silicon is aarch64):
-        // Linux aarch64 wheel gets 40 + 3 = 43, win gets 30+3 = 33
+        // On host default (target None):
+        // On Windows hosts, the native win_amd64 wheel scores 100+3 = 103.
+        // On Linux/macOS hosts, manylinux is selected (native on Linux, or cross-platform fallback on macOS).
         let selected = DependencyFetcher::select_pypi_artifact(&urls, None);
         assert!(selected.is_some());
         let sel_url = selected.unwrap();
-        assert!(sel_url.contains("manylinux"));
+        if cfg!(target_os = "windows") {
+            assert!(sel_url.contains("win_amd64"));
+        } else {
+            assert!(sel_url.contains("manylinux"));
+        }
+
+        // When target is macOS (no macOS wheels in list, fallback to cross-platform matching arch):
+        let selected_mac_arm = DependencyFetcher::select_pypi_artifact(&urls, Some("darwin-arm64"));
+        assert_eq!(
+            selected_mac_arm.as_deref(),
+            Some("https://pypi.org/manylinux_aarch64")
+        );
 
         // When explicit target is linux-x86_64:
         let selected_linux = DependencyFetcher::select_pypi_artifact(&urls, Some("linux-x86_64"));
