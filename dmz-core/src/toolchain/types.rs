@@ -124,6 +124,12 @@ impl ToolchainEcosystem {
     }
 }
 
+impl std::fmt::Display for ToolchainEcosystem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// Metadata entry recorded in the airgap manifest for a bundled toolchain.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolchainManifestEntry {
@@ -144,3 +150,26 @@ pub struct DiscoveredToolchain {
     /// Host path and relative target path within the toolchain archive directory.
     pub lib_files: Vec<(PathBuf, String)>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ecosystem_as_str_and_display() {
+        assert_eq!(ToolchainEcosystem::Rust.as_str(), "rust");
+        assert_eq!(format!("{}", ToolchainEcosystem::Rust), "rust");
+        assert_eq!(ToolchainEcosystem::all().len(), 14);
+    }
+
+    #[test]
+    fn test_ecosystem_classification() {
+        assert!(ToolchainEcosystem::Rust.is_primary_runtime());
+        assert!(!ToolchainEcosystem::Rust.is_auxiliary_build_tool());
+        assert!(ToolchainEcosystem::CMake.is_auxiliary_build_tool());
+        assert!(!ToolchainEcosystem::CMake.is_primary_runtime());
+        assert_eq!(ToolchainEcosystem::from_str_name("CARGO"), Some(ToolchainEcosystem::Rust));
+        assert_eq!(ToolchainEcosystem::from_str_name("unknown"), None);
+    }
+}
+

@@ -9,7 +9,7 @@
 /export/
 /extracted/
 /workspace/
-**/.dmz/backups/
+**/.dmz/
 
 # --- Environment & Logs ---
 .env

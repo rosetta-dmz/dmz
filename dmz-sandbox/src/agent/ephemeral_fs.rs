@@ -9,7 +9,7 @@ pub struct EphemeralFs {
     /// Maximum allowed memory size in bytes
     pub size_limit_bytes: usize,
     /// Whether or not mount was created as a native RAM disk/tmpfs
-    is_mounted: bool,
+    pub is_mounted: bool,
 }
 
 #[derive(Debug)]
@@ -17,6 +17,7 @@ pub enum EphemeralError {
     CreationFailed(String),
     MountFailed(String),
     CleanupFailed(String),
+    SecurityViolation(String),
 }
 
 impl std::fmt::Display for EphemeralError {
@@ -25,6 +26,7 @@ impl std::fmt::Display for EphemeralError {
             Self::CreationFailed(msg) => write!(f, "Scratchpad Directory Creation Failed: {}", msg),
             Self::MountFailed(msg) => write!(f, "tmpfs Mount Failed: {}", msg),
             Self::CleanupFailed(msg) => write!(f, "Scratchpad Cleanup Failed: {}", msg),
+            Self::SecurityViolation(msg) => write!(f, "Security Violation in Scratchpad: {}", msg),
         }
     }
 }
@@ -49,11 +51,58 @@ impl EphemeralFs {
         } else {
             &sanitized_id
         };
-        let mount_path = std::env::temp_dir().join(format!("dmz_agent_scratchpad_{}", safe_id));
 
-        if !mount_path.exists() {
-            fs::create_dir_all(&mount_path)
-                .map_err(|e| EphemeralError::CreationFailed(e.to_string()))?;
+        // Generate unique process and timestamp nonce to eliminate TOCTOU collisions and pre-creation attacks
+        let pid = std::process::id();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+
+        let temp_dir = std::env::temp_dir();
+        let folder_name = format!("dmz_agent_scratchpad_{}_{}_{:x}", safe_id, pid, timestamp);
+        let mount_path = temp_dir.join(folder_name);
+
+        // Atomic creation with restrictive 0o700 permissions
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            use std::os::unix::fs::MetadataExt;
+
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700);
+            builder
+                .create(&mount_path)
+                .map_err(|e| EphemeralError::CreationFailed(format!("Failed to create {:?}: {}", mount_path, e)))?;
+
+            // Defense-in-depth: Verify directory ownership strictly matches current process UID
+            let meta = fs::symlink_metadata(&mount_path)
+                .map_err(|e| EphemeralError::CreationFailed(format!("Failed to read metadata for {:?}: {}", mount_path, e)))?;
+
+            if meta.file_type().is_symlink() {
+                let _ = fs::remove_file(&mount_path);
+                return Err(EphemeralError::SecurityViolation(format!(
+                    "Scratchpad path {:?} is a symlink",
+                    mount_path
+                )));
+            }
+
+            // SAFETY: libc::getuid is an async-signal-safe POSIX syscall with no invariants
+            let current_uid = unsafe { libc::getuid() };
+            if meta.uid() != current_uid {
+                let _ = fs::remove_dir(&mount_path);
+                return Err(EphemeralError::SecurityViolation(format!(
+                    "Scratchpad directory {:?} UID mismatch (expected {}, found {})",
+                    mount_path, current_uid, meta.uid()
+                )));
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            fs::create_dir(&mount_path).map_err(|e| {
+                EphemeralError::CreationFailed(format!("Failed to create {:?}: {}", mount_path, e))
+            })?;
         }
 
         let mut instance = Self {
@@ -85,9 +134,10 @@ impl EphemeralFs {
                 self.is_mounted = true;
                 info!(path = ?self.mount_path, "Mounted Linux tmpfs scratchpad");
             } else {
-                // Fallback for unprivileged Linux environments (e.g. CI runners or non-root users)
+                // Fallback for unprivileged Linux environments
                 use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(&self.mount_path, fs::Permissions::from_mode(0o700));
+                fs::set_permissions(&self.mount_path, fs::Permissions::from_mode(0o700))
+                    .map_err(|e| EphemeralError::MountFailed(format!("Failed to set permissions: {}", e)))?;
                 self.is_mounted = false;
                 info!(
                     path = ?self.mount_path,
@@ -98,19 +148,19 @@ impl EphemeralFs {
 
         #[cfg(target_os = "macos")]
         {
-            // Fallback for MacOS: create isolated RAM scratchpad directory with restricted permissions (0700)
+            // MacOS: isolated directory with restricted permissions (0700)
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&self.mount_path, fs::Permissions::from_mode(0o700))
-                .map_err(|e| EphemeralError::CreationFailed(e.to_string()))?;
-            self.is_mounted = true;
-            info!(path = ?self.mount_path, "Initialized macOS isolated RAM scratchpad");
+                .map_err(|e| EphemeralError::MountFailed(format!("Failed to set permissions: {}", e)))?;
+            self.is_mounted = false;
+            info!(path = ?self.mount_path, "Initialized macOS disk scratchpad with 0700 permissions");
         }
 
         #[cfg(target_os = "windows")]
         {
             // Windows temp path sandbox fallback
-            self.is_mounted = true;
-            info!(path = ?self.mount_path, "Initialized Windows volatile scratchpad");
+            self.is_mounted = false;
+            info!(path = ?self.mount_path, "Initialized Windows disk scratchpad");
         }
 
         Ok(())
@@ -134,8 +184,12 @@ impl Drop for EphemeralFs {
             }
         }
 
-        if self.mount_path.exists() {
-            if let Err(e) = fs::remove_dir_all(&self.mount_path) {
+        // Symlink traversal defense: verify it is a real directory and not a hijacked symlink before deleting
+        if let Ok(meta) = fs::symlink_metadata(&self.mount_path) {
+            if meta.file_type().is_symlink() {
+                warn!(path = ?self.mount_path, "Refusing to recursively delete scratchpad: path is a symlink");
+                let _ = fs::remove_file(&self.mount_path);
+            } else if let Err(e) = fs::remove_dir_all(&self.mount_path) {
                 warn!(error = %e, "Failed to remove ephemeral scratchpad directory");
             }
         }
@@ -148,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_ephemeral_fs_sanitizes_agent_id() {
-        let fs = EphemeralFs::new("../../traversal_agent/evil:name", 1024 * 1024).unwrap();
+        let fs = EphemeralFs::new("../../traversal_agent/unsafe:name", 1024 * 1024).unwrap();
         let path = fs.path().to_path_buf();
         assert!(path.starts_with(std::env::temp_dir()));
         let file_name = path.file_name().unwrap().to_string_lossy();
@@ -156,5 +210,20 @@ mod tests {
         assert!(!file_name.contains('\\'));
         assert!(!file_name.contains(':'));
         assert!(file_name.starts_with("dmz_agent_scratchpad_"));
+    }
+
+    #[test]
+    fn test_ephemeral_fs_unique_instances_do_not_collide() {
+        let fs1 = EphemeralFs::new("same_agent", 1024 * 1024).unwrap();
+        let fs2 = EphemeralFs::new("same_agent", 1024 * 1024).unwrap();
+
+        assert_ne!(fs1.path(), fs2.path());
+        assert!(fs1.path().exists());
+        assert!(fs2.path().exists());
+
+        let p2 = fs2.path().to_path_buf();
+        drop(fs1);
+        // Dropping fs1 must not destroy fs2's scratchpad
+        assert!(p2.exists());
     }
 }

@@ -425,7 +425,7 @@ impl AppearanceState {
     }
 }
 
-fn load_themes(directory: &Path) -> Result<Vec<ThemeFile>, String> {
+pub(super) fn load_themes(directory: &Path) -> Result<Vec<ThemeFile>, String> {
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -433,16 +433,35 @@ fn load_themes(directory: &Path) -> Result<Vec<ThemeFile>, String> {
     };
     let mut themes = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|error| format!("cannot read theme directory entry: {error}"))?;
+        let entry = match entry {
+            Ok(e) => e,
+            Err(error) => {
+                tracing::warn!("cannot read theme directory entry: {error}");
+                continue;
+            }
+        };
         let path = entry.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
-        let contents = std::fs::read_to_string(&path)
-            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-        let theme: ThemeFile = serde_json::from_str(&contents)
-            .map_err(|error| format!("invalid theme {}: {error}", path.display()))?;
-        theme.validate()?;
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(error) => {
+                tracing::warn!("cannot read {}: {error}", path.display());
+                continue;
+            }
+        };
+        let theme: ThemeFile = match serde_json::from_str(&contents) {
+            Ok(t) => t,
+            Err(error) => {
+                tracing::warn!("invalid theme {}: {error}", path.display());
+                continue;
+            }
+        };
+        if let Err(error) = theme.validate() {
+            tracing::warn!("theme validation failed in {}: {error}", path.display());
+            continue;
+        }
         themes.push(theme);
     }
     Ok(themes)
@@ -513,5 +532,43 @@ mod tests {
             ctx.style_of(egui::Theme::Light).visuals.panel_fill,
             egui::Color32::from_rgb(246, 246, 248)
         );
+    }
+
+    #[test]
+    fn test_load_themes_resilient_to_corrupted_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+
+        // 1. Write a valid theme JSON
+        let valid_json = r##"{
+            "schema": 1,
+            "name": "Custom Green",
+            "palette": {
+                "background": "#102010",
+                "panel": "#182818",
+                "panel_alt": "#203020",
+                "text": "#ffffff",
+                "muted": "#889988",
+                "accent": "#00ff88",
+                "border": "#284828"
+            }
+        }"##;
+        std::fs::write(dir.join("valid.json"), valid_json).unwrap();
+
+        // 2. Write a corrupted JSON file
+        std::fs::write(dir.join("corrupted.json"), "{ invalid json: true, ").unwrap();
+
+        // 3. Write a theme with invalid colors
+        std::fs::write(
+            dir.join("bad_color.json"),
+            r#"{"schema": 1, "name": "Bad", "palette": {"background": "invalid"}}"#,
+        )
+        .unwrap();
+
+        // load_themes should succeed and load the valid theme without failing
+        let themes = load_themes(dir)
+            .expect("load_themes should be resilient to individual corrupted files");
+        assert_eq!(themes.len(), 1);
+        assert_eq!(themes[0].name, "Custom Green");
     }
 }

@@ -131,7 +131,7 @@ pub(super) fn show(
             .min_col_width(120.0)
             .show(ui, |ui| {
                 ui.label(if state.is_dual_repo {
-                    "Workspace 1 (Anchor Root)"
+                    "Workspace 1"
                 } else {
                     "Workspace Directory"
                 });
@@ -143,7 +143,7 @@ pub(super) fn show(
                 ui.end_row();
 
                 if state.is_dual_repo {
-                    ui.label("Workspace 2 (Companion)");
+                    ui.label("Workspace 2");
                     if components::path_browse_row(ui, &mut state.sidecar_path, None) {
                         let mut dialog = rfd::FileDialog::new();
                         let ws_path = PathBuf::from(&*workspace_path);
@@ -370,6 +370,7 @@ pub(super) fn show(
                                 &ws_canon, &proj_cfg, None, target_opt,
                             ) {
                                 Ok(unified) => {
+                                    let _ = proj_cfg.save_to_file(&ws_canon.join("dmz-workspace.toml"));
                                     if let Err(e) = unified.save(&out) {
                                         ResolverTaskOutcome::StatusOnly(format!(
                                             "Error saving dual lockfile: {e}"
@@ -377,7 +378,7 @@ pub(super) fn show(
                                     } else {
                                         ResolverTaskOutcome::ResolveSuccess {
                                             status_message: format!(
-                                                "Resolved dual workspaces: {} total packages. Sig: {}",
+                                                "Resolved dual workspaces (saved dmz-workspace.toml): {} total packages. Sig: {}",
                                                 unified.packages.len(),
                                                 &unified.closure_signature
                                                     [..12.min(unified.closure_signature.len())]
@@ -567,14 +568,25 @@ pub(super) fn show(
 
                     thread::spawn(move || {
                         let registry = EcosystemRegistry::new();
-                        let active = registry.discover_active(&workspace);
+                        let active_pairs = registry.discover_active_with_roots(&workspace);
                         let mut passed = 0;
                         let mut failed = 0;
-                        for eco in active {
-                            if let Some(cmd) = eco.verification_command(&workspace) {
+                        let mut toolchain_envs = std::collections::HashMap::new();
+                        dmz_core::toolchain::ToolchainPackager::inject_toolchain_paths(
+                            &workspace,
+                            &mut toolchain_envs,
+                        );
+                        for (eco, member_root) in active_pairs {
+                            if let Some(cmd) = eco.verification_command(&member_root) {
+                                let mut member_envs = toolchain_envs.clone();
+                                dmz_core::toolchain::ToolchainPackager::inject_toolchain_paths(
+                                    &member_root,
+                                    &mut member_envs,
+                                );
                                 match std::process::Command::new(&cmd.program)
                                     .args(&cmd.args)
-                                    .current_dir(&workspace)
+                                    .current_dir(&member_root)
+                                    .envs(&member_envs)
                                     .status()
                                 {
                                     Ok(status) if status.success() => {

@@ -3,6 +3,17 @@ use dmz_core::archive::exporter::ExportMode as CoreExportMode;
 use dmz_core::packaging::BuildTarget;
 use std::path::PathBuf;
 
+/// Canonical default paths and settings across DMZ CLI commands
+pub const DEFAULT_WORKSPACE_PATH: &str = ".";
+pub const DEFAULT_LOCKFILE_PATH: &str = "dmz.lock";
+pub const DEFAULT_STORE_PATH: &str = ".dmz/store";
+pub const DEFAULT_DIST_PATH: &str = "dist";
+pub const DEFAULT_WORKSPACE_CLOSURE_NAME: &str = "workspace_closure";
+pub const DEFAULT_CLOSURE_ARCHIVE_PATH: &str = "dist/workspace_closure.tar.zst";
+pub const DEFAULT_AIRGAP_ARCHIVE_PATH: &str = "dist/airgap_bundle.tar.zst";
+pub const DEFAULT_IMPORT_WORKSPACE_DIR: &str = "workspace";
+pub const DEFAULT_ZSTD_LEVEL: i32 = 3;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "dmz",
@@ -25,7 +36,7 @@ pub enum Commands {
     /// Scan workspace manifests and generate a deterministic dmz.lock closure
     Resolve {
         /// Path to project workspace root
-        #[arg(short, long, default_value = ".")]
+        #[arg(short, long, default_value = DEFAULT_WORKSPACE_PATH)]
         workspace: PathBuf,
 
         /// Path to companion sidecar workspace root (optional dual-repo mode)
@@ -33,7 +44,7 @@ pub enum Commands {
         sidecar: Option<PathBuf>,
 
         /// Destination path for generated lockfile
-        #[arg(short, long, default_value = "dmz.lock")]
+        #[arg(short, long, default_value = DEFAULT_LOCKFILE_PATH)]
         output: PathBuf,
 
         /// Target platform specification (e.g., macos-arm64, linux-x86_64)
@@ -43,58 +54,61 @@ pub enum Commands {
 
     /// Fetch and cache locked dependencies into the secure store
     Fetch {
-        #[arg(long, default_value = "dmz.lock")]
+        /// Path to input lockfile
+        #[arg(short, long, default_value = DEFAULT_LOCKFILE_PATH)]
         lockfile: PathBuf,
-        #[arg(long, default_value = ".dmz/store")]
+
+        /// Path to local dependency store directory
+        #[arg(short, long, default_value = DEFAULT_STORE_PATH)]
         store: PathBuf,
     },
 
     /// Install locked dependencies offline from store into project layouts
     Install {
         /// Path to project workspace root
-        #[arg(short, long, default_value = ".")]
+        #[arg(short, long, default_value = DEFAULT_WORKSPACE_PATH)]
         workspace: PathBuf,
 
         /// Path to input lockfile
-        #[arg(short, long, default_value = "dmz.lock")]
+        #[arg(short, long, default_value = DEFAULT_LOCKFILE_PATH)]
         lockfile: PathBuf,
 
         /// Path to local dependency store directory
-        #[arg(short, long, default_value = ".dmz/store")]
+        #[arg(short, long, default_value = DEFAULT_STORE_PATH)]
         store: PathBuf,
     },
 
     /// Build deterministic package artifacts (Target A: Deps, Target B: App, Target C: Unified)
     Build {
         /// Build target specification
-        #[arg(short, long, value_enum, default_value_t = TargetMode::Unified)]
+        #[arg(short, long, value_enum, default_value_t = TargetMode::Unified, visible_alias = "mode")]
         target: TargetMode,
 
         /// Path to workspace root directory
-        #[arg(short, long, default_value = ".")]
+        #[arg(short, long, default_value = DEFAULT_WORKSPACE_PATH)]
         workspace: PathBuf,
 
         /// Path to input lockfile
-        #[arg(short, long, default_value = "dmz.lock")]
+        #[arg(short, long, default_value = DEFAULT_LOCKFILE_PATH)]
         lockfile: PathBuf,
 
         /// Output directory for build artifacts
-        #[arg(short, long, default_value = "dist")]
+        #[arg(short, long, default_value = DEFAULT_DIST_PATH)]
         output: PathBuf,
 
         /// Base name for generated artifact
-        #[arg(short, long, default_value = "workspace_closure")]
+        #[arg(short, long, default_value = DEFAULT_WORKSPACE_CLOSURE_NAME)]
         name: String,
 
         /// Zstd compression level (1-22)
-        #[arg(long, default_value_t = 3)]
+        #[arg(long, default_value_t = DEFAULT_ZSTD_LEVEL, value_parser = clap::value_parser!(i32).range(1..=22))]
         zstd_level: i32,
     },
 
     /// Execute a command inside a native daemonless OS sandbox
     Sandbox {
         /// Path to workspace directory (mounted R/W)
-        #[arg(short, long, default_value = ".")]
+        #[arg(short, long, default_value = DEFAULT_WORKSPACE_PATH)]
         workspace: PathBuf,
 
         /// Path to companion sidecar workspace root (optional dual-repo mode)
@@ -102,7 +116,7 @@ pub enum Commands {
         sidecar: Option<PathBuf>,
 
         /// Path to dependency closure store (mounted R/O)
-        #[arg(short, long, default_value = ".dmz/store")]
+        #[arg(short, long, default_value = DEFAULT_STORE_PATH)]
         closure: PathBuf,
 
         /// Permit outbound network connections
@@ -129,100 +143,18 @@ pub enum Commands {
     },
 
     /// One-shot resolution, dependency fetching, and export into an air-gap bundle (.tar.zst)
-    Bundle {
-        /// Target platform specification (e.g., macos-arm64, linux-x86_64)
-        #[arg(short, long)]
-        target: Option<String>,
+    Bundle(BundleArgs),
 
-        /// Path to workspace root directory
-        #[arg(short, long, default_value = ".")]
-        workspace: PathBuf,
-
-        /// Path to companion sidecar workspace root (optional dual-repo mode)
-        #[arg(long)]
-        sidecar: Option<PathBuf>,
-
-        /// Destination path for generated lockfile
-        #[arg(short, long, default_value = "dmz.lock")]
-        lockfile: PathBuf,
-
-        /// Path to local dependency store directory
-        #[arg(short, long, default_value = ".dmz/store")]
-        store: PathBuf,
-
-        /// Destination path for generated output archive
-        #[arg(short, long, default_value = "dist/workspace_closure.tar.zst")]
-        output: PathBuf,
-
-        /// Zstd compression level (1-22)
-        #[arg(long, default_value_t = 3)]
-        zstd_level: i32,
-
-        /// Air-gap export target mode
-        #[arg(long, value_enum, default_value_t = CliExportMode::Unified)]
-        mode: CliExportMode,
-
-        /// Force re-resolving dependency manifests even if dmz.lock already exists
-        #[arg(long, default_value_t = false)]
-        refresh_lock: bool,
-
-        /// Archive deterministic Git bundle alongside closure
-        #[arg(long, default_value_t = false)]
-        with_git_history: bool,
-
-        /// Baseline commit, ref, or previous manifest/bundle for incremental delta export
-        #[arg(long)]
-        since: Option<String>,
-
-        /// Package active compiler toolchains (cargo, rustc, node, go, python, php, ruby) into bundle
-        #[arg(long, default_value_t = true)]
-        with_toolchain: bool,
-
-        /// Omit packaging compiler toolchains into the bundle
-        #[arg(long, default_value_t = false)]
-        no_toolchain: bool,
-    },
+    /// Bundle store items and dmz.lock into a portable air-gap archive (.tar.zst)
+    Export(ExportArgs),
 
     /// Unpack, verify, and restore an air-gap bundle into local store
-    Import {
-        /// Path to input .tar.zst air-gap bundle
-        #[arg(short, long)]
-        archive: PathBuf,
-
-        /// Target local store directory
-        #[arg(short, long, default_value = ".dmz/store")]
-        store: PathBuf,
-
-        /// Target workspace directory for extracted project files
-        #[arg(
-            short = 't',
-            long = "to",
-            alias = "workspace",
-            default_value = "workspace"
-        )]
-        workspace: PathBuf,
-
-        /// Skip closure hash verification (NOT recommended)
-        #[arg(long, default_value_t = false)]
-        skip_verify: bool,
-
-        /// Skip automatic offline dependency installation into workspace
-        #[arg(long, default_value_t = false)]
-        skip_install: bool,
-
-        /// Skip automatic ecosystem verification check
-        #[arg(long, default_value_t = false)]
-        skip_ecosystem_verify: bool,
-
-        /// Run verification without sandbox isolation (NOT recommended)
-        #[arg(long, default_value_t = false)]
-        no_sandbox: bool,
-    },
+    Import(ImportArgs),
 
     /// Open an interactive shell inside the workspace (sandboxed by default)
     Shell {
         /// Path to workspace directory (mounted R/W)
-        #[arg(short, long, default_value = ".")]
+        #[arg(short, long, default_value = DEFAULT_WORKSPACE_PATH)]
         workspace: PathBuf,
 
         /// Path to companion sidecar workspace root (optional dual-repo mode)
@@ -230,7 +162,7 @@ pub enum Commands {
         sidecar: Option<PathBuf>,
 
         /// Path to dependency closure store (mounted R/O)
-        #[arg(long, default_value = "/nix/store")]
+        #[arg(long, default_value = DEFAULT_STORE_PATH)]
         closure: PathBuf,
 
         /// Execute command string in shell and exit (e.g. -c "cargo test")
@@ -257,7 +189,7 @@ pub enum Commands {
     /// Initialize a project workspace for DMZ capture
     Init {
         /// Path to project workspace root
-        #[arg(short, long, default_value = ".")]
+        #[arg(short, long, default_value = DEFAULT_WORKSPACE_PATH)]
         workspace: PathBuf,
 
         /// Target platform specification (e.g., macos-arm64, linux-x86_64)
@@ -272,31 +204,190 @@ pub enum Commands {
     },
 
     /// Launch workspace members under coordinated supervisor execution
-    Run {
-        /// Path to project workspace root or umbrella directory
-        #[arg(short, long, default_value = ".")]
-        workspace: PathBuf,
+    Run(RunArgs),
+}
 
-        /// Path to companion workspace root (optional override)
-        #[arg(long)]
-        sidecar: Option<PathBuf>,
+/// Shared command arguments for air-gap bundle creation
+#[derive(clap::Args, Debug, Clone)]
+pub struct BundleArgs {
+    /// Target platform specification (e.g., macos-arm64, linux-x86_64)
+    #[arg(short, long)]
+    pub target: Option<String>,
 
-        /// Permit outbound network connections inside sandboxes
-        #[arg(long, default_value_t = false)]
-        allow_network: bool,
+    /// Path to workspace root directory
+    #[arg(short, long, default_value = DEFAULT_WORKSPACE_PATH)]
+    pub workspace: PathBuf,
 
-        /// Disable sandbox isolation and execute directly on host
-        #[arg(long, default_value_t = false)]
-        no_sandbox: bool,
+    /// Path to companion sidecar workspace root (optional dual-repo mode)
+    #[arg(long)]
+    pub sidecar: Option<PathBuf>,
 
-        /// Custom primary command override (e.g., "npm run tauri dev")
-        #[arg(short = 'c', long = "command")]
-        command: Option<String>,
+    /// Destination path for generated lockfile
+    #[arg(short, long, default_value = DEFAULT_LOCKFILE_PATH)]
+    pub lockfile: PathBuf,
 
-        /// Arguments passed to the primary command
-        #[arg(trailing_var_arg = true)]
-        args: Vec<String>,
-    },
+    /// Path to local dependency store directory
+    #[arg(short, long, default_value = DEFAULT_STORE_PATH)]
+    pub store: PathBuf,
+
+    /// Destination path for generated output archive
+    #[arg(short, long, default_value = DEFAULT_CLOSURE_ARCHIVE_PATH)]
+    pub output: PathBuf,
+
+    /// Zstd compression level (1-22)
+    #[arg(long, default_value_t = DEFAULT_ZSTD_LEVEL, value_parser = clap::value_parser!(i32).range(1..=22))]
+    pub zstd_level: i32,
+
+    /// Air-gap export target mode
+    #[arg(long, value_enum, default_value_t = CliExportMode::Unified)]
+    pub mode: CliExportMode,
+
+    /// Force re-resolving dependency manifests even if dmz.lock already exists
+    #[arg(long, default_value_t = false)]
+    pub refresh_lock: bool,
+
+    /// Archive deterministic Git bundle alongside closure
+    #[arg(long, default_value_t = false)]
+    pub with_git_history: bool,
+
+    /// Baseline commit, ref, or previous manifest/bundle for incremental delta export
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Package active compiler toolchains (cargo, rustc, node, go, python, php, ruby) into bundle
+    #[arg(long, default_value_t = true, overrides_with = "no_toolchain")]
+    pub with_toolchain: bool,
+
+    /// Omit packaging compiler toolchains into the bundle
+    #[arg(long, default_value_t = false, overrides_with = "with_toolchain")]
+    pub no_toolchain: bool,
+}
+
+impl BundleArgs {
+    /// Returns whether toolchain packaging is effectively enabled
+    pub fn toolchain_enabled(&self) -> bool {
+        self.with_toolchain && !self.no_toolchain
+    }
+}
+
+/// Shared command arguments for air-gap store archive export
+#[derive(clap::Args, Debug, Clone)]
+pub struct ExportArgs {
+    /// Target platform specification (e.g., macos-arm64, linux-x86_64)
+    #[arg(short, long)]
+    pub target: Option<String>,
+
+    /// Path to workspace root directory
+    #[arg(short, long, default_value = DEFAULT_WORKSPACE_PATH)]
+    pub workspace: PathBuf,
+
+    /// Path to dmz.lock closure specification
+    #[arg(short, long, default_value = DEFAULT_LOCKFILE_PATH)]
+    pub lockfile: PathBuf,
+
+    /// Path to local store directory
+    #[arg(short, long, default_value = DEFAULT_STORE_PATH)]
+    pub store: PathBuf,
+
+    /// Path for generated output archive
+    #[arg(short, long, default_value = DEFAULT_AIRGAP_ARCHIVE_PATH)]
+    pub output: PathBuf,
+
+    /// Zstd compression level (1-22)
+    #[arg(long, default_value_t = DEFAULT_ZSTD_LEVEL, value_parser = clap::value_parser!(i32).range(1..=22))]
+    pub zstd_level: i32,
+
+    /// Air-gap export target mode
+    #[arg(long, value_enum, default_value_t = CliExportMode::Unified)]
+    pub mode: CliExportMode,
+
+    /// Archive deterministic Git bundle alongside closure
+    #[arg(long, default_value_t = false)]
+    pub with_git_history: bool,
+
+    /// Baseline commit, ref, or previous manifest/bundle for incremental delta export
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Package active compiler toolchains (cargo, rustc, node, go, python, php, ruby) into bundle
+    #[arg(long, default_value_t = true, overrides_with = "no_toolchain")]
+    pub with_toolchain: bool,
+
+    /// Omit packaging compiler toolchains into the bundle
+    #[arg(long, default_value_t = false, overrides_with = "with_toolchain")]
+    pub no_toolchain: bool,
+}
+
+impl ExportArgs {
+    /// Returns whether toolchain packaging is effectively enabled
+    pub fn toolchain_enabled(&self) -> bool {
+        self.with_toolchain && !self.no_toolchain
+    }
+}
+
+/// Shared command arguments for air-gap bundle restoration
+#[derive(clap::Args, Debug, Clone)]
+pub struct ImportArgs {
+    /// Path to input .tar.zst air-gap bundle
+    #[arg(short, long)]
+    pub archive: PathBuf,
+
+    /// Target local store directory
+    #[arg(short, long, default_value = DEFAULT_STORE_PATH)]
+    pub store: PathBuf,
+
+    /// Target workspace directory for extracted project files
+    #[arg(
+        short = 't',
+        long = "to",
+        alias = "workspace",
+        default_value = DEFAULT_IMPORT_WORKSPACE_DIR
+    )]
+    pub workspace: PathBuf,
+
+    /// Skip closure hash verification (NOT recommended)
+    #[arg(long, default_value_t = false)]
+    pub skip_verify: bool,
+
+    /// Skip automatic offline dependency installation into workspace
+    #[arg(long, default_value_t = false)]
+    pub skip_install: bool,
+
+    /// Skip automatic ecosystem verification check
+    #[arg(long, default_value_t = false)]
+    pub skip_ecosystem_verify: bool,
+
+    /// Run verification without sandbox isolation (NOT recommended)
+    #[arg(long, default_value_t = false)]
+    pub no_sandbox: bool,
+}
+
+/// Shared command arguments for workspace execution under supervisor orchestration
+#[derive(clap::Args, Debug, Clone)]
+pub struct RunArgs {
+    /// Path to project workspace root or umbrella directory
+    #[arg(short, long, default_value = DEFAULT_WORKSPACE_PATH)]
+    pub workspace: PathBuf,
+
+    /// Path to companion workspace root (optional override)
+    #[arg(long)]
+    pub sidecar: Option<PathBuf>,
+
+    /// Permit outbound network connections inside sandboxes
+    #[arg(long, default_value_t = false)]
+    pub allow_network: bool,
+
+    /// Disable sandbox isolation and execute directly on host
+    #[arg(long, default_value_t = false)]
+    pub no_sandbox: bool,
+
+    /// Custom primary command override (e.g., "npm run tauri dev")
+    #[arg(short = 'c', long = "command")]
+    pub command: Option<String>,
+
+    /// Arguments passed to the primary command
+    #[arg(trailing_var_arg = true)]
+    pub args: Vec<String>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -304,13 +395,13 @@ pub enum EcosystemAction {
     /// Automatically discover active ecosystems in a workspace
     Discover {
         /// Path to workspace root directory
-        #[arg(short, long, default_value = ".")]
+        #[arg(short, long, default_value = DEFAULT_WORKSPACE_PATH)]
         workspace: PathBuf,
     },
     /// Verify active ecosystems using native engine rules
     Verify {
         /// Path to workspace root directory
-        #[arg(short, long, default_value = ".")]
+        #[arg(short, long, default_value = DEFAULT_WORKSPACE_PATH)]
         workspace: PathBuf,
 
         /// Run verification without sandbox isolation (NOT recommended)
@@ -325,7 +416,7 @@ pub enum TargetMode {
     Dependencies,
     /// Target B: Package repository code only
     App,
-    /// Target C: Package repository code combined with locked dependencies
+    /// Target C: Package repository code and locked dependencies
     Unified,
 }
 
@@ -363,140 +454,11 @@ impl From<CliExportMode> for CoreExportMode {
 pub enum AirgapCommands {
     /// One-shot resolution, dependency fetching, and export into an air-gap bundle (.tar.zst)
     #[command(alias = "pack")]
-    Bundle {
-        /// Target platform specification (e.g., macos-arm64, linux-x86_64)
-        #[arg(short, long)]
-        target: Option<String>,
-
-        /// Path to workspace root directory
-        #[arg(short, long, default_value = ".")]
-        workspace: PathBuf,
-
-        /// Path to companion sidecar workspace root (optional dual-repo mode)
-        #[arg(long)]
-        sidecar: Option<PathBuf>,
-
-        /// Destination path for generated lockfile
-        #[arg(short, long, default_value = "dmz.lock")]
-        lockfile: PathBuf,
-
-        /// Path to local dependency store directory
-        #[arg(short, long, default_value = ".dmz/store")]
-        store: PathBuf,
-
-        /// Destination path for generated output archive
-        #[arg(short, long, default_value = "dist/workspace_closure.tar.zst")]
-        output: PathBuf,
-
-        /// Zstd compression level (1-22)
-        #[arg(long, default_value_t = 3)]
-        zstd_level: i32,
-
-        /// Air-gap export target mode
-        #[arg(long, value_enum, default_value_t = CliExportMode::Unified)]
-        mode: CliExportMode,
-
-        /// Force re-resolving dependency manifests even if dmz.lock already exists
-        #[arg(long, default_value_t = false)]
-        refresh_lock: bool,
-
-        /// Archive deterministic Git bundle alongside closure
-        #[arg(long, default_value_t = false)]
-        with_git_history: bool,
-
-        /// Baseline commit, ref, or previous manifest/bundle for incremental delta export
-        #[arg(long)]
-        since: Option<String>,
-
-        /// Package active compiler toolchains (cargo, rustc, node, go, python, php, ruby) into bundle
-        #[arg(long, default_value_t = true)]
-        with_toolchain: bool,
-
-        /// Omit packaging compiler toolchains into the bundle
-        #[arg(long, default_value_t = false)]
-        no_toolchain: bool,
-    },
+    Bundle(BundleArgs),
 
     /// Bundle store items and dmz.lock into a portable air-gap archive (.tar.zst)
-    Export {
-        /// Target platform specification (e.g., macos-arm64, linux-x86_64)
-        #[arg(short, long)]
-        target: Option<String>,
-
-        /// Path to workspace root directory
-        #[arg(short, long, default_value = ".")]
-        workspace: PathBuf,
-
-        /// Path to dmz.lock closure specification
-        #[arg(short, long, default_value = "dmz.lock")]
-        lockfile: PathBuf,
-
-        /// Path to local store directory
-        #[arg(short, long, default_value = ".dmz/store")]
-        store: PathBuf,
-
-        /// Path for generated output archive
-        #[arg(short, long, default_value = "dist/airgap_bundle.tar.zst")]
-        output: PathBuf,
-
-        /// Zstd compression level (1-22)
-        #[arg(long, default_value_t = 3)]
-        zstd_level: i32,
-
-        /// Air-gap export target mode
-        #[arg(long, value_enum, default_value_t = CliExportMode::Unified)]
-        mode: CliExportMode,
-
-        /// Archive deterministic Git bundle alongside closure
-        #[arg(long, default_value_t = false)]
-        with_git_history: bool,
-
-        /// Baseline commit, ref, or previous manifest/bundle for incremental delta export
-        #[arg(long)]
-        since: Option<String>,
-
-        /// Package active compiler toolchains (cargo, rustc, node, go, python, php, ruby) into bundle
-        #[arg(long, default_value_t = true)]
-        with_toolchain: bool,
-
-        /// Omit packaging compiler toolchains into the bundle
-        #[arg(long, default_value_t = false)]
-        no_toolchain: bool,
-    },
+    Export(ExportArgs),
 
     /// Unpack and cryptographically verify an air-gap bundle into local store
-    Import {
-        /// Path to input .tar.zst air-gap bundle
-        #[arg(short, long)]
-        archive: PathBuf,
-
-        /// Target local store directory
-        #[arg(short, long, default_value = ".dmz/store")]
-        store: PathBuf,
-
-        /// Target workspace directory for extracted project files
-        #[arg(
-            short = 't',
-            long = "to",
-            alias = "workspace",
-            default_value = "workspace"
-        )]
-        workspace: PathBuf,
-
-        /// Skip closure hash verification (not recommended)
-        #[arg(long, default_value_t = false)]
-        skip_verify: bool,
-
-        /// Skip automatic offline dependency installation into workspace
-        #[arg(long, default_value_t = false)]
-        skip_install: bool,
-
-        /// Skip automatic ecosystem verification check
-        #[arg(long, default_value_t = false)]
-        skip_ecosystem_verify: bool,
-
-        /// Run verification without sandbox isolation (not recommended)
-        #[arg(long, default_value_t = false)]
-        no_sandbox: bool,
-    },
+    Import(ImportArgs),
 }

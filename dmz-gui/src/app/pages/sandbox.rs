@@ -20,6 +20,7 @@ pub(super) struct SandboxState {
     command: String,
     console_output: String,
     pub(super) active_task: Option<(String, Receiver<SandboxTaskOutcome>)>,
+    pub(super) cancel_handle: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Default for SandboxState {
@@ -34,6 +35,7 @@ impl Default for SandboxState {
                 "DMZ Workspace Sandbox ready.\nConfigure isolation toggles, workspace directory, and execute commands below.\n",
             ),
             active_task: None,
+            cancel_handle: None,
         }
     }
 }
@@ -56,6 +58,7 @@ pub(super) fn show(
                 state.console_output.push_str(&outcome.output_line);
                 *status_message = outcome.status_message;
                 state.active_task = None;
+                state.cancel_handle = None;
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 ui.ctx().request_repaint();
@@ -63,6 +66,7 @@ pub(super) fn show(
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 *status_message = format!("Sandbox task '{label}' disconnected unexpectedly.");
                 state.active_task = None;
+                state.cancel_handle = None;
             }
         }
     }
@@ -213,6 +217,8 @@ pub(super) fn show(
 
                     let (tx, rx) = channel();
                     let ctx = ui.ctx().clone();
+                    let cancel_latch = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    state.cancel_handle = Some(cancel_latch.clone());
                     state.active_task = Some(("Executing command...".to_string(), rx));
 
                     thread::spawn(move || {
@@ -232,7 +238,15 @@ pub(super) fn show(
                                 Ok(status) => {
                                     let elapsed = start_time.elapsed();
                                     let code = status.code().unwrap_or(-1);
-                                    if status.success() {
+                                    if cancel_latch.load(std::sync::atomic::Ordering::SeqCst) {
+                                        SandboxTaskOutcome {
+                                            output_line: format!(
+                                                "⚠ [CANCELLED] Execution cancelled after {:.2?}\n",
+                                                elapsed
+                                            ),
+                                            status_message: "Sandbox execution cancelled by user.".to_string(),
+                                        }
+                                    } else if status.success() {
                                         SandboxTaskOutcome {
                                             output_line: format!(
                                                 "✓ [SUCCESS] Process finished in {:.2?} with exit code {}\n",
@@ -280,21 +294,62 @@ pub(super) fn show(
                             let mut cmd = std::process::Command::new(shell_cmd);
                             cmd.args([shell_arg, &command])
                                 .current_dir(&workspace)
-                                .envs(env_vec);
+                                .envs(env_vec)
+                                .stdout(std::process::Stdio::piped())
+                                .stderr(std::process::Stdio::piped());
 
-                            let outcome = match cmd.status() {
-                                Ok(status) => {
+                            let outcome = match cmd.output() {
+                                Ok(output) => {
                                     let elapsed = start_time.elapsed();
-                                    let code = status.code().unwrap_or(-1);
-                                    SandboxTaskOutcome {
-                                        output_line: format!(
+                                    let code = output.status.code().unwrap_or(-1);
+                                    let stdout = String::from_utf8_lossy(&output.stdout);
+                                    let stderr = String::from_utf8_lossy(&output.stderr);
+                                    let mut out_str = String::new();
+                                    if !stdout.is_empty() {
+                                        out_str.push_str(&stdout);
+                                        if !stdout.ends_with('\n') {
+                                            out_str.push('\n');
+                                        }
+                                    }
+                                    if !stderr.is_empty() {
+                                        out_str.push_str(&stderr);
+                                        if !stderr.ends_with('\n') {
+                                            out_str.push('\n');
+                                        }
+                                    }
+                                    if cancel_latch.load(std::sync::atomic::Ordering::SeqCst) {
+                                        out_str.push_str(&format!(
+                                            "⚠ [CANCELLED] Execution cancelled after {:.2?}\n",
+                                            elapsed
+                                        ));
+                                        SandboxTaskOutcome {
+                                            output_line: out_str,
+                                            status_message: "Host execution cancelled by user.".to_string(),
+                                        }
+                                    } else if output.status.success() {
+                                        out_str.push_str(&format!(
                                             "✓ [HOST UNCONFINED] Finished in {:.2?} with exit code {}\n",
                                             elapsed, code
-                                        ),
-                                        status_message: format!(
-                                            "Host command completed (exit code {})",
-                                            code
-                                        ),
+                                        ));
+                                        SandboxTaskOutcome {
+                                            output_line: out_str,
+                                            status_message: format!(
+                                                "Host command completed (exit code {})",
+                                                code
+                                            ),
+                                        }
+                                    } else {
+                                        out_str.push_str(&format!(
+                                            "✗ [HOST FAILED] Finished in {:.2?} with exit code {}\n",
+                                            elapsed, code
+                                        ));
+                                        SandboxTaskOutcome {
+                                            output_line: out_str,
+                                            status_message: format!(
+                                                "Host command exited with code {}",
+                                                code
+                                            ),
+                                        }
                                     }
                                 }
                                 Err(e) => SandboxTaskOutcome {
@@ -322,6 +377,12 @@ pub(super) fn show(
             if let Some((ref label, _)) = state.active_task {
                 ui.add_space(8.0);
                 components::inline_spinner_status(ui, label);
+                if components::action_button(ui, "Cancel Task", false).clicked() {
+                    if let Some(ref cancel) = state.cancel_handle {
+                        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    *status_message = "Cancellation requested for running task.".to_string();
+                }
             }
         });
     });
@@ -357,7 +418,14 @@ fn chrono_timestamp() -> String {
     format!("{:02}:{:02}:{:02}", hours, mins, s)
 }
 
-fn resolve_dmz_cli_cmd(abs_workspace: &Path, extra_flags: &str) -> String {
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum DmzCliInvocation {
+    Binary(PathBuf),
+    Cargo,
+    FallbackShell,
+}
+
+pub(super) fn detect_dmz_cli() -> DmzCliInvocation {
     let current_exe = std::env::current_exe().ok();
     let dmz_bin_name = if cfg!(windows) { "dmz.exe" } else { "dmz" };
     let adjacent_dmz = current_exe
@@ -365,59 +433,26 @@ fn resolve_dmz_cli_cmd(abs_workspace: &Path, extra_flags: &str) -> String {
         .and_then(|p| p.parent())
         .map(|p| p.join(dmz_bin_name));
 
-    let flags_str = if extra_flags.is_empty() {
-        String::new()
-    } else {
-        format!(" {}", extra_flags)
-    };
-
-    if cfg!(windows) {
-        if let Some(bin) = adjacent_dmz.filter(|p| p.exists()) {
-            format!(
-                "cd /d \"{}\" && \"{}\" shell{}",
-                abs_workspace.display(),
-                bin.display(),
-                flags_str
-            )
-        } else if let Ok(path) = which::which("dmz") {
-            format!(
-                "cd /d \"{}\" && \"{}\" shell{}",
-                abs_workspace.display(),
-                path.display(),
-                flags_str
-            )
-        } else if which::which("cargo").is_ok() && std::path::Path::new("Cargo.toml").exists() {
-            format!(
-                "cd /d \"{}\" && cargo run -p dmz-cli -- shell{}",
-                abs_workspace.display(),
-                flags_str
-            )
-        } else {
-            format!("cd /d \"{}\"", abs_workspace.display())
-        }
-    } else if let Some(bin) = adjacent_dmz.filter(|p| p.exists()) {
-        format!(
-            "cd '{}' && '{}' shell{}",
-            abs_workspace.display(),
-            bin.display(),
-            flags_str
-        )
+    if let Some(bin) = adjacent_dmz.filter(|p| p.exists()) {
+        DmzCliInvocation::Binary(bin)
     } else if let Ok(path) = which::which("dmz") {
-        format!(
-            "cd '{}' && '{}' shell{}",
-            abs_workspace.display(),
-            path.display(),
-            flags_str
-        )
+        DmzCliInvocation::Binary(path)
     } else if which::which("cargo").is_ok() && std::path::Path::new("Cargo.toml").exists() {
-        format!(
-            "cd '{}' && cargo run -p dmz-cli -- shell{}",
-            abs_workspace.display(),
-            flags_str
-        )
+        DmzCliInvocation::Cargo
     } else {
-        format!("cd '{}' && exec $SHELL", abs_workspace.display())
+        DmzCliInvocation::FallbackShell
     }
+}
+
+pub(super) fn escape_applescript_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace(['\r', '\n'], "")
+}
+
+#[allow(dead_code)]
+pub(super) fn escape_posix_single_quotes(s: &str) -> String {
+    s.replace('\'', "'\\''")
 }
 
 fn launch_external_terminal(workspace_path: &str, sandboxed: bool, allow_network: bool) {
@@ -427,33 +462,49 @@ fn launch_external_terminal(workspace_path: &str, sandboxed: bool, allow_network
     #[cfg(target_os = "macos")]
     {
         let extra_flags = if !sandboxed {
-            "--no-sandbox"
+            " --no-sandbox"
         } else if allow_network {
-            "--allow-network"
+            " --allow-network"
         } else {
             ""
         };
-        let shell_cmd = resolve_dmz_cli_cmd(&abs_workspace, extra_flags);
-        let escaped_cmd = shell_cmd.replace('\\', "\\\\").replace('"', "\\\"");
+        let ws_str = escape_applescript_string(&abs_workspace.display().to_string());
+        let script = match detect_dmz_cli() {
+            DmzCliInvocation::Binary(bin) => {
+                let bin_str = escape_applescript_string(&bin.display().to_string());
+                format!(
+                    "tell application \"Terminal\" to do script (\"cd \" & quoted form of \"{}\" & \" && \" & quoted form of \"{}\" & \" shell{}\")",
+                    ws_str, bin_str, extra_flags
+                )
+            }
+            DmzCliInvocation::Cargo => {
+                format!(
+                    "tell application \"Terminal\" to do script (\"cd \" & quoted form of \"{}\" & \" && cargo run -p dmz-cli -- shell{}\")",
+                    ws_str, extra_flags
+                )
+            }
+            DmzCliInvocation::FallbackShell => {
+                format!(
+                    "tell application \"Terminal\" to do script (\"cd \" & quoted form of \"{}\" & \" && exec $SHELL\")",
+                    ws_str
+                )
+            }
+        };
         let _ = std::process::Command::new("osascript")
             .arg("-e")
-            .arg(format!(
-                "tell application \"Terminal\" to do script \"{}\"",
-                escaped_cmd
-            ))
+            .arg(script)
             .spawn();
     }
 
     #[cfg(target_os = "linux")]
     {
-        let extra_flags = if !sandboxed {
+        let extra_flag = if !sandboxed {
             "--no-sandbox"
         } else if allow_network {
             "--allow-network"
         } else {
             ""
         };
-        let shell_cmd = resolve_dmz_cli_cmd(&abs_workspace, extra_flags);
         let terminals = [
             std::env::var("TERMINAL").ok(),
             Some("x-terminal-emulator".to_string()),
@@ -464,20 +515,61 @@ fn launch_external_terminal(workspace_path: &str, sandboxed: bool, allow_network
             Some("xterm".to_string()),
         ];
 
+        let ws_str = abs_workspace.display().to_string();
+        let invocation = detect_dmz_cli();
+
         for term_opt in terminals.into_iter().flatten() {
             if which::which(&term_opt).is_ok() {
-                let spawned = if term_opt == "gnome-terminal" {
-                    std::process::Command::new(&term_opt)
-                        .arg("--")
-                        .arg("sh")
-                        .arg("-c")
-                        .arg(&shell_cmd)
-                        .spawn()
-                } else {
-                    std::process::Command::new(&term_opt)
-                        .arg("-e")
-                        .arg(&shell_cmd)
-                        .spawn()
+                let mut cmd = std::process::Command::new(&term_opt);
+                let spawned = match &invocation {
+                    DmzCliInvocation::Binary(bin) => {
+                        let bin_str = bin.display().to_string();
+                        let shell_script = if extra_flag.is_empty() {
+                            "cd \"$1\" && \"$2\" shell"
+                        } else {
+                            "cd \"$1\" && \"$2\" shell \"$3\""
+                        };
+                        if term_opt == "gnome-terminal" {
+                            cmd.args(["--", "sh", "-c", shell_script, "_", &ws_str, &bin_str]);
+                            if !extra_flag.is_empty() {
+                                cmd.arg(extra_flag);
+                            }
+                        } else {
+                            cmd.args(["-e", "sh", "-c", shell_script, "_", &ws_str, &bin_str]);
+                            if !extra_flag.is_empty() {
+                                cmd.arg(extra_flag);
+                            }
+                        }
+                        cmd.spawn()
+                    }
+                    DmzCliInvocation::Cargo => {
+                        let shell_script = if extra_flag.is_empty() {
+                            "cd \"$1\" && cargo run -p dmz-cli -- shell"
+                        } else {
+                            "cd \"$1\" && cargo run -p dmz-cli -- shell \"$2\""
+                        };
+                        if term_opt == "gnome-terminal" {
+                            cmd.args(["--", "sh", "-c", shell_script, "_", &ws_str]);
+                            if !extra_flag.is_empty() {
+                                cmd.arg(extra_flag);
+                            }
+                        } else {
+                            cmd.args(["-e", "sh", "-c", shell_script, "_", &ws_str]);
+                            if !extra_flag.is_empty() {
+                                cmd.arg(extra_flag);
+                            }
+                        }
+                        cmd.spawn()
+                    }
+                    DmzCliInvocation::FallbackShell => {
+                        if term_opt == "gnome-terminal" {
+                            cmd.args(["--", "sh", "-c", "cd \"$1\" && exec $SHELL", "_", &ws_str])
+                                .spawn()
+                        } else {
+                            cmd.args(["-e", "sh", "-c", "cd \"$1\" && exec $SHELL", "_", &ws_str])
+                                .spawn()
+                        }
+                    }
                 };
                 if spawned.is_ok() {
                     break;
@@ -489,16 +581,80 @@ fn launch_external_terminal(workspace_path: &str, sandboxed: bool, allow_network
     #[cfg(target_os = "windows")]
     {
         let extra_flags = if !sandboxed {
-            "--no-sandbox"
+            " --no-sandbox"
         } else if allow_network {
-            "--allow-network"
+            " --allow-network"
         } else {
             ""
         };
-        let shell_cmd = resolve_dmz_cli_cmd(&abs_workspace, extra_flags);
+        let ws_str = abs_workspace.display().to_string().replace('"', "\\\"");
+        let cmd_line = match detect_dmz_cli() {
+            DmzCliInvocation::Binary(bin) => {
+                let bin_str = bin.display().to_string().replace('"', "\\\"");
+                format!(
+                    "cd /d \"{}\" && \"{}\" shell{}",
+                    ws_str, bin_str, extra_flags
+                )
+            }
+            DmzCliInvocation::Cargo => {
+                format!(
+                    "cd /d \"{}\" && cargo run -p dmz-cli -- shell{}",
+                    ws_str, extra_flags
+                )
+            }
+            DmzCliInvocation::FallbackShell => {
+                format!("cd /d \"{}\"", ws_str)
+            }
+        };
         let _ = std::process::Command::new("cmd.exe")
-            .arg("/C")
-            .arg(format!("start cmd /K \"{}\"", shell_cmd))
+            .args(["/C", "start", "cmd", "/K", &cmd_line])
             .spawn();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_escape_applescript_string_sanitizes_injection_vectors() {
+        let input = "path\\with\"quotes\r\nand\nnewlines";
+        let escaped = escape_applescript_string(input);
+        assert_eq!(escaped, "path\\\\with\\\"quotesandnewlines");
+        assert!(!escaped.contains('\r'));
+        assert!(!escaped.contains('\n'));
+    }
+
+    #[test]
+    fn test_escape_posix_single_quotes_safely_escapes() {
+        let input = "bob's project; rm -rf /";
+        let escaped = escape_posix_single_quotes(input);
+        assert_eq!(escaped, "bob'\\''s project; rm -rf /");
+    }
+
+    #[test]
+    fn test_sandbox_state_cancellation_latch() {
+        let mut state = SandboxState::default();
+        assert!(!state.is_busy());
+
+        let latch = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        state.cancel_handle = Some(latch.clone());
+        assert!(!latch.load(std::sync::atomic::Ordering::SeqCst));
+
+        // Simulate cancellation request
+        if let Some(ref cancel) = state.cancel_handle {
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        assert!(latch.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_detect_dmz_cli_returns_valid_variant() {
+        let invocation = detect_dmz_cli();
+        match invocation {
+            DmzCliInvocation::Binary(p) => assert!(!p.as_os_str().is_empty()),
+            DmzCliInvocation::Cargo => assert!(std::path::Path::new("Cargo.toml").exists()),
+            DmzCliInvocation::FallbackShell => {}
+        }
     }
 }

@@ -14,6 +14,20 @@ Of course, it's still recommended to use a daemon when necessary (Docker, Podman
 - **Native Toolchain Packaging:** Optionally packages host compiler and runtime binaries (`cargo`, `rustc`, `node`, `pnpm`, `python3`, `go`, `php`, `ruby`) directly into bundles (`--with-toolchain`) so air-gapped target machines without pre-installed compilers can compile and run out of the box.
 - **Engine-Driven Verification:** Programmatically validates imported workspaces using native ecosystem rules via `dmz ecosystem verify`.
 - **Supervisor & IPC Sockets:** Manages collateral stack services and exposes local API sockets for tool and IDE integrations.
+
+![Resolver](images/Resolver.png)
+
+![Workspace Sandbox](images/Workspace-Sandbox.png)
+
+![Agent Sandbox](images/Agent-Sandbox.png)
+
+![Air-Gap Manager](images/Air-Gap-Manager.png)
+
+![Version Control](images/Version-Control.png)
+
+![Supervisor IPC](images/Supervisor-IPC.png)
+
+![Settings](images/Settings.png)
 ---
 
 ## Installation & Quick Start
