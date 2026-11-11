@@ -68,7 +68,10 @@ mod tests {
         let sandbox = AgentSandbox::new(
             "test_worker",
             2 * 1024 * 1024,
-            vec!["".to_string(), "".to_string()],
+            vec![
+                "allowed-service.local".to_string(),
+                "*.allowed-wildcard.local".to_string(),
+            ],
         )
         .expect("Failed to create agent sandbox");
 
@@ -76,13 +79,13 @@ mod tests {
         assert!(sandbox.scratchpad_path().exists());
 
         // Policy verification
-        assert!(sandbox.can_access_host(""));
-        assert!(sandbox.can_access_host(""));
-        assert!(sandbox.can_access_host(""));
-        assert!(!sandbox.can_access_host(""));
+        assert!(sandbox.can_access_host("allowed-service.local"));
+        assert!(sandbox.can_access_host("allowed-service.local:443"));
+        assert!(sandbox.can_access_host("sub.allowed-wildcard.local"));
+        assert!(!sandbox.can_access_host("blocked-service.local"));
 
-        assert!(sandbox.authorize_host("").is_ok());
-        assert!(sandbox.authorize_host("").is_err());
+        assert!(sandbox.authorize_host("allowed-service.local").is_ok());
+        assert!(sandbox.authorize_host("blocked-service.local").is_err());
 
         let path = sandbox.scratchpad_path().to_path_buf();
         drop(sandbox);

@@ -14,15 +14,11 @@ impl BundlerMapper {
         archive_path: &Path,
     ) -> Result<(), InstallError> {
         let bundle_dir = workspace_path.join("vendor").join("bundle").join(&pkg.name);
-        fs::create_dir_all(&bundle_dir).map_err(|e| {
-            InstallError::IoError(format!("Failed to create bundle dir: {}", e))
-        })?;
+        fs::create_dir_all(&bundle_dir)
+            .map_err(|e| InstallError::IoError(format!("Failed to create bundle dir: {}", e)))?;
 
         SafeArchiveExtractor::extract(archive_path, &bundle_dir).map_err(|e| {
-            InstallError::MapperError(format!(
-                "Failed to unpack Ruby gem {}: {}",
-                pkg.name, e
-            ))
+            InstallError::MapperError(format!("Failed to unpack Ruby gem {}: {}", pkg.name, e))
         })?;
 
         // Automatically provision .bundle/config pointing Bundler to local vendor path
@@ -39,4 +35,3 @@ BUNDLE_LOCAL: "true"
         Ok(())
     }
 }
-

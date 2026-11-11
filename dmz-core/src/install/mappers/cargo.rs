@@ -68,9 +68,9 @@ impl CargoMapper {
             .flatten()
         {
             let path = entry.path();
-            let file_name = path.file_name().ok_or_else(|| {
-                InstallError::IoError("Invalid file name in archive".into())
-            })?;
+            let file_name = path
+                .file_name()
+                .ok_or_else(|| InstallError::IoError("Invalid file name in archive".into()))?;
             let dest_path = vendor_dir.join(file_name);
             let _ = fs::rename(&path, &dest_path);
         }
@@ -156,4 +156,3 @@ directory = "../.cargo/vendor"
         Ok(())
     }
 }
-

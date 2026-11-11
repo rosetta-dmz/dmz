@@ -202,4 +202,3 @@ fn test_git_provider_create_and_restore_bundle_roundtrip() {
         "airgap git bundle payload"
     );
 }
-

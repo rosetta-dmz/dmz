@@ -2,8 +2,8 @@
 //! Validates Root Manifest Dominance and ensures exported bundles are strictly complete
 //! and ready out-of-the-box.
 
-mod common;
 mod cmake_toolchain;
+mod common;
+mod compilation_proof;
 mod integrity_and_rollback;
 mod stripped_path_verification;
-mod compilation_proof;

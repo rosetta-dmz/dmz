@@ -2,7 +2,6 @@
 //! Validates manifest scanning, dependency inheritance, range normalization,
 //! multi-workspace manifests, socket boundaries, and ABI verification.
 
-mod single_workspace;
 mod multi_workspace_manifest;
+mod single_workspace;
 mod socket_and_abi;
-

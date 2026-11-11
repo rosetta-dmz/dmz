@@ -115,7 +115,10 @@ serde = { workspace = true }
             .collect();
 
         assert_eq!(cargo_manifests.len(), 2);
-        let root_manifest = cargo_manifests.iter().find(|m| m.path == cargo_toml).unwrap();
+        let root_manifest = cargo_manifests
+            .iter()
+            .find(|m| m.path == cargo_toml)
+            .unwrap();
         assert_eq!(root_manifest.dependencies.len(), 2);
         let serde_dep = root_manifest
             .dependencies
@@ -158,10 +161,19 @@ snapshots:
         .unwrap();
 
         let manifests = ManifestScanner::scan_dir(temp.path()).unwrap();
-        let npm_manifest = manifests.iter().find(|m| m.ecosystem == Ecosystem::Npm).unwrap();
+        let npm_manifest = manifests
+            .iter()
+            .find(|m| m.ecosystem == Ecosystem::Npm)
+            .unwrap();
         assert_eq!(npm_manifest.dependencies.len(), 3);
-        assert!(npm_manifest.dependencies.iter().any(|d| d.name == "react" && d.version_req == "18.3.1"));
-        assert!(npm_manifest.dependencies.iter().any(|d| d.name == "loose-envify" && d.version_req == "1.4.0"));
+        assert!(npm_manifest
+            .dependencies
+            .iter()
+            .any(|d| d.name == "react" && d.version_req == "18.3.1"));
+        assert!(npm_manifest
+            .dependencies
+            .iter()
+            .any(|d| d.name == "loose-envify" && d.version_req == "1.4.0"));
     }
 
     #[test]
@@ -180,10 +192,7 @@ snapshots:
 
     #[test]
     fn test_pypi_normalization() {
-        assert_eq!(
-            ManifestScanner::normalize_pypi_name("Pillow"),
-            "pillow"
-        );
+        assert_eq!(ManifestScanner::normalize_pypi_name("Pillow"), "pillow");
         assert_eq!(
             ManifestScanner::normalize_pypi_name("pytest_cov"),
             "pytest-cov"
@@ -218,7 +227,8 @@ snapshots:
         let manifests = ManifestScanner::scan_dir(temp.path()).unwrap();
         assert!(manifests.iter().any(|m| m.ecosystem == Ecosystem::Composer));
         assert!(manifests.iter().any(|m| m.ecosystem == Ecosystem::Bundler));
-        assert!(manifests.iter().any(|m| m.ecosystem == Ecosystem::MavenGradle));
+        assert!(manifests
+            .iter()
+            .any(|m| m.ecosystem == Ecosystem::MavenGradle));
     }
 }
-

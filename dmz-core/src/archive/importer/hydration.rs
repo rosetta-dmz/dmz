@@ -128,8 +128,10 @@ pub fn hydrate_offline_dependencies(
                         && std::os::windows::fs::symlink_file(&root_manifest, &member_manifest)
                             .is_err()
                     {
-                        let _ = std::fs::hard_link(&root_manifest, &member_manifest)
-                            .or_else(|_| std::fs::copy(&root_manifest, &member_manifest).map(|_| ()));
+                        let _ =
+                            std::fs::hard_link(&root_manifest, &member_manifest).or_else(|_| {
+                                std::fs::copy(&root_manifest, &member_manifest).map(|_| ())
+                            });
                     }
                 }
             }

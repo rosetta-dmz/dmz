@@ -334,4 +334,3 @@ impl PythonManifestScanner {
         deps
     }
 }
-

@@ -483,10 +483,7 @@ impl AirGapExporter {
     }
 
     /// Resolves reproducible timestamp: SOURCE_DATE_EPOCH env var -> Git commit timestamp -> DOS/Bazel epoch (1980-01-01)
-    pub fn resolve_deterministic_epoch(
-        workspace_root: &Path,
-        vcs: Option<&VcsProvenance>,
-    ) -> u64 {
+    pub fn resolve_deterministic_epoch(workspace_root: &Path, vcs: Option<&VcsProvenance>) -> u64 {
         resolve_deterministic_epoch(workspace_root, vcs)
     }
 
@@ -495,4 +492,3 @@ impl AirGapExporter {
         hash_file_sha256(path)
     }
 }
-

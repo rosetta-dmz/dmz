@@ -91,4 +91,3 @@ pub fn copy_dir_contents(src: &Path, dst: &Path, skip_ignored: bool) -> Result<(
     }
     Ok(())
 }
-

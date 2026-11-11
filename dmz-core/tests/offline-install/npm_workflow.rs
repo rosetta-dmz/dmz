@@ -306,4 +306,3 @@ fn test_airgap_offline_install_npm_bin_links() -> Result<(), Box<dyn std::error:
 
     Ok(())
 }
-

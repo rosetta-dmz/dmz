@@ -1,6 +1,4 @@
-use dmz_core::workspace::{
-    analyze_sidecar_abi, cleanup_stale_socket, safe_socket_path,
-};
+use dmz_core::workspace::{analyze_sidecar_abi, cleanup_stale_socket, safe_socket_path};
 use std::fs;
 use tempfile::tempdir;
 
@@ -94,4 +92,3 @@ fn test_structured_abi_binary_header_diagnostics() {
     assert!(static_report.is_static);
     assert!(static_report.warnings.is_empty());
 }
-

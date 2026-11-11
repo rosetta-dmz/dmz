@@ -108,7 +108,10 @@ pub fn unpack_tar_entry_contained<R: Read>(
                     }
                 } else {
                     fs::create_dir_all(&current).map_err(|e| {
-                        ImportError::IoError(format!("Failed to create directory {:?}: {}", current, e))
+                        ImportError::IoError(format!(
+                            "Failed to create directory {:?}: {}",
+                            current, e
+                        ))
                     })?;
                 }
             }
@@ -210,4 +213,3 @@ pub fn unpack_tar_entry_contained<R: Read>(
 
     Ok(())
 }
-

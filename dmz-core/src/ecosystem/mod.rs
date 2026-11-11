@@ -70,9 +70,7 @@ impl CommandSpec {
                     let entry_path = entry.path();
                     let mut candidates = vec![
                         entry_path.join("bin").join(&self.program),
-                        entry_path
-                            .join("bin")
-                            .join(format!("{}.exe", self.program)),
+                        entry_path.join("bin").join(format!("{}.exe", self.program)),
                         entry_path.join(&self.program),
                         entry_path.join(format!("{}.exe", self.program)),
                     ];

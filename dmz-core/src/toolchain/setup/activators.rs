@@ -377,4 +377,3 @@ echo DMZ bundled toolchains activated.
 
     Ok(())
 }
-

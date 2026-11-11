@@ -168,8 +168,10 @@ mod tests {
         assert!(!ToolchainEcosystem::Rust.is_auxiliary_build_tool());
         assert!(ToolchainEcosystem::CMake.is_auxiliary_build_tool());
         assert!(!ToolchainEcosystem::CMake.is_primary_runtime());
-        assert_eq!(ToolchainEcosystem::from_str_name("CARGO"), Some(ToolchainEcosystem::Rust));
+        assert_eq!(
+            ToolchainEcosystem::from_str_name("CARGO"),
+            Some(ToolchainEcosystem::Rust)
+        );
         assert_eq!(ToolchainEcosystem::from_str_name("unknown"), None);
     }
 }
-

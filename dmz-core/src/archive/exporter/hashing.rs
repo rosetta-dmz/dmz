@@ -63,4 +63,3 @@ pub fn calculate_file_sha256(path: &Path) -> Result<String, std::io::Error> {
 
     Ok(format!("{:x}", hasher.finalize()))
 }
-

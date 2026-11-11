@@ -56,7 +56,10 @@ fn test_sandbox_runner_trait_and_workspace_validation() {
         PlatformError::PlatformFault(msg) => {
             assert!(msg.contains("Workspace path does not exist"));
         }
-        other => panic!("Expected PlatformFault for missing workspace, got: {:?}", other),
+        other => panic!(
+            "Expected PlatformFault for missing workspace, got: {:?}",
+            other
+        ),
     }
 }
 

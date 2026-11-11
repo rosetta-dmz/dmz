@@ -1,9 +1,9 @@
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use tar::Builder as TarBuilder;
 use tempfile::tempdir;
 

@@ -122,4 +122,3 @@ fn test_dual_repo_sidecar_member_dependency_isolation() {
         "Sidecar dependencies must not leak into primary app directory"
     );
 }
-

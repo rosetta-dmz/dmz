@@ -104,4 +104,3 @@ fn test_git_bundle_creation_and_restore() {
 
     assert!(restore_target.join(".git/workspace.bundle").exists());
 }
-

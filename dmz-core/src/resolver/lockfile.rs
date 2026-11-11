@@ -208,9 +208,10 @@ impl DmzLockfile {
         let file = fs::File::open(path)?;
         let metadata = file.metadata()?;
         if metadata.is_dir() {
-            return Err(LockError::Io(std::io::Error::other(
-                format!("Path {:?} is a directory, expected lockfile", path),
-            )));
+            return Err(LockError::Io(std::io::Error::other(format!(
+                "Path {:?} is a directory, expected lockfile",
+                path
+            ))));
         }
         if metadata.len() > MAX_LOCKFILE_SIZE {
             return Err(LockError::LockfileTooLarge {

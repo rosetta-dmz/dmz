@@ -73,4 +73,3 @@ pub fn apply_permissions_and_quarantine(toolchains_dir: &Path) -> Result<(), Str
 
     Ok(())
 }
-

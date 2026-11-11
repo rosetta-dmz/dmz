@@ -411,10 +411,7 @@ if (Test-Path $appTarget) {{
         }
 
         SafeArchiveExtractor::extract(archive_path, target_dir).map_err(|e| {
-            InstallError::MapperError(format!(
-                "Failed to unpack package {}: {}",
-                pkg_name, e
-            ))
+            InstallError::MapperError(format!("Failed to unpack package {}: {}", pkg_name, e))
         })?;
 
         // If unpacked archive contains a top-level "package" directory (standard npm tarball structure),
@@ -462,4 +459,3 @@ if (Test-Path $appTarget) {{
         Ok(())
     }
 }
-

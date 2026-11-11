@@ -71,13 +71,17 @@ impl EphemeralFs {
 
             let mut builder = fs::DirBuilder::new();
             builder.mode(0o700);
-            builder
-                .create(&mount_path)
-                .map_err(|e| EphemeralError::CreationFailed(format!("Failed to create {:?}: {}", mount_path, e)))?;
+            builder.create(&mount_path).map_err(|e| {
+                EphemeralError::CreationFailed(format!("Failed to create {:?}: {}", mount_path, e))
+            })?;
 
             // Defense-in-depth: Verify directory ownership strictly matches current process UID
-            let meta = fs::symlink_metadata(&mount_path)
-                .map_err(|e| EphemeralError::CreationFailed(format!("Failed to read metadata for {:?}: {}", mount_path, e)))?;
+            let meta = fs::symlink_metadata(&mount_path).map_err(|e| {
+                EphemeralError::CreationFailed(format!(
+                    "Failed to read metadata for {:?}: {}",
+                    mount_path, e
+                ))
+            })?;
 
             if meta.file_type().is_symlink() {
                 let _ = fs::remove_file(&mount_path);
@@ -93,7 +97,9 @@ impl EphemeralFs {
                 let _ = fs::remove_dir(&mount_path);
                 return Err(EphemeralError::SecurityViolation(format!(
                     "Scratchpad directory {:?} UID mismatch (expected {}, found {})",
-                    mount_path, current_uid, meta.uid()
+                    mount_path,
+                    current_uid,
+                    meta.uid()
                 )));
             }
         }
@@ -136,8 +142,9 @@ impl EphemeralFs {
             } else {
                 // Fallback for unprivileged Linux environments
                 use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&self.mount_path, fs::Permissions::from_mode(0o700))
-                    .map_err(|e| EphemeralError::MountFailed(format!("Failed to set permissions: {}", e)))?;
+                fs::set_permissions(&self.mount_path, fs::Permissions::from_mode(0o700)).map_err(
+                    |e| EphemeralError::MountFailed(format!("Failed to set permissions: {}", e)),
+                )?;
                 self.is_mounted = false;
                 info!(
                     path = ?self.mount_path,
@@ -150,8 +157,9 @@ impl EphemeralFs {
         {
             // MacOS: isolated directory with restricted permissions (0700)
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&self.mount_path, fs::Permissions::from_mode(0o700))
-                .map_err(|e| EphemeralError::MountFailed(format!("Failed to set permissions: {}", e)))?;
+            fs::set_permissions(&self.mount_path, fs::Permissions::from_mode(0o700)).map_err(
+                |e| EphemeralError::MountFailed(format!("Failed to set permissions: {}", e)),
+            )?;
             self.is_mounted = false;
             info!(path = ?self.mount_path, "Initialized macOS disk scratchpad with 0700 permissions");
         }

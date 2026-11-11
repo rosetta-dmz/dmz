@@ -43,10 +43,7 @@ pub fn package_multi_workspace_umbrella<W: Write>(
         } else {
             let host_path = if member.path.is_relative() {
                 if let Some(m_path) = manifest_path_opt {
-                    m_path
-                        .parent()
-                        .unwrap_or(workspace_root)
-                        .join(&member.path)
+                    m_path.parent().unwrap_or(workspace_root).join(&member.path)
                 } else {
                     workspace_root.join(&member.path)
                 }

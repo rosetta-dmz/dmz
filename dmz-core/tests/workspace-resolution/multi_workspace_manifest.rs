@@ -2,9 +2,7 @@ use dmz_core::resolver::lockfile::{DmzLockfile, LockedPackage, WorkspaceMetadata
 use dmz_core::resolver::manifest::Ecosystem;
 use dmz_core::toolchain::detection::ToolchainDetector;
 use dmz_core::toolchain::types::ToolchainEcosystem;
-use dmz_core::workspace::{
-    IpcBridgeConfig, MemberRole, WorkspaceMember, WorkspaceProjectConfig,
-};
+use dmz_core::workspace::{IpcBridgeConfig, MemberRole, WorkspaceMember, WorkspaceProjectConfig};
 use std::fs;
 use std::path::PathBuf;
 use tempfile::tempdir;
@@ -254,4 +252,3 @@ fn test_member_command_detection_and_fail_fast_validation() {
     assert_eq!(go_cmd, "go");
     assert_eq!(go_args, vec!["run", "."]);
 }
-

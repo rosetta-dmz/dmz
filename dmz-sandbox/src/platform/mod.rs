@@ -164,11 +164,7 @@ fn build_sandbox_environment(
     env_map.into_iter().collect()
 }
 
-fn inject_path_fallbacks(
-    env_map: &mut HashMap<String, String>,
-    workspace: &Path,
-    closure: &Path,
-) {
+fn inject_path_fallbacks(env_map: &mut HashMap<String, String>, workspace: &Path, closure: &Path) {
     let separator = if cfg!(windows) { ";" } else { ":" };
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -184,8 +180,8 @@ fn inject_path_fallbacks(
         .cloned()
         .unwrap_or_else(|| std::env::var("PATH").unwrap_or(default_path));
 
-    let has_bundled_toolchains = workspace.join(".dmz").join("toolchains").is_dir()
-        || closure.join("toolchains").is_dir();
+    let has_bundled_toolchains =
+        workspace.join(".dmz").join("toolchains").is_dir() || closure.join("toolchains").is_dir();
 
     if !has_bundled_toolchains && !home.is_empty() {
         let mut toolchain_bins = vec![
@@ -222,7 +218,10 @@ fn inject_path_fallbacks(
 
     let node_modules = workspace.join("node_modules");
     if node_modules.exists() {
-        env_map.insert("NODE_PATH".into(), node_modules.to_string_lossy().to_string());
+        env_map.insert(
+            "NODE_PATH".into(),
+            node_modules.to_string_lossy().to_string(),
+        );
     }
 }
 

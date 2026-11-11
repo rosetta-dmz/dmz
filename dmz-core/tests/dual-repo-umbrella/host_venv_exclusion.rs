@@ -184,4 +184,3 @@ fn test_host_venv_excluded_and_target_venv_and_vscode_settings_materialized_offl
         "Member folder must not have its own bogus .code-workspace file"
     );
 }
-

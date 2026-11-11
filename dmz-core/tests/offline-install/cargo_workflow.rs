@@ -27,8 +27,7 @@ fn test_airgap_offline_install_cargo_workflow() -> Result<(), Box<dyn std::error
     let mut tar_builder = tar::Builder::new(Vec::new());
 
     // Write crate Cargo.toml
-    let toml_data =
-        br#"[package]
+    let toml_data = br#"[package]
 name = "serde"
 version = "1.0.197"
 edition = "2021"
@@ -96,7 +95,10 @@ edition = "2021"
 
     // Verify .cargo/config.toml was generated to point to vendored-sources
     let cargo_config = workspace_path.join(".cargo").join("config.toml");
-    assert!(cargo_config.exists(), ".cargo/config.toml must be generated");
+    assert!(
+        cargo_config.exists(),
+        ".cargo/config.toml must be generated"
+    );
     let content = fs::read_to_string(&cargo_config)?;
     assert!(
         content.contains("replace-with = \"vendored-sources\""),
@@ -119,4 +121,3 @@ edition = "2021"
 
     Ok(())
 }
-

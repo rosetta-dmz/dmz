@@ -130,4 +130,3 @@ impl OtherManifestScanner {
         Some(block[start..end].trim().to_string())
     }
 }
-

@@ -381,4 +381,3 @@ mod tests {
         assert_eq!(env_sh_1, env_sh_3);
     }
 }
-

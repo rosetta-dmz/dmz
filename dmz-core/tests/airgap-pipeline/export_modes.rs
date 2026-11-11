@@ -258,4 +258,3 @@ fn test_relative_paths_anchor_to_selected_workspace() -> anyhow::Result<()> {
 
     Ok(())
 }
-

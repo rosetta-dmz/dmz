@@ -147,32 +147,34 @@ mod tests {
     #[test]
     fn test_domain_whitelist_matching() {
         let whitelist = DomainWhitelist::new(vec![
-            "api.openai.com".to_string(),
-            "*.github.com".to_string(),
-            "crates.io".to_string(),
+            "allowed-domain.local".to_string(),
+            "*.allowed-wildcard.local".to_string(),
+            "exact-match.local".to_string(),
         ]);
 
-        assert!(whitelist.is_allowed(""));
-        assert!(whitelist.is_allowed(""));
-        assert!(whitelist.is_allowed(""));
-        assert!(whitelist.is_allowed(""));
+        assert!(whitelist.is_allowed("allowed-domain.local"));
+        assert!(whitelist.is_allowed("allowed-domain.local:443"));
+        assert!(whitelist.is_allowed("sub.allowed-wildcard.local"));
+        assert!(whitelist.is_allowed("deep.sub.allowed-wildcard.local"));
 
-        assert!(!whitelist.is_allowed(""));
-        assert!(!whitelist.is_allowed(""));
-        assert!(!whitelist.is_allowed(""));
+        assert!(!whitelist.is_allowed("blocked-domain.local"));
+        assert!(!whitelist.is_allowed("notallowed-wildcard.local"));
+        assert!(!whitelist.is_allowed("allowed-wildcard.local"));
     }
 
     #[test]
     fn test_authorize_request_typed_error() {
-        let whitelist = DomainWhitelist::new(vec!["".to_string()]);
+        let whitelist = DomainWhitelist::new(vec!["allowed-domain.local".to_string()]);
 
-        assert!(whitelist.authorize_request("").is_ok());
+        assert!(whitelist.authorize_request("allowed-domain.local").is_ok());
 
-        let err = whitelist.authorize_request("").unwrap_err();
+        let err = whitelist
+            .authorize_request("blocked-domain.local")
+            .unwrap_err();
         assert_eq!(
             err,
             ProxyError::AccessDenied {
-                host: "".to_string()
+                host: "blocked-domain.local".to_string()
             }
         );
         assert!(err.to_string().contains("Security Exception"));
@@ -180,11 +182,14 @@ mod tests {
 
     #[test]
     fn test_url_scheme_and_path_normalization() {
-        let whitelist = DomainWhitelist::new(vec!["".to_string(), "".to_string()]);
+        let whitelist = DomainWhitelist::new(vec![
+            "allowed-domain.local".to_string(),
+            "*.allowed-wildcard.local".to_string(),
+        ]);
 
-        assert!(whitelist.is_allowed(""));
-        assert!(whitelist.is_allowed(""));
-        assert!(whitelist.is_allowed(""));
-        assert!(!whitelist.is_allowed(""));
+        assert!(whitelist.is_allowed("https://allowed-domain.local/api/v1/resource"));
+        assert!(whitelist.is_allowed("http://api.allowed-wildcard.local/test"));
+        assert!(whitelist.is_allowed("allowed-domain.local:443"));
+        assert!(!whitelist.is_allowed("blocked-domain.local"));
     }
 }

@@ -87,7 +87,8 @@ mod tests {
         let name_bytes = b"store/../../escaped.txt";
         traversal_header.as_mut_bytes()[..name_bytes.len()].copy_from_slice(name_bytes);
         traversal_header.set_cksum();
-        tar.append(&traversal_header, &traversal_payload[..]).unwrap();
+        tar.append(&traversal_header, &traversal_payload[..])
+            .unwrap();
 
         let enc = tar.into_inner().unwrap();
         enc.finish().unwrap();
@@ -186,4 +187,3 @@ mod tests {
         );
     }
 }
-

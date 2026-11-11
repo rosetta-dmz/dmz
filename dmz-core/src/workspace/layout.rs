@@ -193,8 +193,14 @@ mod tests {
     #[test]
     fn test_canonical_virtual_path_default_roles() {
         let primary = WorkspaceMember::new("default", ".", MemberRole::Primary);
-        assert_eq!(canonical_virtual_path(&primary), PathBuf::from("workspaces/primary"));
+        assert_eq!(
+            canonical_virtual_path(&primary),
+            PathBuf::from("workspaces/primary")
+        );
         let sidecar = WorkspaceMember::new("", ".", MemberRole::Sidecar);
-        assert_eq!(canonical_virtual_path(&sidecar), PathBuf::from("workspaces/sidecar"));
+        assert_eq!(
+            canonical_virtual_path(&sidecar),
+            PathBuf::from("workspaces/sidecar")
+        );
     }
 }

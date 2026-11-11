@@ -70,4 +70,3 @@ version = "0.27.2"
         "Expected sys_platform == 'win32' marker to be filtered on non-Windows"
     );
 }
-

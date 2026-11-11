@@ -505,10 +505,7 @@ impl DependencyFetcher {
                         let first_char = pkg.name.chars().next().unwrap_or('a');
                         format!(
                             "https://files.pythonhosted.org/packages/source/{}/{}/{}-{}.tar.gz",
-                            first_char,
-                            pkg.name,
-                            pkg.name,
-                            clean_version
+                            first_char, pkg.name, pkg.name, clean_version
                         )
                     } else {
                         resolved_url
@@ -575,4 +572,3 @@ impl DependencyFetcher {
         Ok(Some((map_key, updated_pkg)))
     }
 }
-

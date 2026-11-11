@@ -196,4 +196,3 @@ fn test_version_range_sanitization_and_operators() {
         "Operator '==' should be parsed out from numpy==1.24.3, expected numpy:1.24.3"
     );
 }
-

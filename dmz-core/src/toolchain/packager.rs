@@ -321,12 +321,9 @@ mod tests {
         let mut tar_builder = TarBuilder::new(Vec::new());
         let epoch = 1_700_000_000u64;
 
-        let entries = ToolchainArchivePackager::package_with_epoch(
-            &mut tar_builder,
-            &[toolchain],
-            epoch,
-        )
-        .unwrap();
+        let entries =
+            ToolchainArchivePackager::package_with_epoch(&mut tar_builder, &[toolchain], epoch)
+                .unwrap();
 
         let tar_buf = tar_builder.into_inner().unwrap();
 
@@ -348,9 +345,9 @@ mod tests {
             assert_eq!(header.uid().unwrap(), 0);
             assert_eq!(header.gid().unwrap(), 0);
 
-            if path_str == "toolchains/cc/bin/clang" {
-                assert_eq!(header.mode().unwrap() & 0o777, 0o755);
-            } else if path_str == "toolchains/cc/lib/libclang.dylib" {
+            if path_str == "toolchains/cc/bin/clang"
+                || path_str == "toolchains/cc/lib/libclang.dylib"
+            {
                 assert_eq!(header.mode().unwrap() & 0o777, 0o755);
             } else if path_str == "toolchains/cc/include/stddef.h" {
                 assert_eq!(header.mode().unwrap() & 0o777, 0o644);

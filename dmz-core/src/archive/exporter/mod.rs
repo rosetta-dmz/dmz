@@ -78,4 +78,3 @@ mod tests {
         assert_eq!(deserialized.base_commit.as_deref(), Some("abc1234"));
     }
 }
-

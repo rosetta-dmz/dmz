@@ -8,8 +8,8 @@ fn test_domain_whitelist_ipv6_and_host_normalization() {
     let whitelist = DomainWhitelist::new(vec![
         "::1".to_string(),
         "2001:db8::1".to_string(),
-        "".to_string(),
-        "".to_string(),
+        "allowed-domain.local".to_string(),
+        "*.allowed-wildcard.local".to_string(),
     ]);
 
     // IPv6 address with brackets and port
@@ -20,14 +20,14 @@ fn test_domain_whitelist_ipv6_and_host_normalization() {
     assert!(whitelist.is_allowed("2001:db8::1"));
 
     // Trailing dot root FQDN
-    assert!(whitelist.is_allowed(""));
-    assert!(whitelist.is_allowed(""));
-    assert!(whitelist.is_allowed(""));
+    assert!(whitelist.is_allowed("allowed-domain.local."));
+    assert!(whitelist.is_allowed("allowed-domain.local.:443"));
+    assert!(whitelist.is_allowed("api.allowed-wildcard.local."));
 
     // Full URL schemes, paths, and userinfo
-    assert!(whitelist.is_allowed(""));
-    assert!(whitelist.is_allowed(""));
-    assert!(whitelist.is_allowed(""));
+    assert!(whitelist.is_allowed("https://allowed-domain.local/api/v1/crates"));
+    assert!(whitelist.is_allowed("http://user:pass@allowed-domain.local:443/test"));
+    assert!(whitelist.is_allowed("https://raw.allowed-wildcard.local/foo/bar"));
 
     // Blocked hosts
     assert!(!whitelist.is_allowed("[::2]:8080"));

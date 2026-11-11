@@ -590,8 +590,7 @@ pub(crate) mod tests {
             "cmake_minimum_required(VERSION 3.20)\nfind_package(PkgConfig REQUIRED)\n",
         )
         .unwrap();
-        let detected_cmake =
-            ToolchainDetector::detect_workspace_ecosystems(dir_cmake.path(), None);
+        let detected_cmake = ToolchainDetector::detect_workspace_ecosystems(dir_cmake.path(), None);
         assert!(detected_cmake.contains(&ToolchainEcosystem::CMake));
         assert!(detected_cmake.contains(&ToolchainEcosystem::Cc));
         assert!(detected_cmake.contains(&ToolchainEcosystem::PkgConfig));
@@ -615,8 +614,7 @@ pub(crate) mod tests {
             "project('demo', 'c')\n",
         )
         .unwrap();
-        let detected_meson =
-            ToolchainDetector::detect_workspace_ecosystems(dir_meson.path(), None);
+        let detected_meson = ToolchainDetector::detect_workspace_ecosystems(dir_meson.path(), None);
         assert!(detected_meson.contains(&ToolchainEcosystem::Ninja));
         assert!(detected_meson.contains(&ToolchainEcosystem::Cc));
         assert!(detected_meson.contains(&ToolchainEcosystem::PkgConfig));
@@ -630,4 +628,3 @@ pub(crate) mod tests {
         assert!(detected_pc.contains(&ToolchainEcosystem::PkgConfig));
     }
 }
-

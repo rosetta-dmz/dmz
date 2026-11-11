@@ -87,8 +87,7 @@ pub fn relocate_bundled_binaries(workspace_root: &Path) -> Result<(), String> {
 
                         // 2. Inspect Mach-O load commands (`otool -L`) and rewrite absolute non-system dylibs
                         // that exist in the bundled toolchain's `lib/` directory to `@rpath/<lib_name>`.
-                        if let Ok(otool_out) = Command::new("otool").arg("-L").arg(&p).output()
-                        {
+                        if let Ok(otool_out) = Command::new("otool").arg("-L").arg(&p).output() {
                             if otool_out.status.success() {
                                 let stdout = String::from_utf8_lossy(&otool_out.stdout);
                                 for line in stdout.lines().skip(1) {
@@ -102,9 +101,8 @@ pub fn relocate_bundled_binaries(workspace_root: &Path) -> Result<(), String> {
                                         && !dep_path.starts_with("/usr/lib/")
                                         && !dep_path.starts_with("/System/Library/")
                                     {
-                                        if let Some(dep_name) = Path::new(dep_path)
-                                            .file_name()
-                                            .and_then(|n| n.to_str())
+                                        if let Some(dep_name) =
+                                            Path::new(dep_path).file_name().and_then(|n| n.to_str())
                                         {
                                             let lib_dir_opt = if p
                                                 .parent()
@@ -169,4 +167,3 @@ pub fn relocate_bundled_binaries(workspace_root: &Path) -> Result<(), String> {
     walk_and_relocate(&toolchains_dir);
     Ok(())
 }
-

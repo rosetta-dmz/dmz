@@ -225,10 +225,7 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
             .join("site-packages");
 
         fs::create_dir_all(&venv_site_packages).map_err(|e| {
-            InstallError::IoError(format!(
-                "Failed to create python site-packages dir: {}",
-                e
-            ))
+            InstallError::IoError(format!("Failed to create python site-packages dir: {}", e))
         })?;
 
         SafeArchiveExtractor::extract(archive_path, &venv_site_packages).map_err(|e| {
@@ -382,4 +379,3 @@ if exist "%VENV_DIR%\..\.dmz\toolchains\python\python.exe" (
         let _ = fs::write(&cmd_path, cmd_content);
     }
 }
-

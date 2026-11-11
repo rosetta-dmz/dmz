@@ -153,4 +153,3 @@ fn test_export_with_git_history() {
     assert!(res.has_git_history);
     assert!(target_ws.join("workspace.bundle").exists());
 }
-

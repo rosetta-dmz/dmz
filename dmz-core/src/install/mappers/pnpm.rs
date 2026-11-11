@@ -27,15 +27,16 @@ impl PnpmMapper {
         })?;
 
         super::npm::NpmMapper::unpack_archive(archive_path, &virtual_store_dir, &pkg.name)?;
-        super::npm::NpmMapper::link_package_binaries(workspace_path, &virtual_store_dir, &pkg.name)?;
+        super::npm::NpmMapper::link_package_binaries(
+            workspace_path,
+            &virtual_store_dir,
+            &pkg.name,
+        )?;
 
         let root_link_dir = workspace_path.join("node_modules").join(&pkg.name);
         if let Some(parent) = root_link_dir.parent() {
             fs::create_dir_all(parent).map_err(|e| {
-                InstallError::IoError(format!(
-                    "Failed to create root node_modules dir: {}",
-                    e
-                ))
+                InstallError::IoError(format!("Failed to create root node_modules dir: {}", e))
             })?;
         }
 
@@ -69,12 +70,14 @@ impl PnpmMapper {
         {
             use std::os::windows::fs::symlink_dir;
             if symlink_dir(&virtual_store_dir, &root_link_dir).is_err() {
-                FastClone::clone_dir_recursive(&virtual_store_dir, &root_link_dir).map_err(|e| {
-                    InstallError::MapperError(format!(
-                        "Failed to create pnpm directory link for {}: {}",
-                        pkg.name, e
-                    ))
-                })?;
+                FastClone::clone_dir_recursive(&virtual_store_dir, &root_link_dir).map_err(
+                    |e| {
+                        InstallError::MapperError(format!(
+                            "Failed to create pnpm directory link for {}: {}",
+                            pkg.name, e
+                        ))
+                    },
+                )?;
             }
         }
 

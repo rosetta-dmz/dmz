@@ -3,6 +3,5 @@
 //! historical sync, and mismatch fail-fast verification.
 
 mod common;
-mod git_bundle;
 mod delta_sync;
-
+mod git_bundle;

@@ -23,8 +23,7 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), String> {
     let toolchains_dir = workspace_root.join(".dmz/toolchains");
     let bundled_cmake_bin =
         crate::toolchain::ToolchainEnv::find_binary(&toolchains_dir.join("cmake"), "bin/cmake");
-    let has_cmake =
-        workspace_root.join("CMakeLists.txt").exists() || bundled_cmake_bin.is_some();
+    let has_cmake = workspace_root.join("CMakeLists.txt").exists() || bundled_cmake_bin.is_some();
 
     if has_cmake {
         if let Some(ref bin) = bundled_cmake_bin {
@@ -54,11 +53,8 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), String> {
                 serde_json::Value::Object(configure_settings),
             );
         }
-        if crate::toolchain::ToolchainEnv::find_binary(
-            &toolchains_dir.join("ninja"),
-            "bin/ninja",
-        )
-        .is_some()
+        if crate::toolchain::ToolchainEnv::find_binary(&toolchains_dir.join("ninja"), "bin/ninja")
+            .is_some()
         {
             settings.insert(
                 "cmake.generator".into(),
@@ -117,8 +113,7 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), String> {
                 let bin = entry.path().join("bin");
                 if bin.exists() {
                     let name = name_os.to_string_lossy().to_string();
-                    bin_subpaths
-                        .push(format!("${{workspaceFolder}}/.dmz/toolchains/{}/bin", name));
+                    bin_subpaths.push(format!("${{workspaceFolder}}/.dmz/toolchains/{}/bin", name));
                 }
             }
         }
@@ -275,10 +270,7 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), String> {
                         let rel_str = rel.to_string_lossy().replace('\\', "/");
                         ra_extra_env.insert(
                             "SDKROOT".into(),
-                            serde_json::Value::String(format!(
-                                "${{workspaceFolder}}/{}",
-                                rel_str
-                            )),
+                            serde_json::Value::String(format!("${{workspaceFolder}}/{}", rel_str)),
                         );
                     }
                 }
@@ -359,8 +351,7 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), String> {
         // Configure Go if Go is bundled with a verified go binary
         if toolchains_dir.join("go").exists() {
             let go_dir = toolchains_dir.join("go");
-            if let Some(go_bin) = crate::toolchain::ToolchainEnv::find_binary(&go_dir, "bin/go")
-            {
+            if let Some(go_bin) = crate::toolchain::ToolchainEnv::find_binary(&go_dir, "bin/go") {
                 let fname = go_bin.file_name().and_then(|n| n.to_str()).unwrap_or("go");
                 settings.insert(
                     "go.goroot".into(),
@@ -412,11 +403,11 @@ pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), String
         return Ok(());
     }
 
-    let ws_project =
-        match crate::workspace::WorkspaceProjectConfig::load_from_file(&manifest_path) {
-            Ok(p) => p,
-            Err(_) => return Ok(()),
-        };
+    let ws_project = match crate::workspace::WorkspaceProjectConfig::load_from_file(&manifest_path)
+    {
+        Ok(p) => p,
+        Err(_) => return Ok(()),
+    };
 
     let mut folders = Vec::new();
     let mut linked_rust_projects = Vec::new();
@@ -571,9 +562,7 @@ pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), String
         for entry in entries.flatten() {
             let name_os = entry.file_name();
             if name_os == "applesdk"
-                && !crate::toolchain::ToolchainEnv::is_genuine_apple_developer_dir(
-                    &entry.path(),
-                )
+                && !crate::toolchain::ToolchainEnv::is_genuine_apple_developer_dir(&entry.path())
             {
                 continue;
             }
@@ -598,8 +587,7 @@ pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), String
     let win_path = if bin_subpaths.is_empty() {
         format!("{}${{workspaceFolder}}\\.dmz\\toolchains\\node\\bin;${{workspaceFolder}}\\.dmz\\toolchains\\rust\\bin;${{workspaceFolder}}\\.dmz\\toolchains\\python;${{env:PATH}}", win_node_prefix)
     } else {
-        let win_subpaths: Vec<String> =
-            bin_subpaths.iter().map(|p| p.replace('/', "\\")).collect();
+        let win_subpaths: Vec<String> = bin_subpaths.iter().map(|p| p.replace('/', "\\")).collect();
         format!(
             "{}{};${{env:PATH}}",
             win_node_prefix,
@@ -631,4 +619,3 @@ pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), String
 
     Ok(())
 }
-

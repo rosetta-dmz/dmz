@@ -225,4 +225,3 @@ pub fn read_manifest_from_archive(path: &Path) -> Result<AirGapManifest, String>
     }
     Err("airgap_manifest.json not found in archive".to_string())
 }
-

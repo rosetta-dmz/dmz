@@ -82,7 +82,10 @@ impl EcosystemHandler for RustEcosystem {
         materializer
             .materialize(lockfile_path)
             .map_err(|e| EcosystemError::Io {
-                context: format!("Rust vendor materialization failed for {:?}", workspace_root),
+                context: format!(
+                    "Rust vendor materialization failed for {:?}",
+                    workspace_root
+                ),
                 source: e,
             })?;
         Ok(())

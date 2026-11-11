@@ -271,10 +271,16 @@ mod tests {
     fn test_inject_offline_env() {
         let mut env = HashMap::new();
         inject_offline_env(&mut env);
-        assert_eq!(env.get("CARGO_NET_OFFLINE").map(String::as_str), Some("true"));
+        assert_eq!(
+            env.get("CARGO_NET_OFFLINE").map(String::as_str),
+            Some("true")
+        );
         assert_eq!(env.get("PIP_NO_INDEX").map(String::as_str), Some("1"));
         assert_eq!(env.get("GOPROXY").map(String::as_str), Some("off"));
-        assert_eq!(env.get("npm_config_offline").map(String::as_str), Some("true"));
+        assert_eq!(
+            env.get("npm_config_offline").map(String::as_str),
+            Some("true")
+        );
     }
 
     #[test]
@@ -287,8 +293,16 @@ mod tests {
     #[test]
     fn test_build_member_env_offline_flag() {
         let config = WorkspaceProjectConfig::default();
-        let env = build_member_env(&config, Path::new("."), Path::new("."), Path::new(""), false);
-        assert_eq!(env.get("CARGO_NET_OFFLINE").map(String::as_str), Some("true"));
+        let env = build_member_env(
+            &config,
+            Path::new("."),
+            Path::new("."),
+            Path::new(""),
+            false,
+        );
+        assert_eq!(
+            env.get("CARGO_NET_OFFLINE").map(String::as_str),
+            Some("true")
+        );
     }
 }
-

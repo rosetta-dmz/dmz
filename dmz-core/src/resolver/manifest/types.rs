@@ -62,4 +62,3 @@ impl From<std::io::Error> for ManifestError {
         Self::Io(err)
     }
 }
-

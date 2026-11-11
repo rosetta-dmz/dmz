@@ -197,7 +197,8 @@ pub fn has_pkg_config_files(dir: &Path) -> bool {
         let p = dir.join(conf);
         if p.is_file() {
             if let Ok(content) = std::fs::read_to_string(&p) {
-                if content.contains("PKG_CHECK_MODULES") || content.contains("PKG_PROG_PKG_CONFIG") {
+                if content.contains("PKG_CHECK_MODULES") || content.contains("PKG_PROG_PKG_CONFIG")
+                {
                     return true;
                 }
             }

@@ -99,8 +99,11 @@ impl InstallerEngine {
             }
 
             // Resolve target workspace (root or member directory)
-            let target_workspace =
-                Self::resolve_target_workspace(&config.workspace_path, &pkg, workspace_manifest.as_ref());
+            let target_workspace = Self::resolve_target_workspace(
+                &config.workspace_path,
+                &pkg,
+                workspace_manifest.as_ref(),
+            );
 
             // Locate and validate the store artifact
             let archive_path = Self::locate_store_artifact(&config.store_dir, &pkg)?;
@@ -109,7 +112,12 @@ impl InstallerEngine {
             Self::verify_artifact_integrity(&archive_path, &pkg)?;
 
             // Ecosystem-specific deterministic linkage
-            Self::dispatch_package_mapper(&target_workspace, &config.workspace_path, &pkg, &archive_path)?;
+            Self::dispatch_package_mapper(
+                &target_workspace,
+                &config.workspace_path,
+                &pkg,
+                &archive_path,
+            )?;
 
             installed_count += 1;
             info!(name = %pkg.name, version = %pkg.version, "Successfully installed package offline");
@@ -256,11 +264,15 @@ impl InstallerEngine {
     }
 
     /// Resolves and locates the package archive file within the store directory
-    fn locate_store_artifact(store_dir: &Path, pkg: &LockedPackage) -> Result<PathBuf, InstallError> {
+    fn locate_store_artifact(
+        store_dir: &Path,
+        pkg: &LockedPackage,
+    ) -> Result<PathBuf, InstallError> {
         // Sanitize package name (flatten scoped packages and eliminate directory traversal characters)
         let safe_name = pkg.name.replace(['/', '\\'], "__");
 
-        if safe_name.is_empty() || safe_name == "." || safe_name == ".." || safe_name.contains("..") {
+        if safe_name.is_empty() || safe_name == "." || safe_name == ".." || safe_name.contains("..")
+        {
             return Err(InstallError::MapperError(format!(
                 "Invalid package name contains path traversal sequence: {}",
                 pkg.name
@@ -295,7 +307,9 @@ impl InstallerEngine {
         };
 
         // Ensure artifact path does not escape store directory (CWE-22)
-        let canonical_store = store_dir.canonicalize().unwrap_or_else(|_| store_dir.to_path_buf());
+        let canonical_store = store_dir
+            .canonicalize()
+            .unwrap_or_else(|_| store_dir.to_path_buf());
         if !archive_path.starts_with(&canonical_store) && !archive_path.starts_with(store_dir) {
             return Err(InstallError::MapperError(format!(
                 "Store artifact path {:?} escapes store directory {:?}",
@@ -314,16 +328,19 @@ impl InstallerEngine {
     }
 
     /// Computes streaming SHA-256 and validates cryptographic supply chain integrity
-    fn verify_artifact_integrity(archive_path: &Path, pkg: &LockedPackage) -> Result<(), InstallError> {
+    fn verify_artifact_integrity(
+        archive_path: &Path,
+        pkg: &LockedPackage,
+    ) -> Result<(), InstallError> {
         let mut file = fs::File::open(archive_path)
             .map_err(|e| InstallError::IoError(format!("Failed to open artifact: {}", e)))?;
 
         let mut hasher = Sha256::new();
         let mut buffer = [0u8; 65536];
         loop {
-            let n = file.read(&mut buffer).map_err(|e| {
-                InstallError::IoError(format!("Failed to read artifact: {}", e))
-            })?;
+            let n = file
+                .read(&mut buffer)
+                .map_err(|e| InstallError::IoError(format!("Failed to read artifact: {}", e)))?;
             if n == 0 {
                 break;
             }
@@ -449,7 +466,8 @@ impl InstallerEngine {
         }
 
         // 3. Regenerate environment activator scripts (.dmz/env.sh, .dmz/env.bat)
-        let _ = crate::toolchain::ToolchainSetup::generate_activator_scripts(&config.workspace_path);
+        let _ =
+            crate::toolchain::ToolchainSetup::generate_activator_scripts(&config.workspace_path);
 
         // 4. Ensure .modules.yaml exists for pnpm tooling
         for dir in &target_dirs {
@@ -469,7 +487,9 @@ mod tests {
             expected: "abc".into(),
             actual: "def".into(),
         };
-        assert!(err.to_string().contains("Store Artifact Integrity Mismatch"));
+        assert!(err
+            .to_string()
+            .contains("Store Artifact Integrity Mismatch"));
 
         let err2 = InstallError::ArtifactMissing {
             package: "foo".into(),
@@ -547,7 +567,10 @@ mod tests {
         };
 
         let result = InstallerEngine::verify_artifact_integrity(&archive_path, &pkg);
-        assert!(matches!(result, Err(InstallError::IntegrityMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(InstallError::IntegrityMismatch { .. })
+        ));
     }
 
     #[test]
