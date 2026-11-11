@@ -396,7 +396,7 @@ mod tests {
             !path.ends_with(';'),
             "Must not have trailing semicolon (CWE-426)"
         );
-        assert!(path.contains(".dmz/toolchains/rust/bin"));
+        assert!(path.replace('\\', "/").contains(".dmz/toolchains/rust/bin"));
     }
 
     #[test]
@@ -434,51 +434,51 @@ mod tests {
         ToolchainEnv::inject_toolchain_paths(ws, &mut env_map);
 
         assert_eq!(
-            env_map.get("RUSTUP_HOME").unwrap(),
-            &tc.join("rust").to_string_lossy().to_string()
+            Path::new(env_map.get("RUSTUP_HOME").unwrap()),
+            tc.join("rust").as_path()
         );
         assert_eq!(
-            env_map.get("GOROOT").unwrap(),
-            &tc.join("go").to_string_lossy().to_string()
+            Path::new(env_map.get("GOROOT").unwrap()),
+            tc.join("go").as_path()
         );
         assert!(env_map
             .get("NODE_PATH")
             .unwrap()
+            .replace('\\', "/")
             .contains("node/lib/node_modules"));
         assert_eq!(
-            env_map.get("CC").unwrap(),
-            &tc.join("cc/bin/clang").to_string_lossy().to_string()
+            Path::new(env_map.get("CC").unwrap()),
+            tc.join("cc/bin/clang").as_path()
         );
         assert_eq!(
-            env_map.get("CXX").unwrap(),
-            &tc.join("cc/bin/clang++").to_string_lossy().to_string()
+            Path::new(env_map.get("CXX").unwrap()),
+            tc.join("cc/bin/clang++").as_path()
         );
         assert_eq!(
-            env_map.get("AR").unwrap(),
-            &tc.join("cc/bin/llvm-ar").to_string_lossy().to_string()
+            Path::new(env_map.get("AR").unwrap()),
+            tc.join("cc/bin/llvm-ar").as_path()
         );
         assert_eq!(
-            env_map.get("RANLIB").unwrap(),
-            &tc.join("cc/bin/llvm-ranlib").to_string_lossy().to_string()
+            Path::new(env_map.get("RANLIB").unwrap()),
+            tc.join("cc/bin/llvm-ranlib").as_path()
         );
         assert_eq!(
-            env_map.get("CMAKE").unwrap(),
-            &tc.join("cmake/bin/cmake").to_string_lossy().to_string()
+            Path::new(env_map.get("CMAKE").unwrap()),
+            tc.join("cmake/bin/cmake").as_path()
         );
         assert_eq!(
-            env_map.get("NINJA").unwrap(),
-            &tc.join("ninja/bin/ninja").to_string_lossy().to_string()
+            Path::new(env_map.get("NINJA").unwrap()),
+            tc.join("ninja/bin/ninja").as_path()
         );
         assert_eq!(env_map.get("CMAKE_GENERATOR").unwrap(), "Ninja");
         assert_eq!(
-            env_map.get("PKG_CONFIG").unwrap(),
-            &tc.join("pkgconfig/bin/pkg-config")
-                .to_string_lossy()
-                .to_string()
+            Path::new(env_map.get("PKG_CONFIG").unwrap()),
+            tc.join("pkgconfig/bin/pkg-config").as_path()
         );
         assert!(env_map
             .get("PKG_CONFIG_PATH")
             .unwrap()
+            .replace('\\', "/")
             .contains("pkgconfig/lib/pkgconfig"));
     }
 

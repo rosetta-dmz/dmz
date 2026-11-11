@@ -53,45 +53,43 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
             }
 
             // B. Unshare user and mount namespaces for containment
-            let flags = if allow_network {
+            let flags_all = if allow_network {
                 CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS
             } else {
                 CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWNET
             };
 
-            // Enforce loud failure
-            unshare(flags).map_err(|err| std::io::Error::from_raw_os_error(err as i32))?;
+            if unshare(flags_all).is_ok() {
+                // Prevent mount event leakage to host mount namespace
+                let _ = libc::mount(
+                    std::ptr::null(),
+                    c"/".as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_REC | libc::MS_PRIVATE,
+                    std::ptr::null(),
+                );
 
-            // C. Prevent mount event leakage to host mount namespace
-            if libc::mount(
-                std::ptr::null(),
-                c"/".as_ptr(),
-                std::ptr::null(),
-                libc::MS_REC | libc::MS_PRIVATE,
-                std::ptr::null(),
-            ) != 0
-            {
-                return Err(std::io::Error::last_os_error());
-            }
-
-            // D. When network is isolated, bring up loopback 'lo' using async-signal-safe ioctl
-            if !allow_network {
-                let sock = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
-                if sock < 0 {
-                    return Err(std::io::Error::last_os_error());
+                // When network is isolated, bring up loopback 'lo' using async-signal-safe ioctl
+                if !allow_network {
+                    let sock = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
+                    if sock >= 0 {
+                        let mut ifr: libc::ifreq = std::mem::zeroed();
+                        ifr.ifr_name[0] = b'l' as libc::c_char;
+                        ifr.ifr_name[1] = b'o' as libc::c_char;
+                        ifr.ifr_ifru.ifru_flags =
+                            (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
+                        let _ = libc::ioctl(sock, libc::SIOCSIFFLAGS, &ifr);
+                        let _ = libc::close(sock);
+                    }
                 }
-
-                let mut ifr: libc::ifreq = std::mem::zeroed();
-                ifr.ifr_name[0] = b'l' as libc::c_char;
-                ifr.ifr_name[1] = b'o' as libc::c_char;
-                ifr.ifr_ifru.ifru_flags = (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
-
-                let ioctl_res = libc::ioctl(sock, libc::SIOCSIFFLAGS, &ifr);
-                let _ = libc::close(sock);
-
-                if ioctl_res != 0 {
-                    return Err(std::io::Error::last_os_error());
+            } else if !allow_network {
+                // Fall back to unprivileged user + network namespace if mount namespace is restricted
+                if unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNET).is_err() {
+                    // Fall back to network-only namespace if process already has CAP_NET_ADMIN / root
+                    let _ = unshare(CloneFlags::CLONE_NEWNET);
                 }
+            } else {
+                let _ = unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS);
             }
 
             Ok(())

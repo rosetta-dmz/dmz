@@ -644,7 +644,7 @@ mod tests {
         // Verify checked out working tree file exists
         assert!(dst_path.join("README.md").exists());
         let content = std::fs::read_to_string(dst_path.join("README.md")).expect("read file");
-        assert_eq!(content, "# DMZ Test Repository\n");
+        assert_eq!(content.replace("\r\n", "\n"), "# DMZ Test Repository\n");
     }
 
     #[test]

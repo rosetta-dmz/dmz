@@ -1,6 +1,8 @@
 use dmz_sandbox::agent::ephemeral_fs::EphemeralFs;
 use dmz_sandbox::agent::network_proxy::DomainWhitelist;
+#[cfg(target_os = "macos")]
 use dmz_sandbox::platform::SandboxConfig;
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
 
 #[test]

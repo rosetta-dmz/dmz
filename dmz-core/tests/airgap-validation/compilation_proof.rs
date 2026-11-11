@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::path::Path;
+use std::path::PathBuf;
 use tempfile::tempdir;
 
 use dmz_core::toolchain::ToolchainPackager;

@@ -283,9 +283,9 @@ impl EcosystemHandler for PythonEcosystem {
 
     fn resolution_command_for_workspace(&self, root: &Path) -> Option<CommandSpec> {
         let venv_pip = if cfg!(windows) {
-            root.join(".venv/Scripts/pip.exe")
+            root.join(".venv").join("Scripts").join("pip.exe")
         } else {
-            root.join(".venv/bin/pip")
+            root.join(".venv").join("bin").join("pip")
         };
 
         let req_args = if root.join("requirements.txt").exists() {
@@ -322,9 +322,9 @@ impl EcosystemHandler for PythonEcosystem {
 
     fn verification_command(&self, root: &Path) -> Option<CommandSpec> {
         let venv_py = if cfg!(windows) {
-            root.join(".venv/Scripts/python.exe")
+            root.join(".venv").join("Scripts").join("python.exe")
         } else {
-            root.join(".venv/bin/python")
+            root.join(".venv").join("bin").join("python")
         };
         if venv_py.is_file() {
             return Some(CommandSpec {
@@ -578,9 +578,9 @@ mod tests {
 
         // When .venv exists, verification prefers the virtual environment binary
         let venv_bin = if cfg!(windows) {
-            ws.join(".venv/Scripts")
+            ws.join(".venv").join("Scripts")
         } else {
-            ws.join(".venv/bin")
+            ws.join(".venv").join("bin")
         };
         std::fs::create_dir_all(&venv_bin).unwrap();
         let venv_py = if cfg!(windows) {
@@ -591,7 +591,7 @@ mod tests {
         std::fs::write(&venv_py, "").unwrap();
 
         let cmd_venv = py.verification_command(ws).unwrap();
-        assert_eq!(cmd_venv.program, venv_py.display().to_string());
+        assert_eq!(Path::new(&cmd_venv.program), venv_py.as_path());
     }
 
     #[test]
