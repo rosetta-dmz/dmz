@@ -1,6 +1,7 @@
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,13 +10,14 @@ use tempfile::tempdir;
 
 use dmz_core::archive::exporter::AirGapManifest;
 use dmz_core::archive::{AirGapExporter, AirGapImporter, ImportConfig};
+#[cfg(unix)]
 use dmz_core::ecosystem::EcosystemRegistry;
 use dmz_core::install::{InstallConfig, InstallerEngine};
 use dmz_core::resolver::lockfile::{DmzLockfile, LockedPackage};
 use dmz_core::resolver::manifest::Ecosystem;
-use dmz_core::toolchain::{
-    DiscoveredToolchain, ToolchainArchivePackager, ToolchainEcosystem, ToolchainPackager,
-};
+#[cfg(unix)]
+use dmz_core::toolchain::ToolchainPackager;
+use dmz_core::toolchain::{DiscoveredToolchain, ToolchainArchivePackager, ToolchainEcosystem};
 
 #[test]
 fn test_hermetic_end_to_end_complete_codebase_bundle_import_and_stripped_path_verification() {

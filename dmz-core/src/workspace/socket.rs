@@ -16,15 +16,21 @@ pub fn safe_socket_path(workspace: &Path, member_id: &str) -> PathBuf {
 
     #[cfg(unix)]
     {
-        let temp_dir = std::env::temp_dir();
+        let socket_dir = std::env::temp_dir().join("dmz");
+        let _ = fs::create_dir_all(&socket_dir);
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&socket_dir, fs::Permissions::from_mode(0o700));
+        }
+
         // POSIX sockaddr_un.sun_path hard limits: 104 bytes on macOS/BSD, 108 bytes on Linux.
         // Budget max filename length so total path is strictly < 104 bytes.
-        let temp_dir_len = temp_dir.as_os_str().len();
-        let max_filename_len = 103usize.saturating_sub(temp_dir_len.saturating_add(1));
+        let dir_len = socket_dir.as_os_str().len();
+        let max_filename_len = 103usize.saturating_sub(dir_len.saturating_add(1));
 
         let candidate = format!("dmz_{}_{}.sock", hash, member_id);
         if candidate.len() <= max_filename_len {
-            temp_dir.join(candidate)
+            socket_dir.join(candidate)
         } else {
             // Member ID is too long for POSIX sun_path limit; generate bounded hash suffix
             let mut id_hasher = Sha256::new();
@@ -32,7 +38,7 @@ pub fn safe_socket_path(workspace: &Path, member_id: &str) -> PathBuf {
             let id_hash_full = format!("{:x}", id_hasher.finalize());
             let id_short = id_hash_full.get(..8).unwrap_or(&id_hash_full);
             let bounded = format!("dmz_{}_{}.sock", hash, id_short);
-            temp_dir.join(bounded)
+            socket_dir.join(bounded)
         }
     }
 

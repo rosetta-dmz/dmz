@@ -126,15 +126,17 @@ fn test_cli_sidecar_abi_diagnostic() {
 fn test_cli_safe_socket_path_length_guard() {
     let workspace = Path::new("/Users/developer/very/deep/nested/project/directory/structure");
     let safe_sock = safe_socket_path(workspace, "sidecar");
-    let sock_str = safe_sock.to_string_lossy();
 
     // Must be short enough to prevent POSIX sun_path buffer overflow (104 on macOS, 108 on Linux)
     #[cfg(unix)]
-    assert!(
-        sock_str.len() < 104,
-        "Safe socket path exceeded 104 characters: {}",
-        sock_str
-    );
+    {
+        let sock_str = safe_sock.to_string_lossy();
+        assert!(
+            sock_str.len() < 104,
+            "Safe socket path exceeded 104 characters: {}",
+            sock_str
+        );
+    }
 
     // Advisory check should pass for safe_socket
     assert!(check_socket_path_length(&safe_sock).is_none());

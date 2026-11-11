@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use super::types::IpcServerError;
 
 /// Verifies that the peer connecting to the Unix domain socket shares the same UID as the supervisor daemon.

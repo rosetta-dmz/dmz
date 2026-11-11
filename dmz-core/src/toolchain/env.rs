@@ -80,13 +80,15 @@ impl ToolchainEnv {
                     workspace_root.join(".cargo").to_string_lossy().to_string(),
                 );
             }
-            let rust_lib = toolchains_dir.join("rust/lib");
-            if rust_lib.is_dir() {
-                let rust_lib_str = rust_lib.to_string_lossy().to_string();
-                #[cfg(target_os = "macos")]
-                Self::prepend_path_var(env_map, "DYLD_LIBRARY_PATH", &rust_lib_str, ":");
-                #[cfg(unix)]
-                Self::prepend_path_var(env_map, "LD_LIBRARY_PATH", &rust_lib_str, ":");
+            #[cfg(unix)]
+            {
+                let rust_lib = toolchains_dir.join("rust/lib");
+                if rust_lib.is_dir() {
+                    let rust_lib_str = rust_lib.to_string_lossy().to_string();
+                    #[cfg(target_os = "macos")]
+                    Self::prepend_path_var(env_map, "DYLD_LIBRARY_PATH", &rust_lib_str, ":");
+                    Self::prepend_path_var(env_map, "LD_LIBRARY_PATH", &rust_lib_str, ":");
+                }
             }
         }
 
@@ -109,13 +111,15 @@ impl ToolchainEnv {
                 env_map.remove("PYTHONHOME");
                 env_map.insert("PYTHONNOUSERSITE".into(), "1".into());
                 env_map.insert("PYTHONDONTWRITEBYTECODE".into(), "1".into());
-                let py_lib = py_dir.join("lib");
-                if py_lib.is_dir() {
-                    let py_lib_str = py_lib.to_string_lossy().to_string();
-                    #[cfg(target_os = "macos")]
-                    Self::prepend_path_var(env_map, "DYLD_LIBRARY_PATH", &py_lib_str, ":");
-                    #[cfg(unix)]
-                    Self::prepend_path_var(env_map, "LD_LIBRARY_PATH", &py_lib_str, ":");
+                #[cfg(unix)]
+                {
+                    let py_lib = py_dir.join("lib");
+                    if py_lib.is_dir() {
+                        let py_lib_str = py_lib.to_string_lossy().to_string();
+                        #[cfg(target_os = "macos")]
+                        Self::prepend_path_var(env_map, "DYLD_LIBRARY_PATH", &py_lib_str, ":");
+                        Self::prepend_path_var(env_map, "LD_LIBRARY_PATH", &py_lib_str, ":");
+                    }
                 }
             }
         }
@@ -187,13 +191,15 @@ impl ToolchainEnv {
                 env_map.insert("RANLIB".into(), bin.to_string_lossy().to_string());
             }
 
-            let cc_lib = cc_dir.join("lib");
-            if cc_lib.is_dir() {
-                let cc_lib_str = cc_lib.to_string_lossy().to_string();
-                #[cfg(target_os = "macos")]
-                Self::prepend_path_var(env_map, "DYLD_LIBRARY_PATH", &cc_lib_str, ":");
-                #[cfg(unix)]
-                Self::prepend_path_var(env_map, "LD_LIBRARY_PATH", &cc_lib_str, ":");
+            #[cfg(unix)]
+            {
+                let cc_lib = cc_dir.join("lib");
+                if cc_lib.is_dir() {
+                    let cc_lib_str = cc_lib.to_string_lossy().to_string();
+                    #[cfg(target_os = "macos")]
+                    Self::prepend_path_var(env_map, "DYLD_LIBRARY_PATH", &cc_lib_str, ":");
+                    Self::prepend_path_var(env_map, "LD_LIBRARY_PATH", &cc_lib_str, ":");
+                }
             }
         }
 

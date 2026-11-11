@@ -254,6 +254,20 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
                 let _ = std::os::unix::fs::symlink(&py_ver, &py3_alias);
             }
         }
+        #[cfg(windows)]
+        {
+            let py3_alias = root_venv.join("lib").join("python3");
+            if !py3_alias.exists() {
+                let _ = FastClone::clone_dir_recursive(
+                    &root_site_packages,
+                    &py3_alias.join("site-packages"),
+                );
+            }
+            let win_sp = root_venv.join("Lib").join("site-packages");
+            if !win_sp.exists() {
+                let _ = FastClone::clone_dir_recursive(&root_site_packages, &win_sp);
+            }
+        }
         let pth_file = root_site_packages.join("dmz_store.pth");
         let _ = fs::write(
             pth_file,

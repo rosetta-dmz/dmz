@@ -444,6 +444,7 @@ pub(super) fn detect_dmz_cli() -> DmzCliInvocation {
     }
 }
 
+#[allow(dead_code)]
 pub(super) fn escape_applescript_string(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")

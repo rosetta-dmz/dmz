@@ -17,10 +17,12 @@ pub use types::{
 #[cfg(test)]
 mod tests {
     use super::socket::{validate_socket_path_length, SocketGuard};
+    #[cfg(unix)]
+    use super::types::IpcServerConfig;
     use super::types::{
-        IpcClientError, IpcRequest, IpcResponse, IpcServerConfig, IpcServerError,
-        MAX_UNIX_SOCKET_PATH,
+        IpcClientError, IpcRequest, IpcResponse, IpcServerError, MAX_UNIX_SOCKET_PATH,
     };
+    #[cfg(unix)]
     use super::IpcServer;
     use std::path::PathBuf;
 

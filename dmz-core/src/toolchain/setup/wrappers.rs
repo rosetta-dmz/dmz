@@ -1,5 +1,6 @@
 // Hermetic compiler wrappers and Node package manager symlinks
 
+#[cfg(unix)]
 use std::fs;
 use std::path::Path;
 

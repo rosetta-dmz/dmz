@@ -1,5 +1,6 @@
 #[cfg(unix)]
 use super::auth::verify_peer_credentials;
+#[cfg(unix)]
 use super::socket::{prepare_socket_directory, validate_socket_path_length, SocketGuard};
 use super::transport::handle_connection;
 use super::types::DispatchContext;

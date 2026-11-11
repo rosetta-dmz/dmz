@@ -406,12 +406,12 @@ mod tests {
         let mut tar_builder = TarBuilder::new(Vec::new());
 
         let entries = ToolchainArchivePackager::package(&mut tar_builder, &[toolchain]).unwrap();
-        let tar_buf = tar_builder.into_inner().unwrap();
+        let _tar_buf = tar_builder.into_inner().unwrap();
 
         assert_eq!(entries.len(), 1);
         #[cfg(unix)]
         {
-            let mut archive = Archive::new(Cursor::new(tar_buf));
+            let mut archive = Archive::new(Cursor::new(_tar_buf));
             let mut found_symlink = false;
             for entry_res in archive.entries().unwrap() {
                 let entry = entry_res.unwrap();

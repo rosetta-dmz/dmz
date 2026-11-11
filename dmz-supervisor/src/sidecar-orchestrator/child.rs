@@ -59,12 +59,6 @@ impl ManagedChild {
             }
         }
 
-        #[cfg(windows)]
-        {
-            let _ = self.child.kill().await;
-            return;
-        }
-
         tokio::select! {
             _ = self.child.wait() => {
                 info!("Process exited gracefully");

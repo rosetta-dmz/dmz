@@ -1,7 +1,9 @@
 use dmz_supervisor::{
-    AgentConfig, AgentRunner, AgentRunnerError, IpcServerConfig, ServiceConfig, ServiceRunner,
-    ServiceStatus, SidecarOrchestrator, SidecarOrchestratorError, MAX_UNIX_SOCKET_PATH,
+    AgentConfig, AgentRunner, AgentRunnerError, ServiceConfig, ServiceRunner, ServiceStatus,
+    SidecarOrchestrator, SidecarOrchestratorError,
 };
+#[cfg(unix)]
+use dmz_supervisor::{IpcServerConfig, MAX_UNIX_SOCKET_PATH};
 use std::collections::HashMap;
 use std::time::Instant;
 use tokio::time::{sleep, Duration};

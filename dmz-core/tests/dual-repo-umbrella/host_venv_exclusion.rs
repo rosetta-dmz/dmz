@@ -142,19 +142,24 @@ fn test_host_venv_excluded_and_target_venv_and_vscode_settings_materialized_offl
             .is_file(),
         "Fresh .venv/pyvenv.cfg must be generated on import"
     );
+    let pkg_unpacked = target_dir
+        .join("workspaces/py-service/.venv/lib/python3/site-packages/dummy_pkg/__init__.py")
+        .is_file()
+        || target_dir
+            .join("workspaces/py-service/.venv/Lib/site-packages/dummy_pkg/__init__.py")
+            .is_file();
     assert!(
-        target_dir
-            .join("workspaces/py-service/.venv/lib/python3/site-packages/dummy_pkg/__init__.py")
-            .is_file(),
+        pkg_unpacked,
         "Bundled wheel must be unpacked offline into .venv site-packages"
     );
 
-    // 3. Python member .vscode/settings.json has ${workspaceFolder}/.venv/bin/python
+    // 3. Python member .vscode/settings.json has ${workspaceFolder}/.venv/bin/python or Windows equivalent
     let py_vscode =
         fs::read_to_string(target_dir.join("workspaces/py-service/.vscode/settings.json"))
             .expect("py-service .vscode/settings.json should exist");
     assert!(
-        py_vscode.contains("${workspaceFolder}/.venv/bin/python"),
+        py_vscode.contains("${workspaceFolder}/.venv/bin/python")
+            || py_vscode.contains("${workspaceFolder}/.venv/Scripts/python.exe"),
         "Expected scoped .venv interpreter path in py-service settings, got:\n{}",
         py_vscode
     );
