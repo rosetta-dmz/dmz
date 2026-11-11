@@ -204,18 +204,15 @@ impl Default for IpcServerConfig {
                 };
 
             if let Err(e) = std::fs::create_dir_all(&chosen_dir) {
-                eprintln!(
-                    "Warning: Failed to create IPC socket directory {:?}: {}",
-                    chosen_dir, e
-                );
+                eprintln!("Warning: Failed to create IPC socket directory: {}", e);
             }
             use std::os::unix::fs::PermissionsExt;
             if let Err(e) =
                 std::fs::set_permissions(&chosen_dir, std::fs::Permissions::from_mode(0o700))
             {
                 eprintln!(
-                    "Warning: Failed to set 0o700 permissions on IPC socket directory {:?}: {}",
-                    chosen_dir, e
+                    "Warning: Failed to set 0o700 permissions on IPC socket directory: {}",
+                    e
                 );
             }
             chosen_sock

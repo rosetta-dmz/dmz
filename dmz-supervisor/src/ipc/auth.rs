@@ -33,10 +33,9 @@ pub fn verify_peer_credentials(stream: &tokio::net::UnixStream) -> Result<(), Ip
             ));
         }
         if ucred.uid != my_uid && ucred.uid != 0 {
-            return Err(IpcServerError::PeerAuthenticationFailed(format!(
-                "Peer UID {} does not match supervisor UID {}",
-                ucred.uid, my_uid
-            )));
+            return Err(IpcServerError::PeerAuthenticationFailed(
+                "Peer UID does not match supervisor UID".into(),
+            ));
         }
     }
 
@@ -58,10 +57,9 @@ pub fn verify_peer_credentials(stream: &tokio::net::UnixStream) -> Result<(), Ip
             ));
         }
         if peer_uid != my_uid && peer_uid != 0 {
-            return Err(IpcServerError::PeerAuthenticationFailed(format!(
-                "Peer UID {} does not match supervisor UID {}",
-                peer_uid, my_uid
-            )));
+            return Err(IpcServerError::PeerAuthenticationFailed(
+                "Peer UID does not match supervisor UID".into(),
+            ));
         }
     }
 

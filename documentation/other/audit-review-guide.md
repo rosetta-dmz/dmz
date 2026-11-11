@@ -41,6 +41,7 @@ Every principle, pattern, and anti-pattern in this guide is grounded in verified
     * CWE-367 (Time-of-Check to Time-of-Use / TOCTOU)
     * CWE-391 (Unchecked Error Condition)
     * CWE-400 (Uncontrolled Resource Consumption / Decompression Bombs)
+    * CWE-532 (Insertion of Sensitive Information into Log File / Cleartext Logging)
     * CWE-706 (Use of Incorrectly-Resolved Name or Reference)
     * CWE-732 (Incorrect Permission Assignment for Critical Resource)
   * [OWASP Secure Coding Practices](https://owasp.org/www-project-secure-coding-practices-quick-reference-guide/): Complete mediation, fail-safe defaults, least privilege, and input boundary validation.
@@ -199,6 +200,7 @@ The audit and review protocols defined herein govern all 5 workspace crates of t
 | **8** | **Decompression Bombs & Resource Exhaustion (CWE-400)** | Denial of Service, host OOM crash, disk space exhaustion. | Unbounded extraction loops without entry counts or byte quotas. | **ALWAYS AVOID**. Enforce uncompressed byte quotas, max entry limits, and ratio tripwires. |
 | **9** | **Async Reactor Blocking** | Thread pool starvation, dropped IPC heartbeats, latency spikes. | Calling `std::fs`, `tar::Archive::unpack`, or heavy hashing directly inside async tasks. | **ALWAYS AVOID**. Offload blocking I/O to `tokio::task::spawn_blocking` or use `tokio::fs`. |
 | **10** | **Tokio Cancellation Unsoundness** | State loss, corrupted buffers, hung locks across cancellation points. | Using cancellation-unsafe operations (`read_exact`, multi-step updates) in `select!` or timeout branches. | **ALWAYS AVOID**. Ensure all cancelable async futures are cancel-safe or guarded by RAII rollbacks. |
+| **11** | **Cleartext Logging of Sensitive Information (CWE-532)** | Exposure of user IDs, credentials, or private identifiers in stderr/logs (CWE-312, CWE-359). | Formatting `uid`, tokens, or user-specific paths directly into `eprintln!`, `println!`, or `tracing` macros. | **ALWAYS AVOID**. Omit sensitive variables or redact contextual parameters; report sanitized error descriptions only. |
 
 ---
 
@@ -306,6 +308,18 @@ The audit and review protocols defined herein govern all 5 workspace crates of t
   * Search for multi-step async transactions that drop locks between steps without transactional rollback guards.
 * **Remediation**:
   * Ensure cancellation safety. When multi-step operations must be cancelable, employ RAII rollback guards that undo reservations if dropped prematurely.
+
+#### 3.1.11 Cleartext Logging of Sensitive Information (CWE-532)
+* **Why it must be avoided**:
+  * **Information Leakage & Credential Exposure (CWE-532 / CWE-312 / CWE-359)**: Emitting user identity credentials, user IDs (UIDs), secret tokens, or socket directory paths derived from formatted UIDs into stderr, log files, or unmasked `tracing`/`eprintln!` calls leaks sensitive environment context to unprivileged readers or centralized log collectors.
+  * In multi-user and compliance-sensitive environments, system logs and daemon stderr streams may be aggregated and read by unprivileged actors. Cleartext logging of UIDs or user credentials creates privilege correlation vectors and triggers automated SAST / CodeQL security violations (`rust/cleartext-logging`).
+* **Audit Detection Protocol**:
+  * Search logging sinks (`eprintln!`, `println!`, `tracing::*`, `log::*`) for arguments or format strings referencing variables containing `uid`, `user`, `token`, `password`, `secret`, or paths formatted with user IDs (e.g., `format!("dmz_supervisor_{}", uid)`).
+  * Run CodeQL / SAST rule suites targeting `rust/cleartext-logging` and verify zero alerts across all workspace crates.
+* **Remediation**:
+  * Omit sensitive user identifiers entirely from error log statements (e.g., log `"Warning: Failed to create IPC socket directory: {}"` instead of logging the path containing the user's UID).
+  * In IPC authentication rejection paths, emit generic diagnostic reasons (e.g., `"Peer UID does not match supervisor UID"`) without formatting or logging the literal numeric UIDs of the caller or supervisor.
+  * Redact or sanitize paths that embed user credentials before passing them to logging sinks.
 
 ---
 
@@ -684,6 +698,49 @@ impl Drop for SupervisedChild {
 
 ---
 
+### 4.4 Hardened Diagnostics: Sanitizing Cleartext Logging of Sensitive Identifiers (CWE-532)
+
+#### Fragile Anti-Pattern:
+```rust
+// FRAGILE: Logging paths containing formatted UIDs or emitting UID values in cleartext (CWE-532).
+// SAST / CodeQL flags data flow from libc::getuid() / uid into stderr or tracing sinks.
+let uid = unsafe { libc::getuid() };
+let chosen_dir = std::env::temp_dir().join(format!("dmz_supervisor_{}", uid));
+
+if let Err(e) = std::fs::create_dir_all(&chosen_dir) {
+    eprintln!(
+        "Warning: Failed to create IPC socket directory {:?}: {}",
+        chosen_dir, e
+    );
+}
+
+if peer_uid != my_uid {
+    return Err(IpcServerError::PeerAuthenticationFailed(format!(
+        "Peer UID {} does not match supervisor UID {}",
+        peer_uid, my_uid
+    )));
+}
+```
+
+#### Production-Hardened Pattern:
+```rust
+// PRODUCTION-HARDENED: Omit sensitive identifiers and paths from error output and logging sinks.
+let uid = unsafe { libc::getuid() };
+let chosen_dir = std::env::temp_dir().join(format!("dmz_supervisor_{}", uid));
+
+if let Err(e) = std::fs::create_dir_all(&chosen_dir) {
+    eprintln!("Warning: Failed to create IPC socket directory: {}", e);
+}
+
+if peer_uid != my_uid {
+    return Err(IpcServerError::PeerAuthenticationFailed(
+        "Peer UID does not match supervisor UID".into(),
+    ));
+}
+```
+
+---
+
 ## 5. End-to-End Multi-Layer Verification & Testing Suite
 
 ### 5.1 Static Analysis & Strict Compiler Gates
@@ -869,6 +926,7 @@ Before opening or approving any pull request, reviewers must verify every checkb
   - [ ] Unix socket paths verified to not exceed OS limits (`< 104` bytes).
   - [ ] Archive extractions enforce component normalization and decompression limits (Zip Bomb checks).
   - [ ] IPC sockets enforce peer UID authentication and restrictive directory permissions (`0o700`).
+  - [ ] No cleartext logging of sensitive information (UIDs, credentials, secrets, or UID-derived paths) in error logs or tracing (CWE-532).
 - [ ] **Verification**:
   - [ ] `cargo check --workspace --all-targets` passes with 0 warnings.
   - [ ] `cargo clippy --workspace --all-targets -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::undocumented_unsafe_blocks -D clippy::indexing_slicing` passes cleanly.

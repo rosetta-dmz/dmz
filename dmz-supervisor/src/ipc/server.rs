@@ -127,7 +127,6 @@ impl IpcServer {
             .await
             {
                 warn!(
-                    path = ?self.config.socket_path,
                     error = %e,
                     "Failed to enforce 0o700 permissions on Unix IPC socket"
                 );
