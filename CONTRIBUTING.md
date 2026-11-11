@@ -8,9 +8,9 @@ Thank you for your interest in contributing to the DMZ platform. We strive to ma
 
 ## Development Workflow & Standards
 
-1. **Zero Host Dependencies:** All core functionality must remain self-contained. Do not introduce requirements for external toolchains unless strictly isolated via cargo features.
-2. **Code Quality:** All code must compile cleanly without warnings under stable Rust. Ensure to manually run `cargo clippy` and `cargo fmt` before every commit. 
-3. **Testing:** Every new feature or bug fix must include corresponding unit or integration tests.
+- **Zero Host Dependencies:** All core functionality must remain self-contained. Do not introduce requirements for external toolchains unless strictly isolated via cargo features.
+- **Code Quality:** All code must compile cleanly without warnings under stable Rust. Ensure to manually run `cargo clippy` and `cargo fmt` before every commit. 
+- **Testing:** Every new feature or bug fix must include corresponding unit or integration tests.
 
 ---
 

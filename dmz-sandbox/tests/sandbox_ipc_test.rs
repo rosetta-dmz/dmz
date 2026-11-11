@@ -40,3 +40,54 @@ fn test_macos_seatbelt_profile_ipc_and_zero_network() {
     // Literal path rule for safe socket is present
     assert!(profile.contains(&format!("(literal \"{}\")", sock_path.display())));
 }
+
+#[test]
+fn test_sandbox_runner_trait_and_workspace_validation() {
+    use dmz_sandbox::platform::{NativeSandboxRunner, PlatformError, SandboxRunner};
+    use std::path::PathBuf;
+
+    let runner = NativeSandboxRunner;
+    let non_existent_ws = PathBuf::from("/path/that/does/not/exist/dmz_test_12345");
+    let config = SandboxConfig::new(&non_existent_ws, "/nix/store", "/bin/sh");
+
+    let res = runner.run(&config);
+    assert!(res.is_err());
+    match res.unwrap_err() {
+        PlatformError::PlatformFault(msg) => {
+            assert!(msg.contains("Workspace path does not exist"));
+        }
+        other => panic!(
+            "Expected PlatformFault for missing workspace, got: {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
+fn test_sandbox_socket_path_length_limit_rejection() {
+    use dmz_sandbox::platform::{NativeSandboxRunner, PlatformError, SandboxRunner};
+
+    let tmp = tempfile::tempdir().expect("Failed to create tempdir");
+    let ws = tmp.path().join("workspace");
+    std::fs::create_dir_all(&ws).expect("Failed to create workspace");
+
+    // Construct a socket path deliberately exceeding the 104/108 byte POSIX limits
+    let long_name = "x".repeat(115);
+    let long_sock = tmp.path().join(format!("{}.sock", long_name));
+
+    let runner = NativeSandboxRunner;
+    let config = SandboxConfig::new(&ws, "/nix/store", "/bin/true").with_ipc_socket(&long_sock);
+
+    let res = runner.run(&config);
+    assert!(res.is_err());
+    match res.unwrap_err() {
+        PlatformError::SeatbeltError(msg) | PlatformError::NamespaceError(msg) => {
+            assert!(msg.contains("sun_path limit"));
+        }
+        #[cfg(windows)]
+        PlatformError::WindowsError(msg) => {
+            assert!(msg.contains("Named Pipe format"));
+        }
+        other => panic!("Expected socket path rejection, got: {:?}", other),
+    }
+}

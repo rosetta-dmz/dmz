@@ -11,7 +11,7 @@ fn main() -> eframe::Result<()> {
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
 
-    info!("Starting DMZ GUI application package...");
+    info!("Starting DMZ Desktop...");
 
     let viewport_builder = egui::ViewportBuilder::default()
         .with_inner_size([960.0, 720.0])

@@ -300,10 +300,9 @@ pub(super) fn show(
                         }
 
                         let multi_workspace =
-                            dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(
-                                &ws_canon,
-                            )
-                            .map(|(cfg, _)| cfg);
+                            dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile(
+                                &ws_canon, &lockfile,
+                            );
 
                         let config = ExportConfig {
                             workspace_path: ws_canon,
@@ -328,7 +327,8 @@ pub(super) fn show(
                                 AirGapTaskOutcome::Success(format!(
                                     "Bundle created successfully! Packages: {}, SHA256: {}{}",
                                     manifest.package_count,
-                                    &manifest.archive_sha256[..12.min(manifest.archive_sha256.len())],
+                                    &manifest.archive_sha256
+                                        [..12.min(manifest.archive_sha256.len())],
                                     ws_info
                                 ))
                             }
@@ -376,10 +376,9 @@ pub(super) fn show(
 
                     thread::spawn(move || {
                         let multi_workspace =
-                            dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(
-                                &ws_canon,
-                            )
-                            .map(|(cfg, _)| cfg);
+                            dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile(
+                                &ws_canon, &lockfile,
+                            );
 
                         let config = ExportConfig {
                             workspace_path: ws_canon,
@@ -404,7 +403,8 @@ pub(super) fn show(
                                 AirGapTaskOutcome::Success(format!(
                                     "Exported {} packages to archive (SHA256: {}){}",
                                     manifest.package_count,
-                                    &manifest.archive_sha256[..12.min(manifest.archive_sha256.len())],
+                                    &manifest.archive_sha256
+                                        [..12.min(manifest.archive_sha256.len())],
                                     ws_info
                                 ))
                             }

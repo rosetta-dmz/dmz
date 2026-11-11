@@ -40,6 +40,7 @@ eframe = { version = "0.35", features = ["persistence"] }
 reqwest = { version = "0.12", features = ["blocking"] }
 sha2 = "0.10"
 toml = "0.8"
+thiserror = "2.0"
 
 # Internal Crate Linkage
 dmz-core = { path = "./dmz-core" }
@@ -51,4 +52,5 @@ opt-level = 3            # Optimize aggressively for execution throughput and ve
 lto = true             # Enable full Link-Time Optimization across workspace crates
 codegen-units = 1      # Reduce parallel code generation units to maximize LTO
 panic = "abort"        # Eliminate stack unwinding landing pads to shrink binary footprint
+overflow-checks = true # Mandatory: Prevents silent integer wrap in release mode
 strip = "symbols"      # Automatically strip symbols and debug information from release binaries

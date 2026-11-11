@@ -1,9 +1,26 @@
 use eframe::egui;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
 use super::super::components;
 use dmz_supervisor::{IpcServerConfig, SidecarLifecycleState};
+
+#[derive(Clone, Debug)]
+pub(super) struct SupervisorTelemetry {
+    pub(super) sidecar_state: SidecarLifecycleState,
+    pub(super) last_error: Option<String>,
+    pub(super) sidecar_socket: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct PollingGuard(Arc<AtomicBool>);
+
+impl Drop for PollingGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
 
 pub(super) struct SupervisorState {
     pub(super) active: bool,
@@ -15,6 +32,14 @@ pub(super) struct SupervisorState {
     pub(super) tokio_rt: Option<Arc<Runtime>>,
     pub(super) ipc_server: Option<Arc<dmz_supervisor::IpcServer>>,
     pub(super) last_error: Option<String>,
+    pub(super) telemetry_rx: std::sync::mpsc::Receiver<SupervisorTelemetry>,
+    pub(super) _polling_guard: Arc<PollingGuard>,
+    pub(super) cached_workspace: String,
+    pub(super) cached_manifest: Option<(
+        dmz_core::workspace::WorkspaceProjectConfig,
+        std::path::PathBuf,
+    )>,
+    pub(super) cached_layouts: Vec<dmz_core::workspace::ResolvedMemberLayout>,
 }
 
 impl Default for SupervisorState {
@@ -27,6 +52,37 @@ impl Default for SupervisorState {
             .ok()
             .map(Arc::new);
         let orchestrator = Arc::new(dmz_supervisor::SidecarOrchestrator::new());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let is_running = Arc::new(AtomicBool::new(true));
+        let is_running_clone = is_running.clone();
+        let guard = Arc::new(PollingGuard(is_running));
+
+        if let Some(ref runtime) = rt {
+            let orch = orchestrator.clone();
+            runtime.spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_millis(150));
+                while is_running_clone.load(Ordering::Relaxed) {
+                    interval.tick().await;
+                    let current = orch.current_state().await;
+                    let err = orch.last_error().await;
+                    let sock = orch
+                        .current_socket_path()
+                        .await
+                        .map(|p| p.display().to_string());
+                    if tx
+                        .send(SupervisorTelemetry {
+                            sidecar_state: current,
+                            last_error: err,
+                            sidecar_socket: sock,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+        }
+
         Self {
             active: false,
             sidecar_state: SidecarLifecycleState::Idle,
@@ -37,6 +93,11 @@ impl Default for SupervisorState {
             tokio_rt: rt,
             ipc_server: None,
             last_error: None,
+            telemetry_rx: rx,
+            _polling_guard: guard,
+            cached_workspace: String::new(),
+            cached_manifest: None,
+            cached_layouts: Vec::new(),
         }
     }
 }
@@ -47,14 +108,32 @@ pub(super) fn show(
     status_message: &mut String,
     workspace_path: &mut String,
 ) {
-    // Synchronize live orchestrator state if runtime is present
-    if let Some(ref rt) = state.tokio_rt {
-        let orch = state.orchestrator.clone();
-        state.sidecar_state = rt.block_on(async { orch.current_state().await });
-        state.last_error = rt.block_on(async { orch.last_error().await });
-        if let Some(sock) = rt.block_on(async { orch.current_socket_path().await }) {
-            state.sidecar_socket = sock.display().to_string();
+    // Non-blocking telemetry synchronization: drain background updates without blocking UI thread
+    while let Ok(telem) = state.telemetry_rx.try_recv() {
+        state.sidecar_state = telem.sidecar_state;
+        state.last_error = telem.last_error;
+        if let Some(sock) = telem.sidecar_socket {
+            state.sidecar_socket = sock;
         }
+    }
+
+    // Cache workspace manifest discovery to eliminate 120x/sec per-frame disk I/O thrashing
+    if state.cached_workspace != *workspace_path {
+        let ws_path = std::path::PathBuf::from(&*workspace_path);
+        let discovered =
+            dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(&ws_path);
+        let layouts = if let Some((ref proj, ref manifest_file)) = discovered {
+            let root = manifest_file
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .to_path_buf();
+            proj.resolve_member_layouts(&root, Some(manifest_file))
+        } else {
+            Vec::new()
+        };
+        state.cached_manifest = discovered;
+        state.cached_layouts = layouts;
+        state.cached_workspace = workspace_path.clone();
     }
 
     let ipc_config = IpcServerConfig::default();
@@ -69,10 +148,7 @@ pub(super) fn show(
         ui.add_space(8.0);
         let _ = components::path_browse_row(ui, workspace_path, None);
 
-        let ws_path = std::path::PathBuf::from(&*workspace_path);
-        if let Some((ref proj, ref manifest_file)) =
-            dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(&ws_path)
-        {
+        if let Some((ref proj, ref manifest_file)) = state.cached_manifest {
             let primary = proj.primary_member();
             let p_str = primary.map(|p| p.id.as_str()).unwrap_or("none");
             let sc_str: Vec<&str> = proj.sidecars().iter().map(|s| s.id.as_str()).collect();
@@ -170,7 +246,9 @@ pub(super) fn show(
                     if ui.button("Dismiss & Reset to Standby").clicked() {
                         let orch = state.orchestrator.clone();
                         if let Some(ref rt) = state.tokio_rt {
-                            rt.block_on(async { orch.reset_state().await });
+                            rt.spawn(async move {
+                                orch.reset_state().await;
+                            });
                         }
                         state.sidecar_state = SidecarLifecycleState::Idle;
                         state.last_error = None;
@@ -391,15 +469,12 @@ pub(super) fn show(
         ui.label(format!("Supervisor IPC channel: {}", socket_str));
 
         ui.add_space(8.0);
-        let ws_path = std::path::PathBuf::from(&*workspace_path);
-        if let Some((proj, manifest_file)) =
-            dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(&ws_path)
-        {
+        if let Some((_, ref manifest_file)) = state.cached_manifest {
             let root = manifest_file
                 .parent()
                 .unwrap_or(std::path::Path::new("."))
                 .to_path_buf();
-            let layouts = proj.resolve_member_layouts(&root, Some(&manifest_file));
+            let layouts = &state.cached_layouts;
 
             egui::Grid::new("supervisor_members_grid")
                 .num_columns(4)
@@ -412,7 +487,7 @@ pub(super) fn show(
                     ui.strong("Resolved Command");
                     ui.end_row();
 
-                    for layout in &layouts {
+                    for layout in layouts {
                         ui.label(&layout.member.id);
                         ui.label(format!("{:?}", layout.member.role));
                         ui.label(layout.member.path.display().to_string());
@@ -430,4 +505,85 @@ pub(super) fn show(
             ui.label("No dmz-workspace.toml discovered in the selected workspace root.");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_supervisor_telemetry_non_blocking_sync() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut state = SupervisorState {
+            telemetry_rx: rx,
+            ..SupervisorState::default()
+        };
+
+        assert_eq!(state.sidecar_state, SidecarLifecycleState::Idle);
+
+        // Send a telemetry update without blocking
+        tx.send(SupervisorTelemetry {
+            sidecar_state: SidecarLifecycleState::Running,
+            last_error: Some("test error".to_string()),
+            sidecar_socket: Some("/tmp/test.sock".to_string()),
+        })
+        .expect("telemetry sends successfully");
+
+        let ctx = egui::Context::default();
+        let mut ws = ".".to_string();
+        let mut msg = String::new();
+
+        // Run UI headless
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            show(&mut state, ui, &mut msg, &mut ws);
+        });
+
+        assert_eq!(state.sidecar_state, SidecarLifecycleState::Running);
+        assert_eq!(state.last_error.as_deref(), Some("test error"));
+        assert_eq!(state.sidecar_socket, "/tmp/test.sock");
+    }
+
+    #[test]
+    fn test_supervisor_manifest_caching_avoids_redundant_disk_io() {
+        let temp = tempfile::tempdir().unwrap();
+        let ws = temp.path();
+        let manifest_path = ws.join("dmz-workspace.toml");
+        std::fs::write(
+            &manifest_path,
+            r#"name = "cached-workspace"
+members = [
+    { id = "primary", path = ".", role = "primary" }
+]
+"#,
+        )
+        .unwrap();
+
+        let mut state = SupervisorState::default();
+        let mut ws_str = ws.display().to_string();
+        let mut msg = String::new();
+        let ctx = egui::Context::default();
+
+        // First frame: loads manifest into cache
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            show(&mut state, ui, &mut msg, &mut ws_str);
+        });
+
+        assert!(state.cached_manifest.is_some());
+        let (ref proj, _) = state.cached_manifest.as_ref().unwrap();
+        assert_eq!(proj.name, "cached-workspace");
+        assert_eq!(state.cached_workspace, ws_str);
+
+        // Delete manifest file from disk
+        std::fs::remove_file(&manifest_path).unwrap();
+        assert!(!manifest_path.exists());
+
+        // Second frame: because workspace path is unchanged, cached manifest is retained and disk is not read!
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            show(&mut state, ui, &mut msg, &mut ws_str);
+        });
+
+        assert!(state.cached_manifest.is_some());
+        let (ref proj, _) = state.cached_manifest.as_ref().unwrap();
+        assert_eq!(proj.name, "cached-workspace");
+    }
 }

@@ -4,9 +4,20 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+pub const MAX_LOCKFILE_SIZE: u64 = 16 * 1024 * 1024;
+
+pub trait LockfileReader {
+    fn load_and_verify(path: &Path) -> Result<DmzLockfile, LockError>;
+}
+
+pub trait LockfileWriter {
+    fn save(&self, path: &Path) -> Result<(), LockError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockedPackage {
     pub name: String,
     pub version: String,
@@ -29,7 +40,7 @@ pub struct WorkspaceMetadata {
     pub closure_signature: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DmzLockfile {
     pub version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,28 +53,79 @@ pub struct DmzLockfile {
     pub packages: BTreeMap<String, LockedPackage>,
 }
 
+impl Default for DmzLockfile {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
 #[derive(Debug)]
 pub enum LockError {
+    Io(std::io::Error),
+    Serialization(serde_json::Error),
+    IntegrityMismatch { expected: String, actual: String },
+    LockfileTooLarge { max_bytes: u64, actual_bytes: u64 },
     IoError(String),
     SerializationError(String),
-    IntegrityMismatch { expected: String, actual: String },
 }
 
 impl std::fmt::Display for LockError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::IoError(msg) => write!(f, "Lockfile IO Error: {}", msg),
-            Self::SerializationError(msg) => write!(f, "Lockfile Serialization Error: {}", msg),
+            Self::Io(err) => write!(f, "Lockfile IO Error: {}", err),
+            Self::Serialization(err) => write!(f, "Lockfile Serialization Error: {}", err),
             Self::IntegrityMismatch { expected, actual } => write!(
                 f,
                 "Cryptographic Lock Mismatch! Expected sha256:{}, computed sha256:{}",
                 expected, actual
             ),
+            Self::LockfileTooLarge {
+                max_bytes,
+                actual_bytes,
+            } => write!(
+                f,
+                "Lockfile exceeds maximum allowable size of {} bytes (found {} bytes)",
+                max_bytes, actual_bytes
+            ),
+            Self::IoError(msg) => write!(f, "Lockfile IO Error: {}", msg),
+            Self::SerializationError(msg) => write!(f, "Lockfile Serialization Error: {}", msg),
         }
     }
 }
 
-impl std::error::Error for LockError {}
+impl std::error::Error for LockError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(err) => Some(err),
+            Self::Serialization(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for LockError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
+    }
+}
+
+impl From<serde_json::Error> for LockError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::Serialization(err)
+    }
+}
+
+impl LockfileReader for DmzLockfile {
+    fn load_and_verify(path: &Path) -> Result<Self, LockError> {
+        Self::load_and_verify(path)
+    }
+}
+
+impl LockfileWriter for DmzLockfile {
+    fn save(&self, path: &Path) -> Result<(), LockError> {
+        self.save(path)
+    }
+}
 
 impl DmzLockfile {
     pub fn new(packages: Vec<LockedPackage>) -> Self {
@@ -134,22 +196,41 @@ impl DmzLockfile {
         format!("{:x}", hasher.finalize())
     }
 
-    /// Saves the lockfile to `dmz.lock`
+    /// Saves the lockfile to `dmz.lock` atomically
     pub fn save(&self, path: &Path) -> Result<(), LockError> {
-        let json_data = serde_json::to_string_pretty(self)
-            .map_err(|e| LockError::SerializationError(e.to_string()))?;
-
-        fs::write(path, json_data)
-            .map_err(|e| LockError::IoError(format!("Failed to write lockfile: {}", e)))
+        let json_data = serde_json::to_string_pretty(self)?;
+        crate::workspace::atomic_write_file(path, json_data)?;
+        Ok(())
     }
 
     /// Loads and verifies cryptographic integrity of `dmz.lock`
     pub fn load_and_verify(path: &Path) -> Result<Self, LockError> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| LockError::IoError(format!("Failed to read lockfile: {}", e)))?;
+        let file = fs::File::open(path)?;
+        let metadata = file.metadata()?;
+        if metadata.is_dir() {
+            return Err(LockError::Io(std::io::Error::other(format!(
+                "Path {:?} is a directory, expected lockfile",
+                path
+            ))));
+        }
+        if metadata.len() > MAX_LOCKFILE_SIZE {
+            return Err(LockError::LockfileTooLarge {
+                max_bytes: MAX_LOCKFILE_SIZE,
+                actual_bytes: metadata.len(),
+            });
+        }
 
-        let lockfile: Self = serde_json::from_str(&content)
-            .map_err(|e| LockError::SerializationError(e.to_string()))?;
+        let mut reader = file.take(MAX_LOCKFILE_SIZE + 1);
+        let mut content = String::new();
+        reader.read_to_string(&mut content)?;
+        if content.len() as u64 > MAX_LOCKFILE_SIZE {
+            return Err(LockError::LockfileTooLarge {
+                max_bytes: MAX_LOCKFILE_SIZE,
+                actual_bytes: content.len() as u64,
+            });
+        }
+
+        let lockfile: Self = serde_json::from_str(&content)?;
 
         let computed_signature = Self::compute_closure_hash(&lockfile.packages);
 
@@ -225,6 +306,55 @@ mod tests {
         assert_eq!(
             deserialized.closure_signature,
             DmzLockfile::compute_closure_hash(&deserialized.packages)
+        );
+    }
+
+    #[test]
+    fn test_lockfile_save_load_and_integrity_verification() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("dmz.lock");
+
+        let pkg = LockedPackage {
+            name: "test-pkg".to_string(),
+            version: "1.0.0".to_string(),
+            ecosystem: Ecosystem::Cargo,
+            sha256: "fake-sha".to_string(),
+            source_url: None,
+            dependencies: vec![],
+            member_id: None,
+        };
+        let lockfile = DmzLockfile::new(vec![pkg]);
+        lockfile.save(&path).unwrap();
+
+        // Successful verified load
+        let loaded = DmzLockfile::load_and_verify(&path).unwrap();
+        assert_eq!(loaded, lockfile);
+
+        // Tampered content fails integrity verification
+        let mut tampered = lockfile.clone();
+        tampered.closure_signature = "bad-hash".to_string();
+        tampered.save(&path).unwrap();
+        let err = DmzLockfile::load_and_verify(&path).unwrap_err();
+        match err {
+            LockError::IntegrityMismatch { expected, .. } => {
+                assert_eq!(expected, "bad-hash");
+            }
+            other => panic!("Expected IntegrityMismatch, got {:?}", other),
+        }
+
+        // Loading a directory path fails with IO error
+        let dir_err = DmzLockfile::load_and_verify(temp.path()).unwrap_err();
+        assert!(matches!(dir_err, LockError::Io(_)));
+    }
+
+    #[test]
+    fn test_lockfile_default_and_trait_conformance() {
+        let lockfile = DmzLockfile::default();
+        assert_eq!(lockfile.version, 1);
+        assert!(lockfile.packages.is_empty());
+        assert_eq!(
+            lockfile.closure_signature,
+            DmzLockfile::compute_closure_hash(&lockfile.packages)
         );
     }
 }

@@ -167,18 +167,33 @@ pub fn push_system_bin_candidates(candidates: &mut Vec<PathBuf>, bin_name: &str)
     }
 }
 
-/// Recursively collects all files within a directory relative to a base directory.
+/// Recursively collects all files within a directory relative to a base directory,
+/// with bounded depth to prevent stack overflow and symlink loops (CWE-400).
 pub fn collect_files_recursive(
     dir: &Path,
     base: &Path,
     acc: &mut Vec<(PathBuf, String)>,
     target_prefix: &str,
 ) {
+    collect_files_bounded(dir, base, acc, target_prefix, 0, 32);
+}
+
+fn collect_files_bounded(
+    dir: &Path,
+    base: &Path,
+    acc: &mut Vec<(PathBuf, String)>,
+    target_prefix: &str,
+    depth: usize,
+    max_depth: usize,
+) {
+    if depth > max_depth {
+        return;
+    }
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let p = entry.path();
-            if p.is_dir() {
-                collect_files_recursive(&p, base, acc, target_prefix);
+            if p.is_dir() && !p.is_symlink() {
+                collect_files_bounded(&p, base, acc, target_prefix, depth + 1, max_depth);
             } else if p.is_file() {
                 if let Ok(rel) = p.strip_prefix(base) {
                     let rel_str = rel.to_string_lossy().replace('\\', "/");

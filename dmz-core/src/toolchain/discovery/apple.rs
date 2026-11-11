@@ -70,7 +70,9 @@ impl ToolchainDiscoverer for AppleSdkDiscoverer {
 
         candidates.sort_by_key(|c| is_non_standalone_path(c));
 
-        let dev_dir = candidates[0].clone();
+        let Some(dev_dir) = candidates.first().cloned() else {
+            return Ok(None);
+        };
         if is_non_standalone_path(&dev_dir) {
             emit_non_relocatable_notice(&dev_dir);
         }

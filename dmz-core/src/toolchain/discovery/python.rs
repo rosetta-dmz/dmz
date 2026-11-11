@@ -109,8 +109,19 @@ impl ToolchainDiscoverer for PythonDiscoverer {
         let mut bin_files = Vec::new();
         let mut lib_files = Vec::new();
 
-        bin_files.push((py_bin.clone(), "bin/python3".into()));
-        bin_files.push((py_bin.clone(), "bin/python".into()));
+        // On macOS Framework builds (Homebrew / python.org), `bin/python3.X` is `pythonw` which
+        // uses `dladdr` + `posix_spawn` to launch `Resources/Python.app/Contents/MacOS/Python`.
+        // Using the inner `Python.app/Contents/MacOS/Python` executable directly as `bin/python3`
+        // avoids the framework path assumption while linking directly to `_Py_BytesMain` in `lib/Python`.
+        let macos_app_py = py_root.join("Resources/Python.app/Contents/MacOS/Python");
+        let bundled_py_bin = if macos_app_py.is_file() {
+            macos_app_py
+        } else {
+            py_bin.clone()
+        };
+
+        bin_files.push((bundled_py_bin.clone(), "bin/python3".into()));
+        bin_files.push((bundled_py_bin, "bin/python".into()));
 
         if cfg!(windows) {
             bin_files.push((py_bin.clone(), "python.exe".into()));
@@ -194,17 +205,24 @@ impl ToolchainDiscoverer for PythonDiscoverer {
             }
         }
 
-        // Standard library modules and C headers
+        // Standard library modules, shared libraries (libpython), and C headers
         let lib_dir = py_root.join("lib");
         if lib_dir.is_dir() {
-            if let Ok(entries) = fs::read_dir(&lib_dir) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    let fname = entry.file_name();
-                    let s = fname.to_string_lossy();
-                    if p.is_dir() && s.starts_with("python3.") {
-                        collect_python_files_recursive(&p, &py_root, &mut lib_files, "");
-                    }
+            collect_python_lib_dir(&lib_dir, &py_root, &mut lib_files);
+        }
+        // macOS Framework build shared library (e.g. Python.framework/Versions/3.X/Python)
+        let framework_py = py_root.join("Python");
+        if framework_py.is_file() {
+            lib_files.push((framework_py.clone(), "lib/Python".to_string()));
+            lib_files.push((framework_py, "lib/libpython3.dylib".to_string()));
+        }
+        // Windows root python3*.dll shared libraries
+        if let Ok(entries) = fs::read_dir(&py_root) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                let s = entry.file_name().to_string_lossy().to_string();
+                if p.is_file() && s.starts_with("python") && s.ends_with(".dll") {
+                    bin_files.push((p, s));
                 }
             }
         }
@@ -224,6 +242,29 @@ impl ToolchainDiscoverer for PythonDiscoverer {
             bin_files,
             lib_files,
         }))
+    }
+}
+
+/// Collects `lib/python3.X` standard library directories and `lib/libpython*` shared libraries.
+fn collect_python_lib_dir(lib_dir: &Path, py_root: &Path, lib_files: &mut Vec<(PathBuf, String)>) {
+    if let Ok(entries) = fs::read_dir(lib_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let fname = entry.file_name();
+            let s = fname.to_string_lossy();
+            if p.is_dir() && s.starts_with("python3.") {
+                collect_python_files_recursive(&p, py_root, lib_files, "");
+            } else if p.is_file()
+                && (s.starts_with("libpython")
+                    && (s.ends_with(".dylib")
+                        || s.contains(".so")
+                        || s.ends_with(".a")
+                        || s.ends_with(".dll"))
+                    || s == "Python")
+            {
+                lib_files.push((p, format!("lib/{}", s)));
+            }
+        }
     }
 }
 

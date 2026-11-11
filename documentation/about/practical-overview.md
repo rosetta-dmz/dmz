@@ -6,7 +6,7 @@ DMZ handles full multi-ecosystem workspace export and import by packaging the ap
 
 ### Supported Ecosystems & Layout Materialization
 
-When exporting via [AirGapExporter] and restoring via [AirGapImporter], [InstallerEngine] invokes dedicated ecosystem mappers in [mappers.rs] to reconstruct native project layouts completely offline:
+When exporting via [AirGapExporter] and restoring via [AirGapImporter], [InstallerEngine] invokes dedicated ecosystem mappers in [mappers/] to reconstruct native project layouts completely offline:
 
 | Ecosystem | Manifest Detected | Offline Store Materialization | Automated Offline Verification |
 | :--- | :--- | :--- | :--- |

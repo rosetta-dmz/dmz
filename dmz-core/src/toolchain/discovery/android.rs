@@ -100,7 +100,9 @@ impl ToolchainDiscoverer for AndroidNdkDiscoverer {
 
         candidates.sort_by_key(|c| is_non_standalone_path(c));
 
-        let ndk_root = candidates[0].clone();
+        let Some(ndk_root) = candidates.first().cloned() else {
+            return Ok(None);
+        };
         if is_non_standalone_path(&ndk_root) {
             emit_non_relocatable_notice(&ndk_root);
         }

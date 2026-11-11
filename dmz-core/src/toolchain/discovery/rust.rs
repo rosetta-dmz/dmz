@@ -142,6 +142,17 @@ impl ToolchainDiscoverer for RustDiscoverer {
                     emit_non_relocatable_notice(&found);
                     continue;
                 }
+                // Avoid capturing rustup proxy shims when the underlying sysroot does not have the component
+                if let Ok(target) = fs::read_link(&found) {
+                    if target.to_string_lossy().contains("rustup") {
+                        continue;
+                    }
+                }
+                if let Some(parent) = found.parent() {
+                    if parent.ends_with(".cargo/bin") && parent.join("rustup").exists() {
+                        continue;
+                    }
+                }
                 bin_files.push((found, format!("bin/{}", bin_name)));
             }
         }

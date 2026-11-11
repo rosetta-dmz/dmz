@@ -4,4 +4,4 @@ pub use builder::{BuildConfig, BuildError, BuildResult, BuildTarget, PackageBuil
 
 pub mod importer;
 
-pub use importer::AirGapImporter;
+pub use importer::{AirGapImporter, PackagingImportError};
