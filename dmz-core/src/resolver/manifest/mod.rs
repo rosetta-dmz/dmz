@@ -188,6 +188,43 @@ snapshots:
 
         let r3 = ManifestScanner::parse_pep508_requirement("pytest; extra == 'test'");
         assert!(r3.is_none());
+
+        // Multi-constraint PEP 508 requirements (e.g. from requests requires_dist)
+        let r4 = ManifestScanner::parse_pep508_requirement("charset_normalizer<4,>=2").unwrap();
+        assert_eq!(r4.0, "charset_normalizer");
+        assert_eq!(r4.1, "2");
+
+        let r5 = ManifestScanner::parse_pep508_requirement("idna<4,>=2.5").unwrap();
+        assert_eq!(r5.0, "idna");
+        assert_eq!(r5.1, "2.5");
+
+        let r6 = ManifestScanner::parse_pep508_requirement("urllib3<3,>=1.26").unwrap();
+        assert_eq!(r6.0, "urllib3");
+        assert_eq!(r6.1, "1.26");
+
+        let r7 = ManifestScanner::parse_pep508_requirement("foo[extra]<4,>=2").unwrap();
+        assert_eq!(r7.0, "foo");
+        assert_eq!(r7.1, "2");
+
+        let r8 = ManifestScanner::parse_pep508_requirement("bar < 4").unwrap();
+        assert_eq!(r8.0, "bar");
+        assert_eq!(r8.1, "*");
+
+        let r9 = ManifestScanner::parse_pep508_requirement("bare-package").unwrap();
+        assert_eq!(r9.0, "bare-package");
+        assert_eq!(r9.1, "*");
+
+        let r10 = ManifestScanner::parse_pep508_requirement("qux == 1.2.3, >= 1.0.0").unwrap();
+        assert_eq!(r10.0, "qux");
+        assert_eq!(r10.1, "1.2.3");
+
+        let r11 = ManifestScanner::parse_pep508_requirement("package ~= 1.4.0").unwrap();
+        assert_eq!(r11.0, "package");
+        assert_eq!(r11.1, "1.4.0");
+
+        let r12 =
+            ManifestScanner::parse_pep508_requirement("direct @ https://example.com/foo.tar.gz");
+        assert!(r12.is_none());
     }
 
     #[test]

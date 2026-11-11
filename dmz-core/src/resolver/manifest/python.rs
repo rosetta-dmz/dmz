@@ -235,36 +235,105 @@ impl PythonManifestScanner {
         }
 
         let req_cleaned = req_part.replace(['(', ')'], "");
-        let mut name = req_cleaned.trim().to_string();
-        let mut version_req = "*".to_string();
+        let req_trimmed = req_cleaned.trim();
+        if req_trimmed.is_empty() {
+            return None;
+        }
 
-        for op in &["===", "==", "~=", ">=", "<=", "!=", ">", "<", "@"] {
-            if let Some(idx) = req_cleaned.find(op) {
-                name = req_cleaned[..idx].trim().to_string();
-                let rhs = req_cleaned[idx + op.len()..].trim();
-                if *op == "@" {
-                    return None; // Direct URL/path reference
+        // Find where the package name (and optional extras [extra1, extra2]) ends
+        // and where the version specifiers or URL reference starts.
+        // In PEP 508, package names only contain [a-zA-Z0-9_.-], and extras are enclosed in [...].
+        // Version specifiers start with one of: ===, ==, ~=, >=, <=, !=, >, <, or @.
+        const ALL_OPS: &[&str] = &["===", "==", "~=", ">=", "<=", "!=", ">", "<", "@"];
+
+        let search_start = if let Some(close_bracket) = req_trimmed.find(']') {
+            close_bracket.saturating_add(1)
+        } else {
+            0
+        };
+
+        let search_slice = req_trimmed.get(search_start..).unwrap_or("");
+        let mut earliest_op_offset = None;
+        for op in ALL_OPS {
+            if let Some(idx) = search_slice.find(op) {
+                match earliest_op_offset {
+                    None => earliest_op_offset = Some(idx),
+                    Some(cur_min) if idx < cur_min => earliest_op_offset = Some(idx),
+                    _ => {}
                 }
-                let first_constraint = rhs.split(',').next().unwrap_or("").trim();
-                if (*op == "==" || *op == "===" || *op == ">=" || *op == "~=")
-                    && !first_constraint.is_empty()
-                    && !first_constraint.contains('*')
-                {
-                    version_req = first_constraint.to_string();
-                } else {
-                    version_req = "*".to_string();
-                }
-                break;
             }
         }
 
+        let (name_part, specifiers_part) = match earliest_op_offset {
+            Some(offset) => {
+                let split_idx = search_start.saturating_add(offset);
+                let name = req_trimmed.get(..split_idx).unwrap_or(req_trimmed);
+                let spec = req_trimmed.get(split_idx..).map(str::trim).unwrap_or("");
+                (name, spec)
+            }
+            None => (req_trimmed, ""),
+        };
+
+        // Direct URL/path reference (@ ...), ignore as not a remote registry dependency
+        if specifiers_part.starts_with('@') {
+            return None;
+        }
+
         // Strip PEP 508 extras (e.g. `uvicorn[standard]` -> `uvicorn`)
+        let mut name = name_part.trim().to_string();
         if let Some(bracket_idx) = name.find('[') {
-            name = name[..bracket_idx].trim().to_string();
+            if let Some(base_name) = name.get(..bracket_idx) {
+                name = base_name.trim().to_string();
+            }
         }
 
         if name.is_empty() {
             return None;
+        }
+
+        // Parse version constraints if present
+        let mut version_req = "*".to_string();
+        if !specifiers_part.is_empty() {
+            const CMP_OPS: &[&str] = &["===", "==", "~=", ">=", "<=", "!=", ">", "<"];
+
+            let mut exact_ver = None;
+            let mut compatible_ver = None;
+            let mut lower_bound_ver = None;
+
+            for raw_clause in specifiers_part.split(',') {
+                let clause = raw_clause.trim();
+                if clause.is_empty() {
+                    continue;
+                }
+                for op in CMP_OPS {
+                    if let Some(stripped) = clause.strip_prefix(op) {
+                        let ver = stripped.trim();
+                        if !ver.is_empty() && !ver.contains('*') {
+                            match *op {
+                                "==" | "===" if exact_ver.is_none() => {
+                                    exact_ver = Some(ver.to_string());
+                                }
+                                "~=" if compatible_ver.is_none() => {
+                                    compatible_ver = Some(ver.to_string());
+                                }
+                                ">=" if lower_bound_ver.is_none() => {
+                                    lower_bound_ver = Some(ver.to_string());
+                                }
+                                _ => {}
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if let Some(ver) = exact_ver {
+                version_req = ver;
+            } else if let Some(ver) = compatible_ver {
+                version_req = ver;
+            } else if let Some(ver) = lower_bound_ver {
+                version_req = ver;
+            }
         }
 
         Some((name, version_req))

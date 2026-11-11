@@ -48,7 +48,7 @@ DMZ uses a shared active workspace concept across all operations:
    - `Code Only`: Application source code only.
    - `Dependencies Only`: Verified package store only.
 5. Adjust the **Zstandard level** slider (default is 3; higher levels reduce bundle size at the cost of build time).
-6. Click **Export Bundle** (or one-shot resolution + packaging) to resolve, fetch, and export in a single click, or **Export Archive** if dependencies are already fetched into `.dmz/store`.
+6. Click **Bundle (Fetch)** to resolve, download, and package dependencies in a single workflow (requires network), or **Export (Local)** to package an already-cached `.dmz/store` directly with zero network calls.
 
 ---
 

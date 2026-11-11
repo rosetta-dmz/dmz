@@ -978,7 +978,7 @@ dependencies = [
 
 [[package]]
 name = "dmz-cli"
-version = "1.2.8"
+version = "1.4.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -994,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "dmz-core"
-version = "1.2.8"
+version = "1.4.5"
 dependencies = [
  "anyhow",
  "dmz-sandbox",
@@ -1018,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "dmz-gui"
-version = "1.2.8"
+version = "1.4.5"
 dependencies = [
  "dmz-core",
  "dmz-sandbox",
@@ -1037,7 +1037,7 @@ dependencies = [
 
 [[package]]
 name = "dmz-sandbox"
-version = "1.2.8"
+version = "1.4.5"
 dependencies = [
  "dmz-core",
  "libc",
@@ -1051,7 +1051,7 @@ dependencies = [
 
 [[package]]
 name = "dmz-supervisor"
-version = "1.2.8"
+version = "1.4.5"
 dependencies = [
  "dmz-core",
  "dmz-sandbox",

@@ -193,7 +193,7 @@ For developers using the visual desktop interface (`dmz-gui`), the multi-repo wo
 2. In the **Bundle & Archive Paths** card:
    * **Workspace Directory:** Points to your anchor workspace.
    * **Bundle Archive (.tar.zst):** Choose destination path (e.g., `dist/project_airgap.tar.zst`).
-3. Click **Export Bundle**:
+3. Click **Bundle (Fetch)**:
    * Fetches dependencies for all members into `.dmz/store` (including `@tauri-apps/cli` companion binary packages).
    * Bundles closures, toolchains, source trees, and manifests into a self-contained archive with a `.sha256` integrity sidecar.
 
