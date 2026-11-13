@@ -54,9 +54,7 @@ edition = "2021"
     let archive_path = pkg_store_dir.join(format!("{}-{}.archive", safe_name, pkg_version));
     fs::write(&archive_path, &payload)?;
 
-    let mut hasher = Sha256::new();
-    hasher.update(&payload);
-    let computed_sha256 = format!("{:x}", hasher.finalize());
+    let computed_sha256 = dmz_core::archive::format_sha256_hex(&Sha256::digest(&payload));
 
     let locked_pkg = LockedPackage {
         name: pkg_name.to_string(),

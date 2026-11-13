@@ -4,31 +4,16 @@ use std::path::{Path, PathBuf};
 use tracing::info;
 
 /// Typed domain error for ecosystem discovery, resolution, and offline materialization.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum EcosystemError {
+    #[error("{context}: {source}")]
     Io {
         context: String,
+        #[source]
         source: std::io::Error,
     },
-    Install(crate::install::InstallError),
-}
-
-impl std::fmt::Display for EcosystemError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io { context, source } => write!(f, "{}: {}", context, source),
-            Self::Install(err) => write!(f, "Offline install error: {}", err),
-        }
-    }
-}
-
-impl std::error::Error for EcosystemError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::Install(err) => Some(err),
-        }
-    }
+    #[error("Offline install error: {0}")]
+    Install(#[from] crate::install::InstallError),
 }
 
 impl From<std::io::Error> for EcosystemError {
@@ -37,12 +22,6 @@ impl From<std::io::Error> for EcosystemError {
             context: "Ecosystem I/O operation failed".to_string(),
             source,
         }
-    }
-}
-
-impl From<crate::install::InstallError> for EcosystemError {
-    fn from(err: crate::install::InstallError) -> Self {
-        Self::Install(err)
     }
 }
 
@@ -224,12 +203,6 @@ impl EcosystemRegistry {
                     args = ?cmd.args,
                     "Detected active ecosystem stack"
                 );
-                println!(
-                    "[dmz ecosystem] Detected '{}' stack. Resolution rule: {} {}",
-                    eco.name(),
-                    cmd.program,
-                    cmd.args.join(" ")
-                );
             }
         }
         Ok(detected_names)
@@ -260,7 +233,6 @@ impl EcosystemRegistry {
 
         if active_handlers.is_empty() {
             info!(workspace = ?workspace_root, "No active ecosystem stacks detected.");
-            println!("[dmz install] No active ecosystem stacks detected.");
             return Ok(());
         }
 
@@ -269,10 +241,6 @@ impl EcosystemRegistry {
                 ecosystem = eco.name(),
                 workspace = ?workspace_root,
                 "Materializing ecosystem stack"
-            );
-            println!(
-                "[dmz install] Materializing ecosystem stack: '{}'",
-                eco.name()
             );
             eco.materialize(workspace_root, offline_store, lockfile_path)?;
         }

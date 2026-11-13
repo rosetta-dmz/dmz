@@ -45,6 +45,23 @@ pub fn unpack_tar_entry_contained<R: Read>(
     target_root: &Path,
     rel_path: &Path,
 ) -> Result<(), ImportError> {
+    unpack_tar_entry_contained_bounded(
+        entry,
+        target_root,
+        rel_path,
+        super::engine::AirGapImporter::DEFAULT_MAX_DECOMPRESSED_BYTES,
+    )?;
+    Ok(())
+}
+
+/// Safely unpacks a tar entry inside `target_root`, capping regular file writes at `remaining_quota`
+/// bytes and returning the actual byte count copied to disk.
+pub fn unpack_tar_entry_contained_bounded<R: Read>(
+    entry: &mut tar::Entry<R>,
+    target_root: &Path,
+    rel_path: &Path,
+    remaining_quota: u64,
+) -> Result<u64, ImportError> {
     if !is_safe_relative_path(rel_path) {
         return Err(ImportError::ExtractionError(format!(
             "Path traversal attempt detected in archive entry: {:?}",
@@ -199,9 +216,16 @@ pub fn unpack_tar_entry_contained<R: Read>(
         let mut outfile = fs::File::create(&dest_path).map_err(|e| {
             ImportError::IoError(format!("Failed to create file {:?}: {}", dest_path, e))
         })?;
-        std::io::copy(entry, &mut outfile).map_err(|e| {
+        let mut limited = entry.take(remaining_quota.saturating_add(1));
+        let copied = std::io::copy(&mut limited, &mut outfile).map_err(|e| {
             ImportError::IoError(format!("Failed to extract file {:?}: {}", dest_path, e))
         })?;
+        if copied > remaining_quota {
+            let _ = fs::remove_file(&dest_path);
+            return Err(ImportError::ExtractionError(
+                "Decompression quota exceeded while unpacking tar entry".to_string(),
+            ));
+        }
 
         #[cfg(unix)]
         {
@@ -209,7 +233,8 @@ pub fn unpack_tar_entry_contained<R: Read>(
             let mode = entry.header().mode().unwrap_or(0o644) & 0o777;
             let _ = fs::set_permissions(&dest_path, fs::Permissions::from_mode(mode));
         }
+        return Ok(copied);
     }
 
-    Ok(())
+    Ok(0)
 }

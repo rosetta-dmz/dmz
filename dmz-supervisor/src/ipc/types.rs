@@ -91,6 +91,9 @@ pub enum IpcClientError {
     )]
     PayloadTooLarge { bytes: usize, max_bytes: usize },
 
+    #[error("IPC request timed out after {0:?}")]
+    Timeout(std::time::Duration),
+
     #[error("IPC client error: {0}")]
     Generic(String),
 }
@@ -131,6 +134,13 @@ pub enum IpcRequest {
         allow_network: bool,
     },
     GetSidecarStatus,
+    StartSidecarPair {
+        workspace_path: String,
+        #[serde(default)]
+        config_path: Option<String>,
+        #[serde(default)]
+        allow_network: bool,
+    },
     StopSidecarPair,
     GetServiceStatus,
     Shutdown,

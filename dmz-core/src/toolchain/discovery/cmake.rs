@@ -1,7 +1,8 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
+use super::super::ToolchainError;
 use super::{
-    collect_files_recursive, emit_non_relocatable_notice, is_non_standalone_path,
-    push_system_bin_candidates, push_unique_path, ToolchainDiscoverer,
+    collect_files_recursive, push_system_bin_candidates, push_unique_path,
+    select_preferred_verified, ToolchainDiscoverer,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ impl ToolchainDiscoverer for CMakeDiscoverer {
         ToolchainEcosystem::CMake
     }
 
-    fn discover(&self) -> Result<Option<DiscoveredToolchain>, String> {
+    fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         let mut candidates: Vec<PathBuf> = Vec::new();
 
         // 1. Explicit CMAKE_ROOT or CMAKE_HOME environment variables
@@ -64,46 +65,22 @@ impl ToolchainDiscoverer for CMakeDiscoverer {
         }
 
         // Prioritize standalone distributions over machine-specific package managers
-        candidates.sort_by_key(|c| is_non_standalone_path(c));
-
-        let mut chosen_cmake: Option<PathBuf> = None;
-        let mut chosen_version: Option<String> = None;
-
-        for candidate in candidates {
-            if is_non_standalone_path(&candidate) {
-                emit_non_relocatable_notice(&candidate);
+        let Some((cmake_bin, version)) = select_preferred_verified(candidates, |candidate| {
+            let output = Command::new(candidate).arg("--version").output().ok()?;
+            if !output.status.success() {
+                return None;
             }
-
-            if let Ok(output) = Command::new(&candidate).arg("--version").output() {
-                if output.status.success() {
-                    let version_str = String::from_utf8_lossy(&output.stdout)
-                        .lines()
-                        .next()
-                        .unwrap_or("cmake")
-                        .trim()
-                        .to_string();
-
-                    let is_non_standalone = is_non_standalone_path(&candidate);
-                    let should_replace = match &chosen_cmake {
-                        None => true,
-                        Some(prev) => !is_non_standalone && is_non_standalone_path(prev),
-                    };
-                    if should_replace {
-                        chosen_cmake = Some(candidate);
-                        chosen_version = Some(version_str);
-                        if !is_non_standalone {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        let cmake_bin = match chosen_cmake {
-            Some(bin) => bin,
-            None => return Ok(None),
+            Some(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or("cmake")
+                    .trim()
+                    .to_string(),
+            )
+        }) else {
+            return Ok(None);
         };
-        let version = chosen_version.unwrap_or_else(|| "cmake".to_string());
 
         // Canonicalize cmake_bin so command-line symlinks (e.g. /usr/local/bin/cmake -> /Applications/CMake.app/Contents/bin/cmake)
         // resolve to the actual standalone installation directory where share/cmake-*/Modules resides.

@@ -61,7 +61,13 @@ pub async fn watchdog_loop(
                     Duration::from_millis(pair_val.config.project.ipc.drain_timeout_ms);
                 *state.write().await = SidecarLifecycleState::TerminatingSidecar;
                 terminate_children_concurrently(pair_val.sidecar_children, drain_timeout).await;
-                let _ = cleanup_stale_socket(&pair_val.socket_path);
+                if let Err(e) = cleanup_stale_socket(&pair_val.socket_path) {
+                    tracing::warn!(
+                        socket = ?pair_val.socket_path,
+                        error = %e,
+                        "Failed to remove stale sidecar socket during primary exit teardown"
+                    );
+                }
                 *socket.write().await = None;
                 *state.write().await = SidecarLifecycleState::Stopped;
                 let _ = exit_tx.send(Some(status));
@@ -109,7 +115,13 @@ pub async fn watchdog_loop(
                 prim.graceful_shutdown(drain_timeout).await;
             }
             terminate_children_concurrently(pair_val.sidecar_children, drain_timeout).await;
-            let _ = cleanup_stale_socket(&pair_val.socket_path);
+            if let Err(e) = cleanup_stale_socket(&pair_val.socket_path) {
+                tracing::warn!(
+                    socket = ?pair_val.socket_path,
+                    error = %e,
+                    "Failed to remove stale sidecar socket after sidecar crash teardown"
+                );
+            }
             *socket.write().await = None;
             *last_error.write().await = Some(err);
             *state.write().await = SidecarLifecycleState::Failed;

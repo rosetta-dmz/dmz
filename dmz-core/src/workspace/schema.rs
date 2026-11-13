@@ -62,6 +62,7 @@ impl WorkspaceMember {
 
 /// IPC bridge timing and socket identification configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct IpcBridgeConfig {
     pub socket_id: String,
     pub env_var: String,
@@ -93,6 +94,7 @@ pub struct ResolvedMemberLayout {
 
 /// Root configuration model representing `dmz-workspace.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct WorkspaceProjectConfig {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,6 +102,96 @@ pub struct WorkspaceProjectConfig {
     pub members: Vec<WorkspaceMember>,
     #[serde(default)]
     pub ipc: IpcBridgeConfig,
+}
+
+/// Normalizes a workspace member path relative to `workspace_root` when possible.
+///
+/// Produces `"."` for identical directories, nested relative paths (`"backend"`),
+/// or sibling relative paths (`"../sidecar"`), preserving unrelated prefixes verbatim.
+pub fn normalize_member_path(workspace_root: &Path, target: &Path) -> PathBuf {
+    let ws_abs = if workspace_root.is_relative() {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(workspace_root))
+            .unwrap_or_else(|_| workspace_root.to_path_buf())
+    } else {
+        workspace_root.to_path_buf()
+    };
+    let ws_canon = fs::canonicalize(&ws_abs).unwrap_or_else(|_| clean_lexical_path(&ws_abs));
+
+    let target_joined = if target.is_relative() {
+        ws_canon.join(target)
+    } else {
+        target.to_path_buf()
+    };
+    let target_canon =
+        fs::canonicalize(&target_joined).unwrap_or_else(|_| clean_lexical_path(&target_joined));
+
+    if ws_canon == target_canon {
+        return PathBuf::from(".");
+    }
+
+    let ws_components: Vec<std::path::Component<'_>> = ws_canon.components().collect();
+    let target_components: Vec<std::path::Component<'_>> = target_canon.components().collect();
+
+    // Never emit cross-drive relative paths on Windows
+    if matches!(
+        (ws_components.first(), target_components.first()),
+        (
+            Some(std::path::Component::Prefix(a)),
+            Some(std::path::Component::Prefix(b))
+        ) if a != b
+    ) {
+        return target_canon;
+    }
+
+    let mut common_len = 0;
+    while common_len < ws_components.len()
+        && common_len < target_components.len()
+        && ws_components[common_len] == target_components[common_len]
+    {
+        common_len += 1;
+    }
+
+    if common_len == 0 {
+        return target_canon;
+    }
+
+    let mut rel = PathBuf::new();
+    for comp in &ws_components[common_len..] {
+        if matches!(comp, std::path::Component::Normal(_)) {
+            rel.push("..");
+        }
+    }
+    for comp in &target_components[common_len..] {
+        rel.push(comp.as_os_str());
+    }
+
+    if rel.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        rel
+    }
+}
+
+fn clean_lexical_path(path: &Path) -> PathBuf {
+    let mut out: Vec<std::path::Component<'_>> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if matches!(out.last(), Some(std::path::Component::Normal(_))) {
+                    out.pop();
+                } else if !matches!(
+                    out.last(),
+                    Some(std::path::Component::RootDir | std::path::Component::Prefix(_))
+                ) {
+                    out.push(comp);
+                }
+            }
+            _ => out.push(comp),
+        }
+    }
+    out.into_iter().collect()
 }
 
 impl Default for WorkspaceProjectConfig {
@@ -237,6 +329,51 @@ drain_timeout_ms = 2500
         config.save_to_file(&path)?;
         let loaded = WorkspaceProjectConfig::load_from_file(&path)?;
         assert_eq!(loaded.name, "roundtrip-app");
+        Ok(())
+    }
+
+    #[test]
+    fn test_partial_ipc_and_minimal_workspace_manifest_defaults() -> Result<(), Box<dyn Error>> {
+        let partial_ipc = r#"
+[ipc]
+socket_id = "api"
+"#;
+        let cfg = WorkspaceProjectConfig::from_toml_str(partial_ipc)?;
+        assert_eq!(cfg.name, "default");
+        assert!(cfg.members.is_empty());
+        assert_eq!(cfg.ipc.socket_id, "api");
+        assert_eq!(cfg.ipc.env_var, "DMZ_SIDECAR_SOCK");
+        assert_eq!(cfg.ipc.readiness_timeout_ms, 10000);
+        assert_eq!(cfg.ipc.drain_timeout_ms, 3000);
+
+        let named_without_members = r#"
+name = "minimal-app"
+"#;
+        let cfg2 = WorkspaceProjectConfig::from_toml_str(named_without_members)?;
+        assert_eq!(cfg2.name, "minimal-app");
+        assert!(cfg2.members.is_empty());
+        assert_eq!(cfg2.ipc, IpcBridgeConfig::default());
+        Ok(())
+    }
+
+    #[test]
+    fn test_normalize_member_path_relative_layouts() -> Result<(), Box<dyn Error>> {
+        let base = tempfile::tempdir()?;
+        let ws = base.path().join("primary");
+        let nested = ws.join("backend");
+        let sibling = base.path().join("sidecar");
+        fs::create_dir_all(&nested)?;
+        fs::create_dir_all(&sibling)?;
+
+        assert_eq!(normalize_member_path(&ws, &ws), PathBuf::from("."));
+        assert_eq!(
+            normalize_member_path(&ws, &nested),
+            PathBuf::from("backend")
+        );
+        assert_eq!(
+            normalize_member_path(&ws, &sibling),
+            PathBuf::from("../sidecar")
+        );
         Ok(())
     }
 }

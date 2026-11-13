@@ -73,21 +73,12 @@ impl Default for ExportConfig {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ExportError {
+    #[error("Export IO Error: {0}")]
     IoError(String),
+    #[error("Export Lockfile Error: {0}")]
     LockfileError(String),
+    #[error("Export Archive Error: {0}")]
     ArchiveError(String),
 }
-
-impl std::fmt::Display for ExportError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::IoError(msg) => write!(f, "Export IO Error: {}", msg),
-            Self::LockfileError(msg) => write!(f, "Export Lockfile Error: {}", msg),
-            Self::ArchiveError(msg) => write!(f, "Export Archive Error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for ExportError {}

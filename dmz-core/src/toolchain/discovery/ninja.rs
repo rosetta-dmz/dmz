@@ -1,7 +1,7 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
+use super::super::ToolchainError;
 use super::{
-    emit_non_relocatable_notice, is_non_standalone_path, push_system_bin_candidates,
-    push_unique_path, ToolchainDiscoverer,
+    push_system_bin_candidates, push_unique_path, select_preferred_verified, ToolchainDiscoverer,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -16,7 +16,7 @@ impl ToolchainDiscoverer for NinjaDiscoverer {
         ToolchainEcosystem::Ninja
     }
 
-    fn discover(&self) -> Result<Option<DiscoveredToolchain>, String> {
+    fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         let mut candidates: Vec<PathBuf> = Vec::new();
 
         if let Ok(root) = std::env::var("NINJA_HOME") {
@@ -48,40 +48,16 @@ impl ToolchainDiscoverer for NinjaDiscoverer {
             return Ok(None);
         }
 
-        candidates.sort_by_key(|c| is_non_standalone_path(c));
-
-        let mut chosen_ninja: Option<PathBuf> = None;
-        let mut chosen_version: Option<String> = None;
-
-        for candidate in candidates {
-            if is_non_standalone_path(&candidate) {
-                emit_non_relocatable_notice(&candidate);
+        let Some((ninja_bin, version)) = select_preferred_verified(candidates, |candidate| {
+            let output = Command::new(candidate).arg("--version").output().ok()?;
+            if !output.status.success() {
+                return None;
             }
-
-            if let Ok(output) = Command::new(&candidate).arg("--version").output() {
-                if output.status.success() {
-                    let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    let is_non_standalone = is_non_standalone_path(&candidate);
-                    let should_replace = match &chosen_ninja {
-                        None => true,
-                        Some(prev) => !is_non_standalone && is_non_standalone_path(prev),
-                    };
-                    if should_replace {
-                        chosen_ninja = Some(candidate);
-                        chosen_version = Some(format!("ninja {}", version_str));
-                        if !is_non_standalone {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        let ninja_bin = match chosen_ninja {
-            Some(bin) => bin,
-            None => return Ok(None),
+            let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Some(format!("ninja {}", version_str))
+        }) else {
+            return Ok(None);
         };
-        let version = chosen_version.unwrap_or_else(|| "ninja".to_string());
         let root_dir = ninja_bin.parent().unwrap_or(Path::new("")).to_path_buf();
 
         info!(

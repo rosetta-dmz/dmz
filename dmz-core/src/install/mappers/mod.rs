@@ -69,7 +69,7 @@ mod tests {
         };
 
         MavenMapper::map_package(ws, &pkg, &jar_path).unwrap();
-        let target = ws.join(".m2/repository/org.example/test-pkg/org.example/test-pkg-1.0.0.jar");
+        let target = ws.join(".m2/repository/org/example/test-pkg/1.0.0/test-pkg-1.0.0.jar");
         assert!(target.exists());
         assert_eq!(fs::read(&target).unwrap(), b"PK0304");
     }
@@ -97,7 +97,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let ws = temp.path();
         let root_venv = ws.join(".venv");
-        PyPiMapper::hydrate_venv_environment(ws, &root_venv, "python3.11");
+        PyPiMapper::hydrate_venv_environment(ws, &root_venv, "python3.11").unwrap();
 
         let cfg = root_venv.join("pyvenv.cfg");
         assert!(cfg.is_file());
@@ -204,5 +204,129 @@ mod tests {
         assert!(config.is_file());
         let content = fs::read_to_string(config).unwrap();
         assert!(content.contains("BUNDLE_PATH: \"vendor/bundle\""));
+    }
+
+    #[test]
+    fn test_cargo_mapper_per_file_checksums_and_idempotent_config() {
+        use sha2::{Digest, Sha256};
+
+        let temp = tempdir().unwrap();
+        let ws = temp.path();
+        let cargo_toml = b"[package]\nname = \"mini\"\nversion = \"0.1.0\"\n";
+        let lib_rs = b"pub fn hello() -> &'static str { \"hi\" }\n";
+
+        let mut tar_builder = tar::Builder::new(Vec::new());
+        for (rel_path, content) in &[
+            ("mini-0.1.0/Cargo.toml", &cargo_toml[..]),
+            ("mini-0.1.0/src/lib.rs", &lib_rs[..]),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar_builder
+                .append_data(&mut header, rel_path, *content)
+                .unwrap();
+        }
+        let tar_bytes = tar_builder.into_inner().unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, &tar_bytes).unwrap();
+        let archive_data = encoder.finish().unwrap();
+
+        let archive_path = temp.path().join("mini-0.1.0.crate");
+        fs::write(&archive_path, &archive_data).unwrap();
+        let pkg_sha = crate::archive::format_sha256_hex(&Sha256::digest(&archive_data));
+
+        let pkg = crate::resolver::lockfile::LockedPackage {
+            name: "mini".into(),
+            version: "0.1.0".into(),
+            ecosystem: crate::resolver::manifest::types::Ecosystem::Cargo,
+            sha256: pkg_sha.clone(),
+            source_url: None,
+            dependencies: vec![],
+            member_id: None,
+        };
+
+        CargoMapper::map_package(ws, &pkg, &archive_path).unwrap();
+        CargoMapper::map_package(ws, &pkg, &archive_path).unwrap();
+
+        let checksum_file = ws.join(".cargo/vendor/mini-0.1.0/.cargo-checksum.json");
+        assert!(checksum_file.is_file());
+        let checksum_json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&checksum_file).unwrap()).unwrap();
+        assert_eq!(checksum_json["package"], pkg_sha);
+        assert_eq!(
+            checksum_json["files"]["Cargo.toml"],
+            crate::archive::format_sha256_hex(&Sha256::digest(cargo_toml))
+        );
+        assert_eq!(
+            checksum_json["files"]["src/lib.rs"],
+            crate::archive::format_sha256_hex(&Sha256::digest(lib_rs))
+        );
+
+        let config_toml = fs::read_to_string(ws.join(".cargo/config.toml")).unwrap();
+        assert_eq!(config_toml.matches("[source.vendored-sources]").count(), 1);
+    }
+
+    #[test]
+    fn test_go_mapper_strips_module_prefix_and_dedups_modules_txt() {
+        let temp = tempdir().unwrap();
+        let ws = temp.path();
+
+        let zip_path = temp.path().join("mod.zip");
+        {
+            let file = fs::File::create(&zip_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default();
+            zip.start_file("github.com/acme/lib@v1.2.3/lib.go", opts)
+                .unwrap();
+            std::io::Write::write_all(&mut zip, b"package lib\n").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let pkg = crate::resolver::lockfile::LockedPackage {
+            name: "github.com/acme/lib".into(),
+            version: "v1.2.3".into(),
+            ecosystem: crate::resolver::manifest::types::Ecosystem::Go,
+            sha256: "abc".into(),
+            source_url: None,
+            dependencies: vec![],
+            member_id: None,
+        };
+
+        GoMapper::map_package(ws, &pkg, &zip_path).unwrap();
+        GoMapper::map_package(ws, &pkg, &zip_path).unwrap();
+
+        assert!(ws.join("vendor/github.com/acme/lib/lib.go").is_file());
+        let modules_txt = fs::read_to_string(ws.join("vendor/modules.txt")).unwrap();
+        assert_eq!(
+            modules_txt.matches("# github.com/acme/lib v1.2.3").count(),
+            1
+        );
+        assert!(modules_txt.contains("## explicit"));
+    }
+
+    #[test]
+    fn test_maven_mapper_populates_m2_repository_layout() {
+        let temp = tempdir().unwrap();
+        let ws = temp.path();
+        let jar_path = temp.path().join("gson.jar");
+        fs::write(&jar_path, b"PK\x03\x04mock-jar").unwrap();
+
+        let pkg = crate::resolver::lockfile::LockedPackage {
+            name: "com.google.code.gson:gson".into(),
+            version: "2.10.1".into(),
+            ecosystem: crate::resolver::manifest::types::Ecosystem::MavenGradle,
+            sha256: "abc".into(),
+            source_url: None,
+            dependencies: vec![],
+            member_id: None,
+        };
+
+        MavenMapper::map_package(ws, &pkg, &jar_path).unwrap();
+        let expected_jar =
+            ws.join(".m2/repository/com/google/code/gson/gson/2.10.1/gson-2.10.1.jar");
+        assert!(expected_jar.is_file());
+        assert_eq!(fs::read(&expected_jar).unwrap(), b"PK\x03\x04mock-jar");
     }
 }

@@ -5,7 +5,7 @@ pub mod packaging;
 pub mod types;
 
 pub use engine::AirGapExporter;
-pub use hashing::{calculate_file_sha256, HashingWriter};
+pub use hashing::{calculate_file_sha256, format_sha256_hex, HashingWriter};
 pub use packaging::resolve_deterministic_epoch;
 pub use types::{AirGapManifest, DeltaBaseInfo, ExportConfig, ExportError, ExportMode};
 
@@ -37,7 +37,7 @@ mod tests {
         let (hash, written) = writer.finalize().unwrap();
         assert_eq!(written, payload.len() as u64);
 
-        let expected_hash = format!("{:x}", Sha256::digest(payload));
+        let expected_hash = format_sha256_hex(&Sha256::digest(payload));
         assert_eq!(hash, expected_hash);
     }
 
@@ -49,7 +49,7 @@ mod tests {
         std::fs::write(&file_path, content).unwrap();
 
         let computed_hash = AirGapExporter::calculate_file_sha256(&file_path).unwrap();
-        let expected_hash = format!("{:x}", Sha256::digest(content));
+        let expected_hash = format_sha256_hex(&Sha256::digest(content));
         assert_eq!(computed_hash, expected_hash);
     }
 

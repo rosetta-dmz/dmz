@@ -63,15 +63,13 @@ fn test_dual_repo_umbrella_export_and_import_reversed_roles_python_primary_node_
     let store_dir = primary_dir.join(".dmz/store");
     fs::create_dir_all(&store_dir).unwrap();
     let dummy_pkg_name = "test-pkg";
-    let pkg_dir = store_dir.join(dummy_pkg_name);
-    fs::create_dir_all(&pkg_dir).unwrap();
-    fs::write(pkg_dir.join("data.txt"), "dummy").unwrap();
+    let real_sha = crate::write_mock_cargo_store_pkg(&store_dir, dummy_pkg_name, "1.0.0");
 
     let pkg = LockedPackage {
         name: dummy_pkg_name.to_string(),
         version: "1.0.0".to_string(),
         ecosystem: Ecosystem::Cargo,
-        sha256: "dummy-sha".to_string(),
+        sha256: real_sha,
         source_url: None,
         dependencies: vec![],
         member_id: Some("ui-client".to_string()),

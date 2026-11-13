@@ -3,6 +3,16 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
+/// Formats raw digest bytes as lowercase hexadecimal.
+pub fn format_sha256_hex(digest: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
+
 /// Transparent streaming writer calculating cryptographic SHA-256 in a single pass
 /// without intermediate memory buffering or post-compression disk re-reading.
 pub struct HashingWriter<W: Write> {
@@ -22,11 +32,14 @@ impl<W: Write> HashingWriter<W> {
 
     pub fn finalize(mut self) -> std::io::Result<(String, u64)> {
         self.inner.flush()?;
-        Ok((format!("{:x}", self.hasher.finalize()), self.bytes_written))
+        Ok((
+            format_sha256_hex(&self.hasher.finalize()),
+            self.bytes_written,
+        ))
     }
 
     pub fn finalize_hash(self) -> (W, String) {
-        let hash = format!("{:x}", self.hasher.finalize());
+        let hash = format_sha256_hex(&self.hasher.finalize());
         (self.inner, hash)
     }
 
@@ -38,7 +51,9 @@ impl<W: Write> HashingWriter<W> {
 impl<W: Write> Write for HashingWriter<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let n = self.inner.write(buf)?;
-        self.hasher.update(&buf[..n]);
+        if let Some(written) = buf.get(..n) {
+            self.hasher.update(written);
+        }
         self.bytes_written += n as u64;
         Ok(n)
     }
@@ -48,18 +63,25 @@ impl<W: Write> Write for HashingWriter<W> {
     }
 }
 
-pub fn calculate_file_sha256(path: &Path) -> Result<String, std::io::Error> {
-    let mut file = File::open(path)?;
+/// Computes lowercase SHA-256 hex digest by streaming from an open reader.
+pub fn calculate_reader_sha256<R: Read>(reader: &mut R) -> Result<String, std::io::Error> {
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 65536];
 
     loop {
-        let count = file.read(&mut buffer)?;
+        let count = reader.read(&mut buffer)?;
         if count == 0 {
             break;
         }
-        hasher.update(&buffer[..count]);
+        if let Some(chunk) = buffer.get(..count) {
+            hasher.update(chunk);
+        }
     }
 
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(format_sha256_hex(&hasher.finalize()))
+}
+
+pub fn calculate_file_sha256(path: &Path) -> Result<String, std::io::Error> {
+    let mut file = File::open(path)?;
+    calculate_reader_sha256(&mut file)
 }

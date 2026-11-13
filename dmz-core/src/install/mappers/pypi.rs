@@ -4,6 +4,7 @@ use crate::install::InstallError;
 use crate::resolver::lockfile::LockedPackage;
 use std::fs;
 use std::path::Path;
+use tracing::warn;
 
 /// Python / PyPI site-packages mapper (Production-Grade)
 pub struct PyPiMapper;
@@ -245,47 +246,60 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
         // (Pylance/Pyright) can locate dependencies directly inside .venv/lib/<py_ver>/site-packages
         let root_venv = workspace_path.join(".venv");
         let root_site_packages = root_venv.join("lib").join(&py_ver).join("site-packages");
-        let _ = fs::create_dir_all(&root_site_packages);
-        let _ = FastClone::clone_dir_recursive(&venv_site_packages, &root_site_packages);
+        fs::create_dir_all(&root_site_packages).map_err(|e| {
+            InstallError::IoError(format!("Failed to create .venv site-packages: {}", e))
+        })?;
+        FastClone::clone_dir_recursive(&venv_site_packages, &root_site_packages).map_err(|e| {
+            InstallError::IoError(format!("Failed to mirror site-packages into .venv: {}", e))
+        })?;
         #[cfg(unix)]
         {
             let py3_alias = root_venv.join("lib").join("python3");
             if !py3_alias.exists() && fs::symlink_metadata(&py3_alias).is_err() {
-                let _ = std::os::unix::fs::symlink(&py_ver, &py3_alias);
+                if let Err(e) = std::os::unix::fs::symlink(&py_ver, &py3_alias) {
+                    warn!(error = %e, "Failed to create python3 site-packages alias symlink");
+                }
             }
         }
         #[cfg(windows)]
         {
             let py3_alias = root_venv.join("lib").join("python3");
             if !py3_alias.exists() {
-                let _ = FastClone::clone_dir_recursive(
+                FastClone::clone_dir_recursive(
                     &root_site_packages,
                     &py3_alias.join("site-packages"),
-                );
+                )?;
             }
             let win_sp = root_venv.join("Lib").join("site-packages");
             if !win_sp.exists() {
-                let _ = FastClone::clone_dir_recursive(&root_site_packages, &win_sp);
+                FastClone::clone_dir_recursive(&root_site_packages, &win_sp)?;
             }
         }
         let pth_file = root_site_packages.join("dmz_store.pth");
-        let _ = fs::write(
-            pth_file,
+        fs::write(
+            &pth_file,
             format!("../../../../.dmz/venv/lib/{}/site-packages\n", py_ver),
-        );
+        )
+        .map_err(|e| InstallError::IoError(format!("Failed to write {:?}: {}", pth_file, e)))?;
 
         // Hydrate runnable python interpreter launcher and pyvenv.cfg
-        Self::hydrate_venv_environment(workspace_path, &root_venv, &py_ver);
+        Self::hydrate_venv_environment(workspace_path, &root_venv, &py_ver)?;
 
         Ok(())
     }
 
     /// Hydrates runnable python interpreter launcher scripts and configuration into .venv
-    pub fn hydrate_venv_environment(_workspace_path: &Path, root_venv: &Path, py_ver: &str) {
+    pub fn hydrate_venv_environment(
+        _workspace_path: &Path,
+        root_venv: &Path,
+        py_ver: &str,
+    ) -> Result<(), InstallError> {
         let venv_bin = root_venv.join("bin");
         let venv_scripts = root_venv.join("Scripts");
-        let _ = fs::create_dir_all(&venv_bin);
-        let _ = fs::create_dir_all(&venv_scripts);
+        fs::create_dir_all(&venv_bin)
+            .map_err(|e| InstallError::IoError(format!("Failed to create .venv/bin: {}", e)))?;
+        fs::create_dir_all(&venv_scripts)
+            .map_err(|e| InstallError::IoError(format!("Failed to create .venv/Scripts: {}", e)))?;
 
         // 1. pyvenv.cfg (always overwrite to eliminate any leaked host paths)
         let pyvenv_cfg = root_venv.join("pyvenv.cfg");
@@ -295,7 +309,8 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
             "home = /usr/bin\ninclude-system-site-packages = false\nversion = {}.0\n",
             ver_clean
         );
-        let _ = fs::write(&pyvenv_cfg, cfg_content);
+        fs::write(&pyvenv_cfg, cfg_content)
+            .map_err(|e| InstallError::IoError(format!("Failed to write pyvenv.cfg: {}", e)))?;
 
         // 2. Unix & Git Bash / MSYS2 launcher: root_venv/bin/python and root_venv/bin/python3
         let sh_content = format!(
@@ -347,11 +362,17 @@ fi
         for name in &["python", "python3"] {
             let bin_path = venv_bin.join(name);
             let _ = fs::remove_file(&bin_path);
-            if fs::write(&bin_path, &sh_content).is_ok() {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755));
+            fs::write(&bin_path, &sh_content).map_err(|e| {
+                InstallError::IoError(format!(
+                    "Failed to write python launcher {:?}: {}",
+                    bin_path, e
+                ))
+            })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Err(e) = fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755)) {
+                    warn!(path = ?bin_path, error = %e, "Failed to chmod python launcher");
                 }
             }
         }
@@ -365,7 +386,9 @@ _OLD_PATH="$PATH"
 PATH="$VIRTUAL_ENV/bin:$PATH"
 export PATH
 "#;
-        let _ = fs::write(&activate_path, activate_content);
+        if let Err(e) = fs::write(&activate_path, activate_content) {
+            warn!(path = ?activate_path, error = %e, "Failed to write venv activate script");
+        }
 
         // 3. Windows launcher: root_venv/Scripts/python.bat and python.cmd
         let cmd_content = format!(
@@ -391,7 +414,10 @@ if exist "%VENV_DIR%\..\.dmz\toolchains\python\python.exe" (
         for name in &["python.bat", "python.cmd"] {
             let cmd_path = venv_scripts.join(name);
             let _ = fs::remove_file(&cmd_path);
-            let _ = fs::write(&cmd_path, &cmd_content);
+            if let Err(e) = fs::write(&cmd_path, &cmd_content) {
+                warn!(path = ?cmd_path, error = %e, "Failed to write Windows python launcher");
+            }
         }
+        Ok(())
     }
 }

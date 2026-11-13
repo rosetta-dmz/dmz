@@ -1,7 +1,8 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
+use super::super::ToolchainError;
 use super::{
     collect_files_recursive, emit_non_relocatable_notice, is_non_standalone_path,
-    push_system_bin_candidates, push_unique_path, ToolchainDiscoverer,
+    push_system_bin_candidates, push_unique_path, select_preferred_candidate, ToolchainDiscoverer,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ impl ToolchainDiscoverer for NodeDiscoverer {
         ToolchainEcosystem::Node
     }
 
-    fn discover(&self) -> Result<Option<DiscoveredToolchain>, String> {
+    fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         let mut node_candidates: Vec<PathBuf> = Vec::new();
 
         // 1. Check official standalone NVM installations
@@ -51,29 +52,8 @@ impl ToolchainDiscoverer for NodeDiscoverer {
             return Ok(None);
         }
 
-        // Sort candidates prioritizing standalone paths
-        node_candidates.sort_by_key(|c| is_non_standalone_path(c));
-
-        let mut chosen_node: Option<PathBuf> = None;
-        for candidate in node_candidates {
-            if is_non_standalone_path(&candidate) {
-                emit_non_relocatable_notice(&candidate);
-            }
-            let should_replace = match &chosen_node {
-                None => true,
-                Some(prev) => !is_non_standalone_path(&candidate) && is_non_standalone_path(prev),
-            };
-            if should_replace {
-                chosen_node = Some(candidate.clone());
-                if !is_non_standalone_path(&candidate) {
-                    break;
-                }
-            }
-        }
-
-        let node_bin = match chosen_node {
-            Some(b) => b,
-            None => return Ok(None),
+        let Some(node_bin) = select_preferred_candidate(node_candidates) else {
+            return Ok(None);
         };
 
         let canonical_bin = fs::canonicalize(&node_bin).unwrap_or_else(|_| node_bin.clone());

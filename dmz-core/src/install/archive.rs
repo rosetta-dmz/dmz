@@ -257,12 +257,12 @@ impl SafeArchiveExtractor {
                 )));
             }
 
-            total_bytes = total_bytes.saturating_add(entry.size());
-            if total_bytes > Self::DEFAULT_MAX_BYTES {
+            if total_bytes.saturating_add(entry.size()) > Self::DEFAULT_MAX_BYTES {
                 return Err(InstallError::MapperError(
                     "Archive decompression quota exceeded (tar bomb protection)".into(),
                 ));
             }
+            let remaining_quota = Self::DEFAULT_MAX_BYTES.saturating_sub(total_bytes);
 
             let entry_path = entry
                 .path()
@@ -293,6 +293,65 @@ impl SafeArchiveExtractor {
                         link_target
                     )));
                 }
+            }
+
+            if entry.header().entry_type().is_file() {
+                let mut current = target_dir.to_path_buf();
+                if let Some(parent) = entry_path.parent() {
+                    for comp in parent.components() {
+                        if let Component::Normal(part) = comp {
+                            current.push(part);
+                            if let Ok(meta) = fs::symlink_metadata(&current) {
+                                if meta.file_type().is_symlink() {
+                                    return Err(InstallError::MapperError(format!(
+                                        "Symlink traversal detected through intermediate directory {:?}",
+                                        current
+                                    )));
+                                }
+                            } else {
+                                fs::create_dir_all(&current).map_err(|e| {
+                                    InstallError::IoError(format!(
+                                        "Failed to create directory {:?}: {}",
+                                        current, e
+                                    ))
+                                })?;
+                            }
+                        }
+                    }
+                }
+                let outpath = target_dir.join(&entry_path);
+                if let Ok(meta) = fs::symlink_metadata(&outpath) {
+                    if meta.file_type().is_symlink() {
+                        fs::remove_file(&outpath).map_err(|e| {
+                            InstallError::IoError(format!(
+                                "Failed to remove symlink {:?}: {}",
+                                outpath, e
+                            ))
+                        })?;
+                    }
+                }
+                let mut outfile = File::create(&outpath).map_err(|e| {
+                    InstallError::IoError(format!("Failed to create file {:?}: {}", outpath, e))
+                })?;
+                let mut limited = (&mut entry).take(remaining_quota.saturating_add(1));
+                let copied = std::io::copy(&mut limited, &mut outfile).map_err(|e| {
+                    InstallError::IoError(format!("Failed to extract file {:?}: {}", outpath, e))
+                })?;
+                if copied > remaining_quota {
+                    let _ = fs::remove_file(&outpath);
+                    return Err(InstallError::MapperError(
+                        "Archive decompression quota exceeded (tar bomb protection)".into(),
+                    ));
+                }
+                total_bytes = total_bytes.saturating_add(copied);
+
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = entry.header().mode().unwrap_or(0o644) & 0o777;
+                    let _ = fs::set_permissions(&outpath, fs::Permissions::from_mode(mode));
+                }
+                continue;
             }
 
             let unpacked = entry.unpack_in(target_dir).map_err(|e| {

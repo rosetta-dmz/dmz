@@ -1,5 +1,6 @@
 // IDE workspace settings and multi-root workspace configuration
 
+use super::super::ToolchainError;
 use std::fs;
 use std::path::Path;
 
@@ -7,7 +8,7 @@ use std::path::Path;
 /// In non-CMake workspaces, silences CMake Tools extension auto-probing to eliminate "Bad CMake executable: ''" popups.
 /// In CMake workspaces with bundled CMake, automatically configures cmake.cmakePath and toolchain file.
 /// Pre-configures terminal PATH and language server environments (such as rust-analyzer).
-pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), String> {
+pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), ToolchainError> {
     let vscode_dir = workspace_root.join(".vscode");
     let settings_path = vscode_dir.join("settings.json");
 
@@ -381,13 +382,15 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), String> {
     }
 
     fs::create_dir_all(&vscode_dir)
-        .map_err(|e| format!("Failed to create .vscode directory: {}", e))?;
+        .map_err(|e| ToolchainError::Io(format!("Failed to create .vscode directory: {}", e)))?;
 
-    let json_string = serde_json::to_string_pretty(&serde_json::Value::Object(settings))
-        .map_err(|e| format!("Failed to serialize settings.json: {}", e))?;
+    let json_string =
+        serde_json::to_string_pretty(&serde_json::Value::Object(settings)).map_err(|e| {
+            ToolchainError::SetupFailed(format!("Failed to serialize settings.json: {}", e))
+        })?;
 
     fs::write(&settings_path, json_string)
-        .map_err(|e| format!("Failed to write .vscode/settings.json: {}", e))?;
+        .map_err(|e| ToolchainError::Io(format!("Failed to write .vscode/settings.json: {}", e)))?;
 
     // If this workspace is a true umbrella multi-workspace root (not a symlinked member), generate the .code-workspace file
     let is_true_umbrella = fs::symlink_metadata(workspace_root.join("dmz-workspace.toml"))
@@ -401,7 +404,7 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), String> {
 }
 
 /// Generates or updates `<project>.code-workspace` for multi-root projects
-pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), String> {
+pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), ToolchainError> {
     let manifest_path = workspace_root.join("dmz-workspace.toml");
     if !manifest_path.exists() {
         return Ok(());
@@ -620,10 +623,11 @@ pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), String
     });
 
     let cw_path = workspace_root.join(format!("{}.code-workspace", project_name));
-    let content = serde_json::to_string_pretty(&code_workspace_obj)
-        .map_err(|e| format!("Failed to serialize code-workspace: {}", e))?;
+    let content = serde_json::to_string_pretty(&code_workspace_obj).map_err(|e| {
+        ToolchainError::SetupFailed(format!("Failed to serialize code-workspace: {}", e))
+    })?;
     fs::write(&cw_path, content)
-        .map_err(|e| format!("Failed to write {}: {}", cw_path.display(), e))?;
+        .map_err(|e| ToolchainError::Io(format!("Failed to write {}: {}", cw_path.display(), e)))?;
 
     Ok(())
 }

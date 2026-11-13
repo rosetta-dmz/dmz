@@ -1,4 +1,5 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
+use super::super::ToolchainError;
 use super::{
     collect_files_recursive, emit_non_relocatable_notice, is_non_standalone_path, push_unique_path,
     ToolchainDiscoverer,
@@ -15,7 +16,7 @@ impl ToolchainDiscoverer for JuceDiscoverer {
         ToolchainEcosystem::Juce
     }
 
-    fn discover(&self) -> Result<Option<DiscoveredToolchain>, String> {
+    fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         let mut candidates: Vec<PathBuf> = Vec::new();
 
         // 1. Explicit JUCE_PATH environment variable

@@ -89,11 +89,12 @@ fn test_host_venv_excluded_and_target_venv_and_vscode_settings_materialized_offl
         zip.finish().unwrap();
     }
 
+    let wheel_bytes = fs::read(&wheel_path).unwrap();
     let pkg_pypi = LockedPackage {
         name: "dummy-pkg".to_string(),
         version: "1.0.0".to_string(),
         ecosystem: Ecosystem::PyPI,
-        sha256: DmzLockfile::hash_bytes(b"dummy-pkg:1.0.0:PyPI"),
+        sha256: DmzLockfile::hash_bytes(&wheel_bytes),
         source_url: None,
         dependencies: vec![],
         member_id: Some("py-service".to_string()),

@@ -9,7 +9,6 @@ pub enum Ecosystem {
     Go,
     MavenGradle,
     Bundler,
-    NuGet,
     Composer,
     Unknown(String),
 }
@@ -20,6 +19,8 @@ pub struct DependencySpec {
     pub version_req: String,
     pub ecosystem: Ecosystem,
     pub is_dev: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,36 +30,14 @@ pub struct ManifestInfo {
     pub dependencies: Vec<DependencySpec>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
-    Io(std::io::Error),
+    #[error("Manifest IO Error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Manifest Parse Error: {0}")]
     Parse(String),
+    #[error("Manifest IO Error: {0}")]
     IoError(String),
+    #[error("Manifest Parse Error: {0}")]
     ParseError(String),
-}
-
-impl std::fmt::Display for ManifestError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(err) => write!(f, "Manifest IO Error: {}", err),
-            Self::Parse(msg) => write!(f, "Manifest Parse Error: {}", msg),
-            Self::IoError(msg) => write!(f, "Manifest IO Error: {}", msg),
-            Self::ParseError(msg) => write!(f, "Manifest Parse Error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for ManifestError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(err) => Some(err),
-            _ => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for ManifestError {
-    fn from(err: std::io::Error) -> Self {
-        Self::Io(err)
-    }
 }

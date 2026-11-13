@@ -1,10 +1,40 @@
 use dmz_core::archive::exporter::{AirGapExporter, ExportConfig, ExportMode};
 use dmz_core::archive::importer::{AirGapImporter, ImportConfig};
+use dmz_core::resolver::lockfile::{DmzLockfile, LockedPackage};
+use dmz_core::resolver::manifest::Ecosystem;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use tempfile::tempdir;
 
-/// Helper to set up a temporary workspace fixture with the raw hex hash (no prefix)
+fn create_mock_crate_tgz(pkg_name: &str, version: &str) -> Vec<u8> {
+    let mut tar_builder = tar::Builder::new(Vec::new());
+    let cargo_toml = format!(
+        "[package]\nname = \"{}\"\nversion = \"{}\"\n",
+        pkg_name, version
+    );
+    let lib_rs = b"pub fn serde_marker() {}\n";
+
+    for (rel, data) in &[
+        (
+            format!("{}-{}/Cargo.toml", pkg_name, version),
+            cargo_toml.as_bytes(),
+        ),
+        (format!("{}-{}/src/lib.rs", pkg_name, version), &lib_rs[..]),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar_builder.append_data(&mut header, rel, *data).unwrap();
+    }
+    let tar_bytes = tar_builder.into_inner().unwrap();
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(&tar_bytes).unwrap();
+    gz.finish().unwrap()
+}
+
+/// Helper to set up a temporary workspace fixture with real archive SHA-256 hashes
 fn setup_mock_workspace() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let workspace_path = tmp_dir.path().join("workspace");
@@ -29,31 +59,24 @@ fn setup_mock_workspace() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     fs::write(workspace_path.join("Cargo.toml"), manifest_content).unwrap();
     fs::write(workspace_path.join("src/lib.rs"), "// dummy library source").unwrap();
 
-    // Create JSON lockfile with raw hex hash (validator prepends sha256:)
-    let lockfile_content = r#"{
-        "closure_signature": "9ab6c6dbe61cc71e9274a3981cad4468c314a86f8693c7724c23c24c84113c99",
-        "version": 1,
-        "packages": {
-            "serde": {
-                "name": "serde",
-                "version": "1.0.0",
-                "sha256": "dummy_hash_serde",
-                "ecosystem": "Cargo",
-                "dependencies": []
-            }
-        }
-    }"#;
-    let lockfile_path = workspace_path.join("dmz.lock");
-    fs::write(&lockfile_path, lockfile_content).unwrap();
-
-    // Create dummy cached artifact in the store matching the package key "serde"
+    // Create a real tar.gz archive in the store and lock its real SHA-256 checksum
+    let archive_bytes = create_mock_crate_tgz("serde", "1.0.0");
+    let archive_sha = DmzLockfile::hash_bytes(&archive_bytes);
     let serde_store_dir = store_path.join("serde");
     fs::create_dir_all(&serde_store_dir).unwrap();
-    fs::write(
-        serde_store_dir.join("serde-1.0.archive"),
-        b"dummy_serde_archive_bytes",
-    )
-    .unwrap();
+    fs::write(serde_store_dir.join("serde-1.0.0.archive"), &archive_bytes).unwrap();
+
+    let lockfile = DmzLockfile::new(vec![LockedPackage {
+        name: "serde".to_string(),
+        version: "1.0.0".to_string(),
+        ecosystem: Ecosystem::Cargo,
+        sha256: archive_sha,
+        source_url: None,
+        dependencies: Vec::new(),
+        member_id: None,
+    }]);
+    let lockfile_path = workspace_path.join("dmz.lock");
+    lockfile.save(&lockfile_path).unwrap();
 
     (tmp_dir, workspace_path, store_path, output_dir)
 }
@@ -82,13 +105,14 @@ fn test_e2e_unified_airgap_export_and_import() {
     assert_eq!(manifest.package_count, 1);
     assert!(!manifest.archive_sha256.is_empty());
 
-    // Test Air-Gap Import on a fresh target store
+    // Test Air-Gap Import on a fresh target store & workspace
     let target_store = _tmp_dir.path().join("target_store");
+    let target_workspace = _tmp_dir.path().join("target_workspace");
     let import_config = ImportConfig {
         archive_path: bundle_path,
         target_store_dir: target_store.clone(),
+        target_workspace_dir: target_workspace.clone(),
         verify_closure_hash: true,
-        ..ImportConfig::default()
     };
 
     let import_result = AirGapImporter::import(&import_config).expect("Air-gap import failed");

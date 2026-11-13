@@ -16,11 +16,13 @@ pub use types::{
 
 #[cfg(test)]
 mod tests {
+    use super::dispatch;
     use super::socket::{validate_socket_path_length, SocketGuard};
     #[cfg(unix)]
     use super::types::IpcServerConfig;
     use super::types::{
-        IpcClientError, IpcRequest, IpcResponse, IpcServerError, MAX_UNIX_SOCKET_PATH,
+        DispatchContext, IpcClientError, IpcRequest, IpcResponse, IpcServerError,
+        MAX_UNIX_SOCKET_PATH,
     };
     #[cfg(unix)]
     use super::IpcServer;
@@ -107,6 +109,11 @@ mod tests {
                 allow_network: false,
             },
             IpcRequest::GetSidecarStatus,
+            IpcRequest::StartSidecarPair {
+                workspace_path: "/tmp/ws".to_string(),
+                config_path: None,
+                allow_network: false,
+            },
             IpcRequest::StopSidecarPair,
             IpcRequest::GetServiceStatus,
             IpcRequest::Shutdown,
@@ -163,5 +170,68 @@ mod tests {
         assert!(res.is_err());
         let err = res.unwrap_err();
         assert!(matches!(err, IpcServerError::SocketPathTooLong { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_start_sidecar_pair_validates_manifest_and_sidecars() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let ctx = DispatchContext {
+            started_at: std::time::Instant::now(),
+            is_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            shutdown_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            agent_runner: crate::AgentRunner::new(),
+            orchestrator: crate::SidecarOrchestrator::new(),
+            service_runner: None,
+        };
+
+        // 1. Missing manifest returns structured Error response
+        let resp_missing = dispatch::dispatch_request(
+            IpcRequest::StartSidecarPair {
+                workspace_path: dir.path().display().to_string(),
+                config_path: None,
+                allow_network: false,
+            },
+            &ctx,
+        )
+        .await;
+        assert!(
+            matches!(resp_missing, IpcResponse::Error { ref message } if message.contains("No dmz-workspace.toml"))
+        );
+
+        // 2. Malformed manifest surfaces TOML parse error cleanly
+        let manifest_path = dir.path().join("dmz-workspace.toml");
+        std::fs::write(&manifest_path, "name = [broken").expect("write malformed manifest");
+        let resp_bad = dispatch::dispatch_request(
+            IpcRequest::StartSidecarPair {
+                workspace_path: dir.path().display().to_string(),
+                config_path: None,
+                allow_network: false,
+            },
+            &ctx,
+        )
+        .await;
+        assert!(
+            matches!(resp_bad, IpcResponse::Error { ref message } if message.contains("Invalid dmz-workspace.toml"))
+        );
+
+        // 3. Valid manifest with partial [ipc] and no sidecars returns clear sidecar-missing error
+        std::fs::write(
+            &manifest_path,
+            "[ipc]\nsocket_id = \"api\"\n[[members]]\nid = \"primary\"\npath = \".\"\nrole = \"primary\"\n",
+        )
+        .expect("write minimal primary-only manifest");
+        let resp_no_sidecar = dispatch::dispatch_request(
+            IpcRequest::StartSidecarPair {
+                workspace_path: dir.path().display().to_string(),
+                config_path: None,
+                allow_network: false,
+            },
+            &ctx,
+        )
+        .await;
+        assert!(matches!(
+            resp_no_sidecar,
+            IpcResponse::Error { ref message } if message.contains("no sidecar or service member")
+        ));
     }
 }

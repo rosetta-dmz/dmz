@@ -21,7 +21,13 @@ impl SocketGuard {
 impl Drop for SocketGuard {
     fn drop(&mut self) {
         if self.active && self.path.exists() {
-            let _ = std::fs::remove_file(&self.path);
+            if let Err(e) = std::fs::remove_file(&self.path) {
+                tracing::warn!(
+                    path = ?self.path,
+                    error = %e,
+                    "Failed to unlink Unix IPC socket on drop"
+                );
+            }
         }
     }
 }

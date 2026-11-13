@@ -1,10 +1,11 @@
 use super::types::{DispatchContext, IpcRequest, IpcResponse};
-use crate::AgentConfig;
+use crate::{AgentConfig, SidecarPairConfig};
+use dmz_core::workspace::WorkspaceProjectConfig;
 use dmz_sandbox::platform::{run_sandboxed, SandboxConfig};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Dispatches an IPC request to the appropriate supervisor subsystem.
 pub async fn dispatch_request(req: IpcRequest, ctx: &DispatchContext) -> IpcResponse {
@@ -103,6 +104,70 @@ pub async fn dispatch_request(req: IpcRequest, ctx: &DispatchContext) -> IpcResp
             IpcResponse::ok_with_data("Sidecar status query", status_data)
         }
 
+        IpcRequest::StartSidecarPair {
+            workspace_path,
+            config_path,
+            allow_network,
+        } => {
+            info!(
+                workspace = %workspace_path,
+                config_path = ?config_path,
+                "StartSidecarPair requested via IPC"
+            );
+            let raw_ws = PathBuf::from(&workspace_path);
+            let ws_canon = std::fs::canonicalize(&raw_ws).unwrap_or(raw_ws);
+            let manifest_res = if let Some(ref explicit_cfg) = config_path {
+                let cfg_path = Path::new(explicit_cfg);
+                WorkspaceProjectConfig::load_from_file(cfg_path).map(|cfg| {
+                    let root = cfg_path
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| ws_canon.clone());
+                    Some((cfg, root))
+                })
+            } else {
+                WorkspaceProjectConfig::discover_workspace_manifest_checked(&ws_canon).map(|opt| {
+                    opt.map(|(cfg, manifest_file)| {
+                        let root = manifest_file
+                            .parent()
+                            .map(Path::to_path_buf)
+                            .unwrap_or_else(|| ws_canon.clone());
+                        let root = std::fs::canonicalize(&root).unwrap_or(root);
+                        (cfg, root)
+                    })
+                })
+            };
+
+            match manifest_res {
+                Ok(Some((project, root))) => {
+                    if project.sidecars().is_empty() {
+                        IpcResponse::error(format!(
+                            "Workspace '{}' has no sidecar or service member defined",
+                            project.name
+                        ))
+                    } else {
+                        let pair_config = SidecarPairConfig {
+                            workspace_root: root,
+                            project,
+                            allow_network,
+                        };
+                        match ctx.orchestrator.start_pair(pair_config).await {
+                            Ok(sock) => IpcResponse::ok_with_data(
+                                "Sidecar pair started",
+                                serde_json::json!({ "socket": sock.to_string_lossy() }),
+                            ),
+                            Err(e) => IpcResponse::error(e.to_string()),
+                        }
+                    }
+                }
+                Ok(None) => IpcResponse::error(format!(
+                    "No dmz-workspace.toml found in workspace '{}'",
+                    ws_canon.display()
+                )),
+                Err(e) => IpcResponse::error(format!("Invalid dmz-workspace.toml: {}", e)),
+            }
+        }
+
         IpcRequest::StopSidecarPair => {
             info!("StopSidecarPair requested via IPC");
             match ctx.orchestrator.stop_pair().await {
@@ -114,8 +179,13 @@ pub async fn dispatch_request(req: IpcRequest, ctx: &DispatchContext) -> IpcResp
         IpcRequest::GetServiceStatus => {
             if let Some(ref sr) = ctx.service_runner {
                 let statuses = sr.get_status_all().await;
-                let payload = serde_json::to_value(statuses).unwrap_or_default();
-                IpcResponse::ok_with_data("Collateral service status", payload)
+                match serde_json::to_value(statuses) {
+                    Ok(payload) => IpcResponse::ok_with_data("Collateral service status", payload),
+                    Err(e) => {
+                        warn!(error = %e, "Failed to serialize collateral service statuses");
+                        IpcResponse::error(format!("Failed to serialize service statuses: {}", e))
+                    }
+                }
             } else {
                 IpcResponse::error("ServiceRunner not configured on this IPC server")
             }

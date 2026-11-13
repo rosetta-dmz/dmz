@@ -85,30 +85,37 @@ serde = "1.0"
     .unwrap();
     fs::write(workspace_path.join("src/lib.rs"), "// version 1").unwrap();
 
-    // Initial lockfile
-    let lockfile_content = r#"{
-        "closure_signature": "9ab6c6dbe61cc71e9274a3981cad4468c314a86f8693c7724c23c24c84113c99",
-        "version": 1,
-        "packages": {
-            "serde": {
-                "name": "serde",
-                "version": "1.0.0",
-                "sha256": "dummy_hash_serde",
-                "ecosystem": "Cargo",
-                "dependencies": []
-            }
-        }
-    }"#;
-    fs::write(workspace_path.join("dmz.lock"), lockfile_content).unwrap();
+    // Create a valid cached crate archive in the store with real SHA-256 lockfile metadata
+    let mut tar_builder = tar::Builder::new(Vec::new());
+    let crate_toml = b"[package]\nname = \"serde\"\nversion = \"1.0.0\"\n";
+    let mut hdr = tar::Header::new_gnu();
+    hdr.set_size(crate_toml.len() as u64);
+    hdr.set_mode(0o644);
+    hdr.set_cksum();
+    tar_builder
+        .append_data(&mut hdr, "serde-1.0.0/Cargo.toml", &crate_toml[..])
+        .unwrap();
+    let tar_bytes = tar_builder.into_inner().unwrap();
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut gz, &tar_bytes).unwrap();
+    let archive_bytes = gz.finish().unwrap();
 
-    // Create a dummy cached artifact in the store
     let serde_store_dir = store_path.join("serde");
     fs::create_dir_all(&serde_store_dir).unwrap();
-    fs::write(
-        serde_store_dir.join("serde-1.0.archive"),
-        b"dummy_serde_archive_bytes",
-    )
-    .unwrap();
+    fs::write(serde_store_dir.join("serde-1.0.0.archive"), &archive_bytes).unwrap();
+
+    let lockfile = dmz_core::resolver::lockfile::DmzLockfile::new(vec![
+        dmz_core::resolver::lockfile::LockedPackage {
+            name: "serde".to_string(),
+            version: "1.0.0".to_string(),
+            ecosystem: dmz_core::resolver::manifest::Ecosystem::Cargo,
+            sha256: dmz_core::resolver::lockfile::DmzLockfile::hash_bytes(&archive_bytes),
+            source_url: None,
+            dependencies: Vec::new(),
+            member_id: None,
+        },
+    ]);
+    lockfile.save(&workspace_path.join("dmz.lock")).unwrap();
 
     let initial_commit = commit_all(&repo, "Initial commit");
 

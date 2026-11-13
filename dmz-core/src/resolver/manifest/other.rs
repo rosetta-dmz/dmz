@@ -44,6 +44,7 @@ impl OtherManifestScanner {
                     version_req: val.as_str().unwrap_or("*").to_string(),
                     ecosystem: Ecosystem::Composer,
                     is_dev: false,
+                    dependencies: Vec::new(),
                 });
             }
         }
@@ -80,6 +81,7 @@ impl OtherManifestScanner {
                         version_req,
                         ecosystem: Ecosystem::Bundler,
                         is_dev: false,
+                        dependencies: Vec::new(),
                     });
                 }
             }
@@ -99,17 +101,25 @@ impl OtherManifestScanner {
 
         for chunk in content.split("<dependency>") {
             if let Some(end_idx) = chunk.find("</dependency>") {
-                let dep_block = &chunk[..end_idx];
+                let Some(dep_block) = chunk.get(..end_idx) else {
+                    continue;
+                };
+                let group_id = Self::extract_xml_tag(dep_block, "groupId");
                 let artifact_id = Self::extract_xml_tag(dep_block, "artifactId");
                 let version =
                     Self::extract_xml_tag(dep_block, "version").unwrap_or_else(|| "*".to_string());
 
                 if let Some(artifact) = artifact_id {
+                    let coord = match group_id {
+                        Some(group) if !group.is_empty() => format!("{}:{}", group, artifact),
+                        _ => artifact,
+                    };
                     dependencies.push(DependencySpec {
-                        name: artifact,
+                        name: coord,
                         version_req: version,
                         ecosystem: Ecosystem::MavenGradle,
                         is_dev: false,
+                        dependencies: Vec::new(),
                     });
                 }
             }
@@ -126,7 +136,9 @@ impl OtherManifestScanner {
         let open = format!("<{}>", tag);
         let close = format!("</{}>", tag);
         let start = block.find(&open)? + open.len();
-        let end = block[start..].find(&close)? + start;
-        Some(block[start..end].trim().to_string())
+        let tail = block.get(start..)?;
+        let rel_end = tail.find(&close)?;
+        let value = tail.get(..rel_end)?;
+        Some(value.trim().to_string())
     }
 }

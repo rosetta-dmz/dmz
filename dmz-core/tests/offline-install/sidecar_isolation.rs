@@ -46,9 +46,7 @@ fn test_dual_repo_sidecar_member_dependency_isolation() {
     let archive_path = pkg_store_dir.join(format!("{}-{}.archive", pkg_name, pkg_version));
     fs::write(&archive_path, &wheel_bytes).unwrap();
 
-    let mut hasher = Sha256::new();
-    hasher.update(&wheel_bytes);
-    let computed_sha256 = format!("{:x}", hasher.finalize());
+    let computed_sha256 = dmz_core::archive::format_sha256_hex(&Sha256::digest(&wheel_bytes));
 
     // 3. Lockfile maps Jinja2 explicitly to the sidecar member
     let locked_pkg = LockedPackage {

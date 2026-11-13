@@ -20,7 +20,7 @@ fn test_zero_tolerance_supply_chain_integrity_verification() -> anyhow::Result<(
 
     let archive_file = pkg_store_dir.join("tampered-pkg-1.0.0.archive");
     let authentic_content = b"AUTHENTIC_PACKAGE_DATA_v1.0.0";
-    let authentic_sha = format!("{:x}", Sha256::digest(authentic_content));
+    let authentic_sha = dmz_core::archive::format_sha256_hex(&Sha256::digest(authentic_content));
 
     // Write corrupted data into the store (supply chain tampering!)
     let tampered_content = b"TAMPERED_MALICIOUS_PACKAGE_v1.0.0";

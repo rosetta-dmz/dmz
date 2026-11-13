@@ -1,10 +1,11 @@
 // Shell and batch environment activator script generation
 
+use super::super::ToolchainError;
 use std::fs;
 use std::path::Path;
 
 /// Generates shell and batch activator scripts in `.dmz/` for immediate developer use.
-pub fn generate_activator_scripts(workspace_root: &Path) -> Result<(), String> {
+pub fn generate_activator_scripts(workspace_root: &Path) -> Result<(), ToolchainError> {
     let env_sh_path = workspace_root.join(".dmz/env.sh");
     let env_bat_path = workspace_root.join(".dmz/env.bat");
 
@@ -360,11 +361,12 @@ if exist "%DMZ_WORKSPACE%\.dmz\toolchains\pkgconfig\lib\pkgconfig" (
 echo DMZ bundled toolchains activated.
 "#;
 
-    fs::create_dir_all(workspace_root.join(".dmz"))
-        .map_err(|e| format!("Failed to create .dmz directory: {}", e))?;
+    fs::create_dir_all(workspace_root.join(".dmz")).map_err(|e| {
+        ToolchainError::SetupFailed(format!("Failed to create .dmz directory: {}", e))
+    })?;
 
     fs::write(&env_sh_path, env_sh_content)
-        .map_err(|e| format!("Failed to write env.sh: {}", e))?;
+        .map_err(|e| ToolchainError::SetupFailed(format!("Failed to write env.sh: {}", e)))?;
 
     #[cfg(unix)]
     {
@@ -373,7 +375,7 @@ echo DMZ bundled toolchains activated.
     }
 
     fs::write(&env_bat_path, env_bat_content)
-        .map_err(|e| format!("Failed to write env.bat: {}", e))?;
+        .map_err(|e| ToolchainError::SetupFailed(format!("Failed to write env.bat: {}", e)))?;
 
     Ok(())
 }

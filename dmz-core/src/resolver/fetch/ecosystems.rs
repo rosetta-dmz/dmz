@@ -2,6 +2,7 @@
 
 use crate::resolver::fetch::pypi::select_pypi_artifact;
 use crate::resolver::lockfile::LockedPackage;
+use crate::resolver::ResolverError;
 
 /// Resolved download parameters including the artifact URL, resolved concrete version, and discovered transitive dependencies.
 pub struct ResolvedPackageUrl {
@@ -23,7 +24,7 @@ pub fn resolve_download_url(
     npm_base: &str,
     pypi_base: &str,
     golang_proxy_base: &str,
-) -> Result<ResolvedPackageUrl, String> {
+) -> Result<ResolvedPackageUrl, ResolverError> {
     let eco_str = format!("{:?}", pkg.ecosystem).to_lowercase();
     let mut discovered_requires_dist = Vec::new();
 
@@ -71,10 +72,10 @@ pub fn resolve_download_url(
             )
         }
         _ => {
-            return Err(format!(
+            return Err(ResolverError::Parse(format!(
                 "No source URL and unsupported ecosystem '{:?}' for package '{}'",
                 pkg.ecosystem, pkg.name
-            ));
+            )));
         }
     };
 

@@ -40,23 +40,12 @@ pub struct ImportResult {
     pub vcs: Option<VcsProvenance>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ImportError {
+    #[error("Import IO Error: {0}")]
     IoError(String),
+    #[error("Cryptographic Verification Failed: {0}")]
     VerificationFailed(String),
+    #[error("Archive Extraction Failed: {0}")]
     ExtractionError(String),
 }
-
-impl std::fmt::Display for ImportError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::IoError(msg) => write!(f, "Import IO Error: {}", msg),
-            Self::VerificationFailed(msg) => {
-                write!(f, "Cryptographic Verification Failed: {}", msg)
-            }
-            Self::ExtractionError(msg) => write!(f, "Archive Extraction Failed: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for ImportError {}

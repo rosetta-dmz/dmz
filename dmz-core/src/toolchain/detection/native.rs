@@ -48,7 +48,7 @@ pub fn has_explicit_ninja_manifest(workspace_root: &Path) -> bool {
     }
     let cargo_toml = workspace_root.join("Cargo.toml");
     if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
-        if let Ok(val) = content.parse::<toml::Value>() {
+        if let Ok(val) = toml::from_str::<toml::Value>(&content) {
             for section in &["dependencies", "build-dependencies", "dev-dependencies"] {
                 if let Some(table) = val.get(*section).and_then(|v| v.as_table()) {
                     if table.contains_key("ninja") || table.contains_key("ninja-build") {

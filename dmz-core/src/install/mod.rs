@@ -6,11 +6,9 @@ pub mod rust_vendor;
 use crate::resolver::lockfile::{DmzLockfile, LockedPackage};
 use crate::resolver::manifest::Ecosystem;
 use crate::workspace::WorkspaceProjectConfig;
-use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct InstallConfig {
@@ -19,40 +17,23 @@ pub struct InstallConfig {
     pub store_dir: PathBuf,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum InstallError {
+    #[error("Install IO Error: {0}")]
     IoError(String),
+    #[error("Install Lockfile Error: {0}")]
     LockfileError(String),
+    #[error(
+        "Store Artifact Integrity Mismatch! Expected sha256:{expected}, computed sha256:{actual}"
+    )]
     IntegrityMismatch { expected: String, actual: String },
+    #[error("Missing cached store artifact for package '{package}' at path {path:?}")]
     ArtifactMissing { package: String, path: PathBuf },
+    #[error("Ecosystem not supported for offline install: {0}")]
     UnsupportedEcosystem(String),
+    #[error("Ecosystem Mapper Error: {0}")]
     MapperError(String),
 }
-
-impl std::fmt::Display for InstallError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::IoError(msg) => write!(f, "Install IO Error: {}", msg),
-            Self::LockfileError(msg) => write!(f, "Install Lockfile Error: {}", msg),
-            Self::IntegrityMismatch { expected, actual } => write!(
-                f,
-                "Store Artifact Integrity Mismatch! Expected sha256:{}, computed sha256:{}",
-                expected, actual
-            ),
-            Self::ArtifactMissing { package, path } => write!(
-                f,
-                "Missing cached store artifact for package '{}' at path {:?}",
-                package, path
-            ),
-            Self::UnsupportedEcosystem(eco) => {
-                write!(f, "Ecosystem not supported for offline install: {}", eco)
-            }
-            Self::MapperError(msg) => write!(f, "Ecosystem Mapper Error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for InstallError {}
 
 impl From<std::io::Error> for InstallError {
     fn from(err: std::io::Error) -> Self {
@@ -92,8 +73,8 @@ impl InstallerEngine {
 
         let mut installed_count = 0;
 
-        for (_key, pkg) in lockfile.packages {
-            if pkg.version.starts_with("path:") {
+        for pkg in lockfile.packages.values() {
+            if pkg.is_local_path() {
                 info!(name = %pkg.name, "Skipping install for local path dependency");
                 continue;
             }
@@ -101,21 +82,21 @@ impl InstallerEngine {
             // Resolve target workspace (root or member directory)
             let target_workspace = Self::resolve_target_workspace(
                 &config.workspace_path,
-                &pkg,
+                pkg,
                 workspace_manifest.as_ref(),
             );
 
             // Locate and validate the store artifact
-            let archive_path = Self::locate_store_artifact(&config.store_dir, &pkg)?;
+            let archive_path = Self::locate_store_artifact(&config.store_dir, pkg)?;
 
             // Cryptographically verify supply chain integrity
-            Self::verify_artifact_integrity(&archive_path, &pkg)?;
+            Self::verify_artifact_integrity(&archive_path, pkg)?;
 
             // Ecosystem-specific deterministic linkage
             Self::dispatch_package_mapper(
                 &target_workspace,
                 &config.workspace_path,
-                &pkg,
+                pkg,
                 &archive_path,
             )?;
 
@@ -123,8 +104,8 @@ impl InstallerEngine {
             info!(name = %pkg.name, version = %pkg.version, "Successfully installed package offline");
         }
 
-        // Post-install environment hydration (IDE settings, shims, activators, modules.yaml)
-        Self::hydrate_post_install_environment(config, workspace_manifest.as_ref());
+        // Post-install environment hydration (IDE settings, shims, activators, modules.yaml, pnpm links)
+        Self::hydrate_post_install_environment(config, &lockfile, workspace_manifest.as_ref())?;
 
         info!(
             installed = installed_count,
@@ -252,6 +233,14 @@ impl InstallerEngine {
                 }
                 Ecosystem::Go => m_dir.join("go.mod").is_file(),
                 Ecosystem::Composer => m_dir.join("composer.json").is_file(),
+                Ecosystem::Bundler => {
+                    m_dir.join("Gemfile").is_file() || m_dir.join("Gemfile.lock").is_file()
+                }
+                Ecosystem::MavenGradle => {
+                    m_dir.join("pom.xml").is_file()
+                        || m_dir.join("build.gradle").is_file()
+                        || m_dir.join("build.gradle.kts").is_file()
+                }
                 _ => false,
             }
         });
@@ -332,50 +321,27 @@ impl InstallerEngine {
         archive_path: &Path,
         pkg: &LockedPackage,
     ) -> Result<(), InstallError> {
-        let mut file = fs::File::open(archive_path)
-            .map_err(|e| InstallError::IoError(format!("Failed to open artifact: {}", e)))?;
-
-        let mut hasher = Sha256::new();
-        let mut buffer = [0u8; 65536];
-        loop {
-            let n = file
-                .read(&mut buffer)
-                .map_err(|e| InstallError::IoError(format!("Failed to read artifact: {}", e)))?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buffer[..n]);
-        }
-        let computed_hash = format!("{:x}", hasher.finalize());
+        let computed_hash = crate::archive::exporter::hashing::calculate_file_sha256(archive_path)
+            .map_err(|e| InstallError::IoError(format!("Failed to read artifact: {}", e)))?;
 
         if computed_hash != pkg.sha256 {
-            let dummy_hash = DmzLockfile::hash_bytes(
-                format!("{}:{}:{:?}", pkg.name, pkg.version, pkg.ecosystem).as_bytes(),
-            );
-            if pkg.sha256 == dummy_hash {
-                debug!(
-                    package = %pkg.name,
-                    "Store artifact matches pre-fetch identity signature"
-                );
-            } else {
-                error!(
-                    package = %pkg.name,
-                    expected = %pkg.sha256,
-                    computed = %computed_hash,
-                    "Supply chain integrity mismatch! Expected checksum does not match store artifact"
-                );
-                return Err(InstallError::IntegrityMismatch {
-                    expected: pkg.sha256.clone(),
-                    actual: computed_hash,
-                });
-            }
-        } else {
-            debug!(
+            error!(
                 package = %pkg.name,
-                checksum = %computed_hash,
-                "Cryptographically verified store artifact against lockfile"
+                expected = %pkg.sha256,
+                computed = %computed_hash,
+                "Supply chain integrity mismatch! Expected checksum does not match store artifact"
             );
+            return Err(InstallError::IntegrityMismatch {
+                expected: pkg.sha256.clone(),
+                actual: computed_hash,
+            });
         }
+
+        debug!(
+            package = %pkg.name,
+            checksum = %computed_hash,
+            "Cryptographically verified store artifact against lockfile"
+        );
 
         Ok(())
     }
@@ -429,12 +395,6 @@ impl InstallerEngine {
             Ecosystem::Unknown(ref eco) => {
                 return Err(InstallError::UnsupportedEcosystem(eco.clone()));
             }
-            _ => {
-                return Err(InstallError::UnsupportedEcosystem(format!(
-                    "{:?}",
-                    pkg.ecosystem
-                )));
-            }
         }
         Ok(())
     }
@@ -442,8 +402,9 @@ impl InstallerEngine {
     /// Hydrates IDE workspace settings, CLI binary shims, activator scripts, and pnpm configurations
     fn hydrate_post_install_environment(
         config: &InstallConfig,
+        lockfile: &DmzLockfile,
         workspace_manifest: Option<&WorkspaceProjectConfig>,
-    ) {
+    ) -> Result<(), InstallError> {
         // Collect all distinct workspace directories (root + valid members)
         let mut target_dirs = vec![config.workspace_path.clone()];
         if let Some(manifest) = workspace_manifest {
@@ -457,7 +418,9 @@ impl InstallerEngine {
 
         // 1. Ensure IDE workspace settings (.vscode/settings.json)
         for dir in &target_dirs {
-            let _ = crate::toolchain::ToolchainSetup::generate_ide_settings(dir);
+            if let Err(e) = crate::toolchain::ToolchainSetup::generate_ide_settings(dir) {
+                warn!(dir = ?dir, error = %e, "Failed to update IDE settings during post-install");
+            }
         }
 
         // 2. Hydrate CLI binary shims (e.g. node_modules/.bin/tauri)
@@ -466,13 +429,19 @@ impl InstallerEngine {
         }
 
         // 3. Regenerate environment activator scripts (.dmz/env.sh, .dmz/env.bat)
-        let _ =
-            crate::toolchain::ToolchainSetup::generate_activator_scripts(&config.workspace_path);
+        if let Err(e) =
+            crate::toolchain::ToolchainSetup::generate_activator_scripts(&config.workspace_path)
+        {
+            warn!(error = %e, "Failed to generate environment activator scripts during post-install");
+        }
 
-        // 4. Ensure .modules.yaml exists for pnpm tooling
+        // 4. Wire transitive pnpm dependency symlinks inside `.pnpm/` virtual store and ensure .modules.yaml
         for dir in &target_dirs {
+            mappers::PnpmMapper::wire_pnpm_dependency_links(dir, lockfile)?;
             mappers::PnpmMapper::ensure_modules_yaml(dir);
         }
+
+        Ok(())
     }
 }
 
@@ -617,5 +586,98 @@ mod tests {
         let resolved = InstallerEngine::resolve_member_path(&ws, escaped_path);
         // Must fallback to workspace root
         assert_eq!(resolved, canonical_ws);
+    }
+
+    #[test]
+    fn test_verify_artifact_integrity_rejects_dummy_placeholders() {
+        let temp = tempdir().unwrap();
+        let archive_path = temp.path().join("artifact.archive");
+        let bytes = b"real archive payload";
+        fs::write(&archive_path, bytes).unwrap();
+        let real_hash = {
+            use sha2::Digest as _;
+            crate::archive::format_sha256_hex(&sha2::Sha256::digest(bytes))
+        };
+
+        for dummy_hash in &["", "dummy", "pending", "0000000000000000"] {
+            let pkg = LockedPackage {
+                name: "test-pkg".into(),
+                version: "1.0.0".into(),
+                ecosystem: Ecosystem::Cargo,
+                sha256: (*dummy_hash).to_string(),
+                source_url: None,
+                dependencies: vec![],
+                member_id: None,
+            };
+            let res = InstallerEngine::verify_artifact_integrity(&archive_path, &pkg);
+            assert!(
+                matches!(res, Err(InstallError::IntegrityMismatch { .. })),
+                "Expected dummy hash {:?} to be rejected",
+                dummy_hash
+            );
+        }
+
+        let valid_pkg = LockedPackage {
+            name: "test-pkg".into(),
+            version: "1.0.0".into(),
+            ecosystem: Ecosystem::Cargo,
+            sha256: real_hash,
+            source_url: None,
+            dependencies: vec![],
+            member_id: None,
+        };
+        assert!(InstallerEngine::verify_artifact_integrity(&archive_path, &valid_pkg).is_ok());
+    }
+
+    #[test]
+    fn test_resolve_target_member_dir_bundler_and_maven_gradle_fallback() {
+        let temp = tempdir().unwrap();
+        let ws = temp.path();
+        let ruby_dir = ws.join("ruby-service");
+        let jvm_dir = ws.join("jvm-service");
+        fs::create_dir_all(&ruby_dir).unwrap();
+        fs::create_dir_all(&jvm_dir).unwrap();
+        fs::write(ruby_dir.join("Gemfile"), "source 'https://rubygems.org'\n").unwrap();
+        fs::write(jvm_dir.join("pom.xml"), "<project></project>\n").unwrap();
+
+        let cfg = WorkspaceProjectConfig::new(
+            "polyglot",
+            vec![
+                crate::workspace::WorkspaceMember::new(
+                    "ruby",
+                    Path::new("ruby-service"),
+                    crate::workspace::MemberRole::Sidecar,
+                ),
+                crate::workspace::WorkspaceMember::new(
+                    "jvm",
+                    Path::new("jvm-service"),
+                    crate::workspace::MemberRole::Service,
+                ),
+            ],
+        );
+
+        let bundler_pkg = LockedPackage {
+            name: "rack".into(),
+            version: "3.0.0".into(),
+            ecosystem: Ecosystem::Bundler,
+            sha256: "abc".into(),
+            source_url: None,
+            dependencies: vec![],
+            member_id: None,
+        };
+        let resolved_ruby = InstallerEngine::resolve_target_workspace(ws, &bundler_pkg, Some(&cfg));
+        assert_eq!(resolved_ruby, fs::canonicalize(&ruby_dir).unwrap());
+
+        let maven_pkg = LockedPackage {
+            name: "com.example:lib".into(),
+            version: "1.0.0".into(),
+            ecosystem: Ecosystem::MavenGradle,
+            sha256: "def".into(),
+            source_url: None,
+            dependencies: vec![],
+            member_id: None,
+        };
+        let resolved_jvm = InstallerEngine::resolve_target_workspace(ws, &maven_pkg, Some(&cfg));
+        assert_eq!(resolved_jvm, fs::canonicalize(&jvm_dir).unwrap());
     }
 }

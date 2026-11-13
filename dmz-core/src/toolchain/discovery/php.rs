@@ -1,8 +1,10 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
+use super::super::ToolchainError;
 use super::{
     collect_files_recursive, emit_non_relocatable_notice, is_non_standalone_path,
     ToolchainDiscoverer,
 };
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -15,7 +17,7 @@ impl ToolchainDiscoverer for PhpDiscoverer {
         ToolchainEcosystem::Php
     }
 
-    fn discover(&self) -> Result<Option<DiscoveredToolchain>, String> {
+    fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         let php_bin = match which::which("php") {
             Ok(p) => p,
             Err(_) => return Ok(None),
@@ -33,7 +35,8 @@ impl ToolchainDiscoverer for PhpDiscoverer {
             .and_then(|s| s.lines().next().map(|l| l.to_string()))
             .unwrap_or_else(|| "php".to_string());
 
-        let php_root = php_bin
+        let canonical_php = fs::canonicalize(&php_bin).unwrap_or_else(|_| php_bin.clone());
+        let php_root = canonical_php
             .parent()
             .and_then(|p| p.parent())
             .map(Path::to_path_buf)

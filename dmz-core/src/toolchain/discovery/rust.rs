@@ -1,4 +1,5 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
+use super::super::ToolchainError;
 use super::{
     collect_files_recursive, emit_non_relocatable_notice, is_non_standalone_path,
     push_system_bin_candidates, push_unique_path, ToolchainDiscoverer,
@@ -17,7 +18,7 @@ impl ToolchainDiscoverer for RustDiscoverer {
         ToolchainEcosystem::Rust
     }
 
-    fn discover(&self) -> Result<Option<DiscoveredToolchain>, String> {
+    fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         let mut rustc_candidates: Vec<PathBuf> = Vec::new();
 
         // 1. Check official standalone RUSTUP_HOME toolchains

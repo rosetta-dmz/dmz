@@ -29,6 +29,17 @@ pub struct LockedPackage {
     pub member_id: Option<String>,
 }
 
+impl LockedPackage {
+    /// Returns `true` when this package references a local filesystem path rather than a registry artifact.
+    pub fn is_local_path(&self) -> bool {
+        self.version.starts_with("path:")
+            || self
+                .source_url
+                .as_deref()
+                .is_some_and(|u| u.starts_with("file:"))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceMetadata {
     pub id: String,
@@ -59,60 +70,22 @@ impl Default for DmzLockfile {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum LockError {
-    Io(std::io::Error),
-    Serialization(serde_json::Error),
+    #[error("Lockfile IO Error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Lockfile Serialization Error: {0}")]
+    Serialization(#[from] serde_json::Error),
+    #[error("Cryptographic Lock Mismatch! Expected sha256:{expected}, computed sha256:{actual}")]
     IntegrityMismatch { expected: String, actual: String },
+    #[error(
+        "Lockfile exceeds maximum allowable size of {max_bytes} bytes (found {actual_bytes} bytes)"
+    )]
     LockfileTooLarge { max_bytes: u64, actual_bytes: u64 },
+    #[error("Lockfile IO Error: {0}")]
     IoError(String),
+    #[error("Lockfile Serialization Error: {0}")]
     SerializationError(String),
-}
-
-impl std::fmt::Display for LockError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(err) => write!(f, "Lockfile IO Error: {}", err),
-            Self::Serialization(err) => write!(f, "Lockfile Serialization Error: {}", err),
-            Self::IntegrityMismatch { expected, actual } => write!(
-                f,
-                "Cryptographic Lock Mismatch! Expected sha256:{}, computed sha256:{}",
-                expected, actual
-            ),
-            Self::LockfileTooLarge {
-                max_bytes,
-                actual_bytes,
-            } => write!(
-                f,
-                "Lockfile exceeds maximum allowable size of {} bytes (found {} bytes)",
-                max_bytes, actual_bytes
-            ),
-            Self::IoError(msg) => write!(f, "Lockfile IO Error: {}", msg),
-            Self::SerializationError(msg) => write!(f, "Lockfile Serialization Error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for LockError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(err) => Some(err),
-            Self::Serialization(err) => Some(err),
-            _ => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for LockError {
-    fn from(err: std::io::Error) -> Self {
-        Self::Io(err)
-    }
-}
-
-impl From<serde_json::Error> for LockError {
-    fn from(err: serde_json::Error) -> Self {
-        Self::Serialization(err)
-    }
 }
 
 impl LockfileReader for DmzLockfile {
@@ -193,7 +166,7 @@ impl DmzLockfile {
             }
         }
 
-        format!("{:x}", hasher.finalize())
+        crate::archive::exporter::hashing::format_sha256_hex(&hasher.finalize())
     }
 
     /// Saves the lockfile to `dmz.lock` atomically
@@ -248,7 +221,7 @@ impl DmzLockfile {
     pub fn hash_bytes(data: &[u8]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(data);
-        format!("{:x}", hasher.finalize())
+        crate::archive::exporter::hashing::format_sha256_hex(&hasher.finalize())
     }
 }
 

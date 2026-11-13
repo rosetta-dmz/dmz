@@ -90,6 +90,112 @@ impl DiagnosticError {
                     },
                 };
             }
+            if let Some(resolver_err) = e.downcast_ref::<crate::resolver::ResolverError>() {
+                use crate::resolver::ResolverError;
+                return match resolver_err {
+                    ResolverError::Io(msg) | ResolverError::Network(msg) => Self {
+                        category: ErrorCategory::IoFault,
+                        message: format!("Dependency resolution transport/I/O error: {}", msg),
+                        remediation: String::from(
+                            "Verify network connectivity to configured registries and read/write permissions for store paths.",
+                        ),
+                    },
+                    ResolverError::Command(msg) => Self {
+                        category: ErrorCategory::ToolchainFault,
+                        message: format!("Resolver host tool failure: {}", msg),
+                        remediation: String::from(
+                            "Ensure required ecosystem tooling (e.g. cargo) is installed and functioning.",
+                        ),
+                    },
+                    other => Self {
+                        category: ErrorCategory::UserCodeFault,
+                        message: format!("Dependency resolution failure: {}", other),
+                        remediation: String::from(
+                            "Check project manifests, lockfiles, and workspace configuration for invalid or empty declarations.",
+                        ),
+                    },
+                };
+            }
+            if let Some(export_err) = e.downcast_ref::<crate::archive::exporter::ExportError>() {
+                use crate::archive::exporter::ExportError;
+                return match export_err {
+                    ExportError::IoError(msg) | ExportError::ArchiveError(msg) => Self {
+                        category: ErrorCategory::IoFault,
+                        message: format!("Archive export error: {}", msg),
+                        remediation: String::from(
+                            "Check disk space, file permissions, and destination archive path.",
+                        ),
+                    },
+                    ExportError::LockfileError(msg) => Self {
+                        category: ErrorCategory::UserCodeFault,
+                        message: format!("Export lockfile error: {}", msg),
+                        remediation: String::from(
+                            "Run `dmz resolve` and `dmz fetch` before exporting an archive.",
+                        ),
+                    },
+                };
+            }
+            if let Some(install_err) = e.downcast_ref::<crate::install::InstallError>() {
+                use crate::install::InstallError;
+                return match install_err {
+                    InstallError::IntegrityMismatch { .. } => Self {
+                        category: ErrorCategory::PlatformFault,
+                        message: install_err.to_string(),
+                        remediation: String::from(
+                            "Re-fetch dependencies into the store or verify bundle authenticity against the lockfile.",
+                        ),
+                    },
+                    InstallError::IoError(_) | InstallError::ArtifactMissing { .. } => Self {
+                        category: ErrorCategory::IoFault,
+                        message: install_err.to_string(),
+                        remediation: String::from(
+                            "Verify the store directory contains all cached artifacts referenced in dmz.lock.",
+                        ),
+                    },
+                    InstallError::UnsupportedEcosystem(_) | InstallError::MapperError(_) => Self {
+                        category: ErrorCategory::ToolchainFault,
+                        message: install_err.to_string(),
+                        remediation: String::from(
+                            "Inspect stored archive format and ecosystem mapper compatibility.",
+                        ),
+                    },
+                    InstallError::LockfileError(msg) => Self {
+                        category: ErrorCategory::UserCodeFault,
+                        message: format!("Install lockfile error: {}", msg),
+                        remediation: String::from(
+                            "Verify dmz.lock syntax and closure metadata.",
+                        ),
+                    },
+                };
+            }
+            if let Some(vcs_err) = e.downcast_ref::<crate::vcs::VcsError>() {
+                use crate::vcs::VcsError;
+                return match vcs_err {
+                    VcsError::Io(_) => Self {
+                        category: ErrorCategory::IoFault,
+                        message: vcs_err.to_string(),
+                        remediation: String::from(
+                            "Check repository directory permissions and disk space.",
+                        ),
+                    },
+                    _ => Self {
+                        category: ErrorCategory::PlatformFault,
+                        message: vcs_err.to_string(),
+                        remediation: String::from(
+                            "Verify Git repository state, bundle prerequisites, and VCS history.",
+                        ),
+                    },
+                };
+            }
+            if let Some(ws_err) = e.downcast_ref::<crate::workspace::WorkspaceError>() {
+                return Self {
+                    category: ErrorCategory::UserCodeFault,
+                    message: ws_err.to_string(),
+                    remediation: String::from(
+                        "Specify `exec_command` and `exec_args` for the member in dmz-workspace.toml.",
+                    ),
+                };
+            }
             curr = e.source();
         }
 
@@ -409,5 +515,35 @@ mod tests {
         let deserialized: DiagnosticError =
             serde_json::from_str(&serialized).expect("deserialization failed");
         assert_eq!(diag, deserialized);
+    }
+
+    #[test]
+    fn test_classify_new_typed_error_downcasts() {
+        let res_err = crate::resolver::ResolverError::EmptyResolution;
+        let res_diag = DiagnosticError::classify(&res_err);
+        assert_eq!(res_diag.category, ErrorCategory::UserCodeFault);
+
+        let exp_err =
+            crate::archive::exporter::ExportError::LockfileError("missing lockfile".into());
+        let exp_diag = DiagnosticError::classify(&exp_err);
+        assert_eq!(exp_diag.category, ErrorCategory::UserCodeFault);
+
+        let inst_err = crate::install::InstallError::IntegrityMismatch {
+            expected: "aaa".into(),
+            actual: "bbb".into(),
+        };
+        let inst_diag = DiagnosticError::classify(&inst_err);
+        assert_eq!(inst_diag.category, ErrorCategory::PlatformFault);
+
+        let vcs_err = crate::vcs::VcsError::CheckoutFailed("detatched head missing".into());
+        let vcs_diag = DiagnosticError::classify(&vcs_err);
+        assert_eq!(vcs_diag.category, ErrorCategory::PlatformFault);
+
+        let ws_err = crate::workspace::WorkspaceError::CommandInferenceFailed {
+            member_id: "app".into(),
+            member_dir: "/tmp/app".into(),
+        };
+        let ws_diag = DiagnosticError::classify(&ws_err);
+        assert_eq!(ws_diag.category, ErrorCategory::UserCodeFault);
     }
 }

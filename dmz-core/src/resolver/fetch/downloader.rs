@@ -5,6 +5,7 @@ use crate::resolver::fetch::ecosystems::resolve_download_url;
 use crate::resolver::fetch::stream::stream_download_with_retry;
 use crate::resolver::lockfile::LockedPackage;
 use crate::resolver::manifest::ManifestScanner;
+use crate::resolver::ResolverError;
 use std::path::Path;
 use tracing::info;
 
@@ -21,8 +22,8 @@ pub fn fetch_single_package(
     target_platform: Option<&str>,
     map_key: String,
     pkg: LockedPackage,
-) -> Result<Option<(String, LockedPackage)>, String> {
-    if pkg.version.starts_with("path:") || pkg.version.contains("path") {
+) -> Result<Option<(String, LockedPackage)>, ResolverError> {
+    if pkg.is_local_path() {
         info!(
             name = %pkg.name,
             version = %pkg.version,
@@ -58,8 +59,12 @@ pub fn fetch_single_package(
 
     let safe_pkg_name = clean_pkg_name.replace('/', "__");
     let pkg_dir = store_path.join(&safe_pkg_name);
-    std::fs::create_dir_all(&pkg_dir)
-        .map_err(|e| format!("Failed to create package directory at {:?}: {}", pkg_dir, e))?;
+    std::fs::create_dir_all(&pkg_dir).map_err(|e| {
+        ResolverError::Io(format!(
+            "Failed to create package directory at {:?}: {}",
+            pkg_dir, e
+        ))
+    })?;
 
     // Fast-path: check if a verified artifact already exists in the store cache
     if let Some(cached) = check_cached_artifact(&pkg_dir, &safe_pkg_name, &clean_version, &map_key)
@@ -102,8 +107,12 @@ pub fn fetch_single_package(
 
     let meta_path = pkg_dir.join("metadata.json");
     let meta_data = serde_json::to_string_pretty(&updated_pkg).unwrap_or_default();
-    crate::workspace::atomic_write_file(&meta_path, meta_data)
-        .map_err(|e| format!("Failed to write package metadata to {:?}: {}", meta_path, e))?;
+    crate::workspace::atomic_write_file(&meta_path, meta_data).map_err(|e| {
+        ResolverError::Io(format!(
+            "Failed to write package metadata to {:?}: {}",
+            meta_path, e
+        ))
+    })?;
 
     info!(
         name = %updated_pkg.name,

@@ -7,7 +7,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Searches for `dmz-workspace.toml` starting in `start_dir` and traversing parents.
-pub fn discover_workspace_manifest(start_dir: &Path) -> Option<(WorkspaceProjectConfig, PathBuf)> {
+///
+/// Returns an error if a manifest file exists but cannot be read or parsed.
+pub fn discover_workspace_manifest_checked(
+    start_dir: &Path,
+) -> Result<Option<(WorkspaceProjectConfig, PathBuf)>, anyhow::Error> {
     let abs_start = if start_dir.is_relative() {
         std::env::current_dir()
             .map(|cwd| cwd.join(start_dir))
@@ -25,9 +29,8 @@ pub fn discover_workspace_manifest(start_dir: &Path) -> Option<(WorkspaceProject
     loop {
         let candidate = curr.join("dmz-workspace.toml");
         if candidate.is_file() {
-            if let Ok(config) = WorkspaceProjectConfig::load_from_file(&candidate) {
-                return Some((config, candidate));
-            }
+            let config = WorkspaceProjectConfig::load_from_file(&candidate)?;
+            return Ok(Some((config, candidate)));
         }
 
         if !curr.pop() {
@@ -35,7 +38,21 @@ pub fn discover_workspace_manifest(start_dir: &Path) -> Option<(WorkspaceProject
         }
     }
 
-    None
+    Ok(None)
+}
+
+/// Searches for `dmz-workspace.toml` starting in `start_dir` and traversing parents.
+///
+/// Logs a warning and returns `None` when a manifest fails validation or parsing;
+/// prefer [`discover_workspace_manifest_checked`] when errors should be surfaced to the caller.
+pub fn discover_workspace_manifest(start_dir: &Path) -> Option<(WorkspaceProjectConfig, PathBuf)> {
+    match discover_workspace_manifest_checked(start_dir) {
+        Ok(found) => found,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to parse discovered dmz-workspace.toml");
+            None
+        }
+    }
 }
 
 /// Discovers `dmz-workspace.toml` or reconstructs multi-workspace configuration from `dmz.lock` metadata.
@@ -83,6 +100,12 @@ pub fn discover_or_from_lockfile(
 impl WorkspaceProjectConfig {
     pub fn discover_workspace_manifest(start_dir: &Path) -> Option<(Self, PathBuf)> {
         discover_workspace_manifest(start_dir)
+    }
+
+    pub fn discover_workspace_manifest_checked(
+        start_dir: &Path,
+    ) -> Result<Option<(Self, PathBuf)>, anyhow::Error> {
+        discover_workspace_manifest_checked(start_dir)
     }
 
     pub fn discover_or_from_lockfile(start_dir: &Path, lockfile_path: &Path) -> Option<Self> {
@@ -158,6 +181,21 @@ mod tests {
     fn test_discover_workspace_manifest_not_found() -> Result<(), Box<dyn Error>> {
         let dir = tempdir()?;
         assert!(discover_workspace_manifest(dir.path()).is_none());
+        assert!(discover_workspace_manifest_checked(dir.path())?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_discover_workspace_manifest_checked_surfaces_parse_error() -> Result<(), Box<dyn Error>>
+    {
+        let dir = tempdir()?;
+        let manifest = dir.path().join("dmz-workspace.toml");
+        fs::write(&manifest, "name = [invalid toml syntax\n")?;
+
+        let err = discover_workspace_manifest_checked(dir.path())
+            .err()
+            .ok_or("expected parse error for malformed dmz-workspace.toml")?;
+        assert!(err.to_string().contains("Invalid workspace manifest"));
         Ok(())
     }
 }

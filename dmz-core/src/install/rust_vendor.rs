@@ -183,12 +183,33 @@ directory = ".cargo/vendor"
 "#;
         fs::write(cargo_dir.join("config.toml"), config_toml_content.trim())?;
 
-        // Synchronize Cargo's native lockfile offline with explicit error propagation
-        let spawn_res = std::process::Command::new("cargo")
-            .arg("generate-lockfile")
+        // Synchronize Cargo's native lockfile offline with explicit error propagation,
+        // preferring the bundled workspace Rust toolchain when available.
+        let bundled_cargo_name = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+        let bundled_cargo = self
+            .workspace_root
+            .join(".dmz/toolchains/rust/bin")
+            .join(bundled_cargo_name);
+        let cargo_bin = if bundled_cargo.is_file() {
+            bundled_cargo
+        } else {
+            std::path::PathBuf::from("cargo")
+        };
+
+        let mut cmd = std::process::Command::new(&cargo_bin);
+        cmd.arg("generate-lockfile")
             .arg("--offline")
-            .current_dir(&self.workspace_root)
-            .status();
+            .current_dir(&self.workspace_root);
+        let bundled_rust_bin = self.workspace_root.join(".dmz/toolchains/rust/bin");
+        if bundled_rust_bin.is_dir() {
+            let existing_path = std::env::var("PATH").unwrap_or_default();
+            let sep = if cfg!(windows) { ";" } else { ":" };
+            cmd.env(
+                "PATH",
+                format!("{}{}{}", bundled_rust_bin.display(), sep, existing_path),
+            );
+        }
+        let spawn_res = cmd.status();
 
         match spawn_res {
             Ok(status) => {

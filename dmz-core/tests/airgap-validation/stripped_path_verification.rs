@@ -1,6 +1,5 @@
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::collections::HashMap;
 use std::fs;
@@ -87,10 +86,7 @@ mini-util = "0.1.0"
             .unwrap();
         tar.into_inner().unwrap().finish().unwrap();
     }
-    let crate_sha = format!(
-        "{:x}",
-        Sha256::digest(fs::read(&crate_archive_path).unwrap())
-    );
+    let crate_sha = dmz_core::archive::calculate_file_sha256(&crate_archive_path).unwrap();
 
     fs::create_dir_all(store_dir.join("js-util")).unwrap();
     let npm_archive_path = store_dir.join("js-util/js-util-1.0.0.archive");
@@ -114,7 +110,7 @@ mini-util = "0.1.0"
             .unwrap();
         tar.into_inner().unwrap().finish().unwrap();
     }
-    let npm_sha = format!("{:x}", Sha256::digest(fs::read(&npm_archive_path).unwrap()));
+    let npm_sha = dmz_core::archive::calculate_file_sha256(&npm_archive_path).unwrap();
 
     let lockfile = DmzLockfile::new(vec![
         LockedPackage {

@@ -159,6 +159,7 @@ impl CargoManifestScanner {
                 version_req,
                 ecosystem: Ecosystem::Cargo,
                 is_dev: false,
+                dependencies: Vec::new(),
             });
         }
 
