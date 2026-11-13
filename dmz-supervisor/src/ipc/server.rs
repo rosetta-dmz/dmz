@@ -186,8 +186,9 @@ impl IpcServer {
     #[cfg(windows)]
     pub(crate) async fn listen_windows(&self) -> Result<(), IpcServerError> {
         use std::ffi::c_void;
-        use tokio::net::windows::named_pipe::ServerOptions;
-        use windows_sys::Win32::Foundation::{LocalFree, HLOCAL};
+        use std::path::Path;
+        use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+        use windows_sys::Win32::Foundation::LocalFree;
         use windows_sys::Win32::Security::Authorization::{
             ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
         };
@@ -236,35 +237,45 @@ impl IpcServer {
                 if !self.descriptor.is_null() {
                     // SAFETY: `self.descriptor` was allocated by `ConvertStringSecurityDescriptorToSecurityDescriptorW`.
                     unsafe {
-                        LocalFree(self.descriptor as HLOCAL);
+                        LocalFree(self.descriptor);
                     }
                     self.descriptor = std::ptr::null_mut();
                 }
             }
         }
 
+        /// Binds a named pipe instance synchronously so the non-`Send` `OwnerPipeSecurity`
+        /// pointers are dropped before the async accept loop yields across `.await`.
+        fn create_owner_named_pipe(
+            pipe_name: &str,
+            socket_path: &Path,
+            first_instance: bool,
+        ) -> Result<NamedPipeServer, IpcServerError> {
+            let mut pipe_sec = OwnerPipeSecurity::new_owner_only().map_err(|e| {
+                IpcServerError::SocketBindFailed {
+                    path: socket_path.to_path_buf(),
+                    source: e,
+                }
+            })?;
+
+            let mut opts = ServerOptions::new();
+            opts.first_pipe_instance(first_instance);
+            opts.reject_remote_clients(true);
+            // SAFETY: `pipe_sec.as_mut_ptr()` points to a valid stack `SECURITY_ATTRIBUTES` initialized above.
+            // `CreateNamedPipeW` captures the security descriptor during handle creation, so `pipe_sec` can drop on return.
+            unsafe { opts.create_with_security_attributes_raw(pipe_name, pipe_sec.as_mut_ptr()) }
+                .map_err(|e| IpcServerError::SocketBindFailed {
+                    path: socket_path.to_path_buf(),
+                    source: e,
+                })
+        }
+
         let pipe_name = self.config.socket_path.to_string_lossy().into_owned();
         info!(pipe = %pipe_name, "DMZ Windows Named Pipe IPC server listening");
 
-        let mut pipe_sec =
-            OwnerPipeSecurity::new_owner_only().map_err(|e| IpcServerError::SocketBindFailed {
-                path: self.config.socket_path.clone(),
-                source: e,
-            })?;
-
         // Per official Tokio docs: claim first pipe instance before entering accept loop,
         // rejecting remote network clients and restricting DACL to local owner/admins/SYSTEM.
-        let mut first_opts = ServerOptions::new();
-        first_opts.first_pipe_instance(true);
-        first_opts.reject_remote_clients(true);
-        // SAFETY: `pipe_sec.as_mut_ptr()` points to a valid stack `SECURITY_ATTRIBUTES` initialized above.
-        let mut server = unsafe {
-            first_opts.create_with_security_attributes_raw(&pipe_name, pipe_sec.as_mut_ptr())
-        }
-        .map_err(|e| IpcServerError::SocketBindFailed {
-            path: self.config.socket_path.clone(),
-            source: e,
-        })?;
+        let mut server = create_owner_named_pipe(&pipe_name, &self.config.socket_path, true)?;
 
         let mut connection_set = tokio::task::JoinSet::new();
 
@@ -275,16 +286,7 @@ impl IpcServer {
                         Ok(()) => {
                             let connected_client = server;
                             // Instantiate replacement pipe BEFORE spawning handler so incoming clients never get NotFound
-                            let mut next_opts = ServerOptions::new();
-                            next_opts.reject_remote_clients(true);
-                            // SAFETY: `pipe_sec.as_mut_ptr()` points to the same valid owner-only `SECURITY_ATTRIBUTES`.
-                            server = unsafe {
-                                next_opts.create_with_security_attributes_raw(&pipe_name, pipe_sec.as_mut_ptr())
-                            }
-                            .map_err(|e| IpcServerError::SocketBindFailed {
-                                path: self.config.socket_path.clone(),
-                                source: e,
-                            })?;
+                            server = create_owner_named_pipe(&pipe_name, &self.config.socket_path, false)?;
                             let ctx = self.dispatch_context();
                             connection_set.spawn(async move {
                                 handle_connection(connected_client, ctx).await;
