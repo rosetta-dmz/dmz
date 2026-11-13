@@ -14,7 +14,7 @@ struct JobHandle(HANDLE);
 
 impl Drop for JobHandle {
     fn drop(&mut self) {
-        if self.0 != 0 {
+        if !self.0.is_null() {
             // `self.0` is a valid non-null Win32 Job Object handle owned exclusively by `JobHandle`.
             unsafe {
                 CloseHandle(self.0);
@@ -58,7 +58,7 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     // Passing null security attributes and null name creates an unnamed Win32 Job Object.
     let job = unsafe {
         let h = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-        if h == 0 {
+        if h.is_null() {
             return Err(PlatformError::WindowsError(format!(
                 "Failed to create Win32 Job Object: {}",
                 std::io::Error::last_os_error()
@@ -102,7 +102,7 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     // Assign spawned process to Job Object with race defense against premature child exit
     // Both `job.0` and `child.as_raw_handle()` are valid open Win32 kernel handles.
     unsafe {
-        let process_handle = child.as_raw_handle() as HANDLE;
+        let process_handle: HANDLE = child.as_raw_handle();
         if AssignProcessToJobObject(job.0, process_handle) == 0 {
             let os_err = std::io::Error::last_os_error();
 
