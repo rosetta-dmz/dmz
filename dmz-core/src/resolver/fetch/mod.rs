@@ -8,6 +8,7 @@ pub mod stream;
 
 use crate::resolver::lockfile::{DmzLockfile, LockedPackage};
 use crate::resolver::manifest::{Ecosystem, ManifestScanner};
+use crate::resolver::ResolverError;
 pub use pypi::select_pypi_artifact;
 use std::collections::VecDeque;
 use std::path::Path;
@@ -18,28 +19,31 @@ pub struct DependencyFetcher;
 
 impl DependencyFetcher {
     /// Fetches locked dependencies from dmz.lock, downloads real package artifacts, verifies hashes, and populates the local store cache.
-    pub fn fetch_dependencies(lockfile_path: &Path, store_path: &Path) -> Result<usize, String> {
+    pub fn fetch_dependencies(
+        lockfile_path: &Path,
+        store_path: &Path,
+    ) -> Result<usize, ResolverError> {
         info!(path = ?lockfile_path, "Reading lockfile to fetch real dependency artifacts into store...");
 
         if !lockfile_path.exists() {
-            return Err(format!(
+            return Err(ResolverError::Io(format!(
                 "Lockfile not found at {:?}. Run `dmz resolve` first.",
                 lockfile_path
-            ));
+            )));
         }
 
         let lockfile_content = std::fs::read_to_string(lockfile_path)
-            .map_err(|e| format!("Failed to read lockfile: {}", e))?;
+            .map_err(|e| ResolverError::Io(format!("Failed to read lockfile: {}", e)))?;
 
         let mut lockfile: DmzLockfile = serde_json::from_str(&lockfile_content)
             .or_else(|_| toml::from_str(&lockfile_content))
-            .map_err(|e| format!("Failed to parse lockfile format: {}", e))?;
+            .map_err(|e| ResolverError::Parse(format!("Failed to parse lockfile format: {}", e)))?;
 
         std::fs::create_dir_all(store_path).map_err(|e| {
-            format!(
+            ResolverError::Io(format!(
                 "Failed to create store directory at {:?}: {}",
                 store_path, e
-            )
+            ))
         })?;
 
         let mut fetched_count = 0;
@@ -83,14 +87,14 @@ impl DependencyFetcher {
         }
         lockfile.packages = sanitized_packages;
         if mutated_lockfile {
-            let _ = lockfile.save(lockfile_path);
+            lockfile.save(lockfile_path)?;
         }
 
         let mut current_wave: Vec<(String, LockedPackage)> = lockfile
             .packages
             .clone()
             .into_iter()
-            .filter(|(_k, pkg)| !pkg.version.starts_with("path:") && !pkg.version.contains("path"))
+            .filter(|(_k, pkg)| !pkg.is_local_path())
             .collect();
 
         let mut seen_pypi: std::collections::HashSet<String> = lockfile
@@ -139,8 +143,10 @@ impl DependencyFetcher {
                         {
                             Ok(c) => c,
                             Err(e) => {
-                                let _ =
-                                    tx.send(Err(format!("Failed to create HTTP client: {}", e)));
+                                let _ = tx.send(Err(ResolverError::Network(format!(
+                                    "Failed to create HTTP client: {}",
+                                    e
+                                ))));
                                 return;
                             }
                         };
@@ -257,6 +263,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    #[ignore = "requires live internet access to pypi.org"]
     fn test_fetch_dependencies_pypi_transitive_pep508() {
         let temp = tempdir().unwrap();
         let lockfile_path = temp.path().join("dmz.lock");
@@ -290,6 +297,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires live internet access to pypi.org"]
     fn test_fetch_dependencies_pypi_requests_transitive_closure() {
         let temp = tempdir().unwrap();
         let lockfile_path = temp.path().join("dmz.lock");
@@ -321,6 +329,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires live internet access to pypi.org"]
     fn test_fetch_dependencies_pypi_legacy_dirty_lockfile_healed() {
         let temp = tempdir().unwrap();
         let lockfile_path = temp.path().join("dmz.lock");
@@ -365,6 +374,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires live internet access to pypi.org"]
     fn test_fetch_dependencies_pypi_cuda_bindings_platform_wheel_fallback() {
         let temp = tempdir().unwrap();
         let lockfile_path = temp.path().join("dmz.lock");
@@ -490,5 +500,210 @@ mod tests {
             count.err()
         );
         assert_eq!(count.unwrap(), 1);
+    }
+
+    #[test]
+    fn test_fetch_dependencies_hermetic_localhost_registries() {
+        use sha2::{Digest, Sha256};
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Mutex,
+        };
+
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        struct EnvReset;
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                for var in &[
+                    "DMZ_REGISTRY_PYPI",
+                    "DMZ_REGISTRY_CRATES_API",
+                    "DMZ_REGISTRY_CRATES_DL",
+                    "DMZ_REGISTRY_NPM",
+                    "DMZ_REGISTRY_GOLANG",
+                ] {
+                    std::env::remove_var(var);
+                }
+            }
+        }
+        let _reset = EnvReset;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{}", addr);
+
+        let wheel_bytes = b"PK\x03\x04mock-wheel-bytes".to_vec();
+        let dep_wheel_bytes = b"PK\x03\x04dep-wheel-bytes".to_vec();
+        let crate_bytes = b"\x1f\x8b\x08\x00mock-crate-bytes".to_vec();
+        let npm_bytes = b"\x1f\x8b\x08\x00mock-npm-tgz-bytes".to_vec();
+        let go_zip_bytes = b"PK\x03\x04mock-go-mod-zip".to_vec();
+
+        let expected_hashes = vec![
+            crate::archive::format_sha256_hex(&Sha256::digest(&wheel_bytes)),
+            crate::archive::format_sha256_hex(&Sha256::digest(&dep_wheel_bytes)),
+            crate::archive::format_sha256_hex(&Sha256::digest(&crate_bytes)),
+            crate::archive::format_sha256_hex(&Sha256::digest(&npm_bytes)),
+            crate::archive::format_sha256_hex(&Sha256::digest(&go_zip_bytes)),
+        ];
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_srv = Arc::clone(&shutdown);
+        let base_srv = base_url.clone();
+
+        let wheel_srv = wheel_bytes.clone();
+        let dep_wheel_srv = dep_wheel_bytes.clone();
+        let crate_srv = crate_bytes.clone();
+        let npm_srv = npm_bytes.clone();
+        let go_srv = go_zip_bytes.clone();
+
+        listener.set_nonblocking(true).unwrap();
+        let handle = std::thread::spawn(move || {
+            while !shutdown_srv.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buf = [0u8; 4096];
+                        let n = stream.read(&mut buf).unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        let path = req
+                            .lines()
+                            .next()
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .unwrap_or("/");
+
+                        let (status, ctype, body): (&str, &str, Vec<u8>) = match path {
+                            "/pypi/alpha/1.0.0/json" | "/pypi/alpha/json" => {
+                                let json = serde_json::json!({
+                                    "info": {
+                                        "version": "1.0.0",
+                                        "requires_dist": ["beta==0.5.0"]
+                                    },
+                                    "urls": [{
+                                        "filename": "alpha-1.0.0-py3-none-any.whl",
+                                        "url": format!("{}/files/alpha-1.0.0.whl", base_srv)
+                                    }]
+                                });
+                                ("200 OK", "application/json", json.to_string().into_bytes())
+                            }
+                            "/pypi/beta/0.5.0/json" | "/pypi/beta/json" => {
+                                let json = serde_json::json!({
+                                    "info": {
+                                        "version": "0.5.0",
+                                        "requires_dist": []
+                                    },
+                                    "urls": [{
+                                        "filename": "beta-0.5.0-py3-none-any.whl",
+                                        "url": format!("{}/files/beta-0.5.0.whl", base_srv)
+                                    }]
+                                });
+                                ("200 OK", "application/json", json.to_string().into_bytes())
+                            }
+                            "/files/alpha-1.0.0.whl" => {
+                                ("200 OK", "application/octet-stream", wheel_srv.clone())
+                            }
+                            "/files/beta-0.5.0.whl" => {
+                                ("200 OK", "application/octet-stream", dep_wheel_srv.clone())
+                            }
+                            "/crates/mini_crate/mini_crate-0.2.0.crate" => {
+                                ("200 OK", "application/octet-stream", crate_srv.clone())
+                            }
+                            "/npm/tiny_pkg/-/tiny_pkg-1.2.3.tgz" => {
+                                ("200 OK", "application/octet-stream", npm_srv.clone())
+                            }
+                            "/golang/example.com/mod/@v/v0.3.0.zip" => {
+                                ("200 OK", "application/octet-stream", go_srv.clone())
+                            }
+                            _ => ("404 Not Found", "text/plain", b"not found".to_vec()),
+                        };
+
+                        let header = format!(
+                            "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            status,
+                            ctype,
+                            body.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes());
+                        let _ = stream.write_all(&body);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        std::env::set_var("DMZ_REGISTRY_PYPI", format!("{}/pypi", base_url));
+        std::env::set_var(
+            "DMZ_REGISTRY_CRATES_API",
+            format!("{}/crates_api", base_url),
+        );
+        std::env::set_var("DMZ_REGISTRY_CRATES_DL", format!("{}/crates", base_url));
+        std::env::set_var("DMZ_REGISTRY_NPM", format!("{}/npm", base_url));
+        std::env::set_var("DMZ_REGISTRY_GOLANG", format!("{}/golang", base_url));
+
+        let temp = tempdir().unwrap();
+        let lockfile_path = temp.path().join("dmz.lock");
+        let store_path = temp.path().join("store");
+
+        let packages = vec![
+            LockedPackage {
+                name: "alpha".to_string(),
+                version: "1.0.0".to_string(),
+                ecosystem: Ecosystem::PyPI,
+                sha256: "pending".to_string(),
+                source_url: None,
+                dependencies: Vec::new(),
+                member_id: None,
+            },
+            LockedPackage {
+                name: "mini_crate".to_string(),
+                version: "0.2.0".to_string(),
+                ecosystem: Ecosystem::Cargo,
+                sha256: "pending".to_string(),
+                source_url: None,
+                dependencies: Vec::new(),
+                member_id: None,
+            },
+            LockedPackage {
+                name: "tiny_pkg".to_string(),
+                version: "1.2.3".to_string(),
+                ecosystem: Ecosystem::Npm,
+                sha256: "pending".to_string(),
+                source_url: None,
+                dependencies: Vec::new(),
+                member_id: None,
+            },
+            LockedPackage {
+                name: "example.com/mod".to_string(),
+                version: "v0.3.0".to_string(),
+                ecosystem: Ecosystem::Go,
+                sha256: "pending".to_string(),
+                source_url: None,
+                dependencies: Vec::new(),
+                member_id: None,
+            },
+        ];
+
+        DmzLockfile::new(packages).save(&lockfile_path).unwrap();
+        let count = DependencyFetcher::fetch_dependencies(&lockfile_path, &store_path);
+
+        shutdown.store(true, Ordering::Relaxed);
+        let _ = handle.join();
+
+        assert!(count.is_ok(), "Offline fetch failed: {:?}", count.err());
+        assert_eq!(count.unwrap(), 5);
+
+        let reloaded = DmzLockfile::load_and_verify(&lockfile_path).unwrap();
+        assert_eq!(reloaded.packages.len(), 5);
+        for h in &expected_hashes {
+            assert!(
+                reloaded.packages.values().any(|p| &p.sha256 == h),
+                "Missing expected real SHA-256 {} in lockfile",
+                h
+            );
+        }
     }
 }

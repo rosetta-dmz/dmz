@@ -4,8 +4,8 @@ pub mod exporter;
 pub mod importer;
 
 pub use exporter::{
-    calculate_file_sha256, AirGapExporter, AirGapManifest, DeltaBaseInfo, ExportConfig,
-    ExportError, ExportMode, HashingWriter,
+    calculate_file_sha256, format_sha256_hex, AirGapExporter, AirGapManifest, DeltaBaseInfo,
+    ExportConfig, ExportError, ExportMode, HashingWriter,
 };
 pub use importer::{
     hydrate_offline_dependencies, relative_path_between, AirGapImporter, ImportConfig, ImportError,

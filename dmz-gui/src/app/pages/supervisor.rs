@@ -39,6 +39,7 @@ pub(super) struct SupervisorState {
         dmz_core::workspace::WorkspaceProjectConfig,
         std::path::PathBuf,
     )>,
+    pub(super) cached_manifest_error: Option<String>,
     pub(super) cached_layouts: Vec<dmz_core::workspace::ResolvedMemberLayout>,
 }
 
@@ -97,6 +98,7 @@ impl Default for SupervisorState {
             _polling_guard: guard,
             cached_workspace: String::new(),
             cached_manifest: None,
+            cached_manifest_error: None,
             cached_layouts: Vec::new(),
         }
     }
@@ -120,19 +122,30 @@ pub(super) fn show(
     // Cache workspace manifest discovery to eliminate 120x/sec per-frame disk I/O thrashing
     if state.cached_workspace != *workspace_path {
         let ws_path = std::path::PathBuf::from(&*workspace_path);
-        let discovered =
-            dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(&ws_path);
-        let layouts = if let Some((ref proj, ref manifest_file)) = discovered {
-            let root = manifest_file
-                .parent()
-                .unwrap_or(std::path::Path::new("."))
-                .to_path_buf();
-            proj.resolve_member_layouts(&root, Some(manifest_file))
-        } else {
-            Vec::new()
-        };
-        state.cached_manifest = discovered;
-        state.cached_layouts = layouts;
+        match dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest_checked(
+            &ws_path,
+        ) {
+            Ok(Some((proj, manifest_file))) => {
+                let root = manifest_file
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .to_path_buf();
+                let layouts = proj.resolve_member_layouts(&root, Some(&manifest_file));
+                state.cached_manifest = Some((proj, manifest_file));
+                state.cached_manifest_error = None;
+                state.cached_layouts = layouts;
+            }
+            Ok(None) => {
+                state.cached_manifest = None;
+                state.cached_manifest_error = None;
+                state.cached_layouts = Vec::new();
+            }
+            Err(e) => {
+                state.cached_manifest = None;
+                state.cached_manifest_error = Some(e.to_string());
+                state.cached_layouts = Vec::new();
+            }
+        }
         state.cached_workspace = workspace_path.clone();
     }
 
@@ -162,6 +175,12 @@ pub(super) fn show(
                     p_str,
                     sc_str.join(", ")
                 ),
+            );
+        } else if let Some(ref manifest_err) = state.cached_manifest_error {
+            ui.add_space(6.0);
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 82, 82),
+                format!("✖ Invalid dmz-workspace.toml: {}", manifest_err),
             );
         } else {
             ui.add_space(6.0);
@@ -404,49 +423,53 @@ pub(super) fn show(
             ) {
                 if components::action_button(ui, "Launch Workspace Pair", true).clicked() {
                     let ws_path = std::path::PathBuf::from(&*workspace_path);
-                    if let Some((mut project_config, manifest_file)) =
-                        dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(&ws_path)
-                    {
-                        if project_config.sidecars().is_empty() {
-                            *status_message = format!(
-                                "Cannot launch: Workspace '{}' in {:?} has no sidecar or service member defined.",
-                                project_config.name,
-                                manifest_file.file_name().unwrap_or_default()
-                            );
-                        } else {
-                            let root = manifest_file
-                                .parent()
-                                .unwrap_or(std::path::Path::new("."))
-                                .to_path_buf();
-
-                            // Inject GUI slider settings into IPC config
-                            project_config.ipc.readiness_timeout_ms = state.readiness_timeout_ms;
-                            project_config.ipc.drain_timeout_ms = state.drain_timeout_ms;
-
-                            let pair_config = dmz_supervisor::SidecarPairConfig {
-                                workspace_root: root,
-                                project: project_config,
-                                allow_network: false,
-                            };
-
-                            let orch = state.orchestrator.clone();
-                            if let Some(ref rt) = state.tokio_rt {
-                                rt.spawn(async move {
-                                    if let Err(e) = orch.start_pair(pair_config).await {
-                                        tracing::error!("Workspace launch error: {}", e);
-                                    }
-                                });
+                    match dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest_checked(&ws_path) {
+                        Ok(Some((mut project_config, manifest_file))) => {
+                            if project_config.sidecars().is_empty() {
                                 *status_message = format!(
-                                    "Spawning workspace pair under KEP-753 supervision (readiness probe: {}ms)",
-                                    state.readiness_timeout_ms
+                                    "Cannot launch: Workspace '{}' in {:?} has no sidecar or service member defined.",
+                                    project_config.name,
+                                    manifest_file.file_name().unwrap_or_default()
                                 );
+                            } else {
+                                let root = manifest_file
+                                    .parent()
+                                    .unwrap_or(std::path::Path::new("."))
+                                    .to_path_buf();
+
+                                // Inject GUI slider settings into IPC config
+                                project_config.ipc.readiness_timeout_ms = state.readiness_timeout_ms;
+                                project_config.ipc.drain_timeout_ms = state.drain_timeout_ms;
+
+                                let pair_config = dmz_supervisor::SidecarPairConfig {
+                                    workspace_root: root,
+                                    project: project_config,
+                                    allow_network: false,
+                                };
+
+                                let orch = state.orchestrator.clone();
+                                if let Some(ref rt) = state.tokio_rt {
+                                    rt.spawn(async move {
+                                        if let Err(e) = orch.start_pair(pair_config).await {
+                                            tracing::error!("Workspace launch error: {}", e);
+                                        }
+                                    });
+                                    *status_message = format!(
+                                        "Spawning workspace pair under KEP-753 supervision (readiness probe: {}ms)",
+                                        state.readiness_timeout_ms
+                                    );
+                                }
                             }
                         }
-                    } else {
-                        *status_message = format!(
-                            "Cannot launch: No dmz-workspace.toml detected in '{}'. Please browse to your imported workspace root.",
-                            workspace_path
-                        );
+                        Ok(None) => {
+                            *status_message = format!(
+                                "Cannot launch: No dmz-workspace.toml detected in '{}'. Please browse to your imported workspace root.",
+                                workspace_path
+                            );
+                        }
+                        Err(e) => {
+                            *status_message = format!("Cannot launch: Invalid dmz-workspace.toml: {}", e);
+                        }
                     }
                 }
             } else if components::action_button(ui, "Stop Pair (Graceful Drain)", false).clicked() {
@@ -534,9 +557,10 @@ mod tests {
         let mut msg = String::new();
 
         // Run UI headless
-        let _ = ctx.run_ui(Default::default(), |ui| {
+        let mut out = ctx.run_ui(Default::default(), |ui| {
             show(&mut state, ui, &mut msg, &mut ws);
         });
+        out.textures_delta.clear();
 
         assert_eq!(state.sidecar_state, SidecarLifecycleState::Running);
         assert_eq!(state.last_error.as_deref(), Some("test error"));
@@ -564,9 +588,10 @@ members = [
         let ctx = egui::Context::default();
 
         // First frame: loads manifest into cache
-        let _ = ctx.run_ui(Default::default(), |ui| {
+        let mut out = ctx.run_ui(Default::default(), |ui| {
             show(&mut state, ui, &mut msg, &mut ws_str);
         });
+        out.textures_delta.clear();
 
         assert!(state.cached_manifest.is_some());
         let (ref proj, _) = state.cached_manifest.as_ref().unwrap();
@@ -578,9 +603,10 @@ members = [
         assert!(!manifest_path.exists());
 
         // Second frame: because workspace path is unchanged, cached manifest is retained and disk is not read!
-        let _ = ctx.run_ui(Default::default(), |ui| {
+        let mut out = ctx.run_ui(Default::default(), |ui| {
             show(&mut state, ui, &mut msg, &mut ws_str);
         });
+        out.textures_delta.clear();
 
         assert!(state.cached_manifest.is_some());
         let (ref proj, _) = state.cached_manifest.as_ref().unwrap();

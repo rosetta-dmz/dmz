@@ -5,6 +5,22 @@ use super::schema::WorkspaceMember;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Errors raised during workspace command inference and resolution.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum WorkspaceError {
+    #[error("Unable to determine execution command for workspace member '{member_id}' at {member_dir:?}. Specify \"exec_command\" and \"exec_args\" in dmz-workspace.toml")]
+    CommandInferenceFailed {
+        member_id: String,
+        member_dir: String,
+    },
+}
+
+impl From<WorkspaceError> for String {
+    fn from(err: WorkspaceError) -> Self {
+        err.to_string()
+    }
+}
+
 /// Detects the default command, arguments, and ecosystem for a workspace member directory.
 pub fn detect_default_command(
     member_dir: &Path,
@@ -25,42 +41,61 @@ pub fn detect_node_command(
         return None;
     }
 
+    let pkg_json_content = fs::read_to_string(&pkg_json_path).ok();
+    let pkg_json_val = pkg_json_content
+        .as_deref()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok());
+    let pkg_manager_field = pkg_json_val
+        .as_ref()
+        .and_then(|v| v.get("packageManager"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+
     let pm = if member_dir.join("pnpm-lock.yaml").exists()
         || workspace_root.join("pnpm-lock.yaml").exists()
         || member_dir.join("pnpm-workspace.yaml").exists()
+        || workspace_root.join("pnpm-workspace.yaml").exists()
         || member_dir.join("node_modules/.pnpm").is_dir()
+        || pkg_manager_field.starts_with("pnpm@")
+        || pkg_manager_field == "pnpm"
     {
         "pnpm".to_string()
-    } else if member_dir.join("yarn.lock").exists() || workspace_root.join("yarn.lock").exists() {
+    } else if member_dir.join("yarn.lock").exists()
+        || workspace_root.join("yarn.lock").exists()
+        || pkg_manager_field.starts_with("yarn@")
+        || pkg_manager_field == "yarn"
+    {
         "yarn".to_string()
-    } else if member_dir.join("bun.lockb").exists() || member_dir.join("bun.lock").exists() {
+    } else if member_dir.join("bun.lockb").exists()
+        || member_dir.join("bun.lock").exists()
+        || pkg_manager_field.starts_with("bun@")
+        || pkg_manager_field == "bun"
+    {
         "bun".to_string()
     } else {
         "npm".to_string()
     };
 
-    if let Ok(content) = fs::read_to_string(&pkg_json_path) {
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(sc) = val.get("scripts").and_then(|s| s.as_object()) {
-                if sc.contains_key("tauri") {
-                    return Some((
-                        pm,
-                        vec!["run".to_string(), "tauri".to_string(), "dev".to_string()],
-                        "node",
-                    ));
-                } else if sc.contains_key("dev") {
-                    return Some((pm, vec!["run".to_string(), "dev".to_string()], "node"));
-                } else if sc.contains_key("start") {
-                    return Some((pm, vec!["run".to_string(), "start".to_string()], "node"));
-                } else if sc.contains_key("serve") {
-                    return Some((pm, vec!["run".to_string(), "serve".to_string()], "node"));
-                }
+    if let Some(val) = pkg_json_val {
+        if let Some(sc) = val.get("scripts").and_then(|s| s.as_object()) {
+            if sc.contains_key("tauri") {
+                return Some((
+                    pm,
+                    vec!["run".to_string(), "tauri".to_string(), "dev".to_string()],
+                    "node",
+                ));
+            } else if sc.contains_key("dev") {
+                return Some((pm, vec!["run".to_string(), "dev".to_string()], "node"));
+            } else if sc.contains_key("start") {
+                return Some((pm, vec!["run".to_string(), "start".to_string()], "node"));
+            } else if sc.contains_key("serve") {
+                return Some((pm, vec!["run".to_string(), "serve".to_string()], "node"));
             }
+        }
 
-            if let Some(main_file) = val.get("main").and_then(|m| m.as_str()) {
-                if member_dir.join(main_file).is_file() {
-                    return Some(("node".to_string(), vec![main_file.to_string()], "node"));
-                }
+        if let Some(main_file) = val.get("main").and_then(|m| m.as_str()) {
+            if member_dir.join(main_file).is_file() {
+                return Some(("node".to_string(), vec![main_file.to_string()], "node"));
             }
         }
     }
@@ -91,19 +126,33 @@ pub fn detect_rust_command(member_dir: &Path) -> Option<(String, Vec<String>, &'
     }
 }
 
+fn detect_top_level_python_script(member_dir: &Path) -> Option<String> {
+    let entries = fs::read_dir(member_dir).ok()?;
+    let mut scripts: Vec<String> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "py"))
+        .filter_map(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+        })
+        .filter(|name| !matches!(name.as_str(), "setup.py" | "conftest.py" | "__init__.py"))
+        .collect();
+    scripts.sort();
+    scripts.into_iter().next()
+}
+
 pub fn detect_python_command(member_dir: &Path) -> Option<(String, Vec<String>, &'static str)> {
     let py_req_path = member_dir.join("requirements.txt");
     let pyproject_path = member_dir.join("pyproject.toml");
     let setup_py_path = member_dir.join("setup.py");
     let pipfile_path = member_dir.join("Pipfile");
 
-    if !py_req_path.is_file()
-        && !pyproject_path.is_file()
-        && !setup_py_path.is_file()
-        && !pipfile_path.is_file()
-    {
-        return None;
-    }
+    let has_manifest = py_req_path.is_file()
+        || pyproject_path.is_file()
+        || setup_py_path.is_file()
+        || pipfile_path.is_file();
 
     let py_cmd = if cfg!(windows) {
         "python".to_string()
@@ -131,7 +180,7 @@ pub fn detect_python_command(member_dir: &Path) -> Option<(String, Vec<String>, 
     // Check pyproject.toml [project.scripts] / [tool.poetry.scripts]
     if pyproject_path.is_file() {
         if let Ok(content) = fs::read_to_string(&pyproject_path) {
-            if let Ok(parsed) = content.parse::<toml::Value>() {
+            if let Ok(parsed) = toml::from_str::<toml::Value>(&content) {
                 let scripts_table = parsed
                     .get("project")
                     .and_then(|p| p.get("scripts"))
@@ -175,6 +224,14 @@ pub fn detect_python_command(member_dir: &Path) -> Option<(String, Vec<String>, 
         }
     }
 
+    if !has_manifest {
+        // Standalone .py script detection when manifests are absent (sorted deterministically)
+        if let Some(script) = detect_top_level_python_script(member_dir) {
+            return Some((py_cmd, vec![script], "python"));
+        }
+        return None;
+    }
+
     // Check 1-level package subdirectories for main.py / server.py / app.py
     if let Ok(entries) = fs::read_dir(member_dir) {
         let mut subdirs: Vec<PathBuf> = entries
@@ -214,7 +271,8 @@ pub fn detect_python_command(member_dir: &Path) -> Option<(String, Vec<String>, 
         }
     }
 
-    None
+    // Fallback inside manifest-backed directory: any non-setup root .py file
+    detect_top_level_python_script(member_dir).map(|script| (py_cmd, vec![script], "python"))
 }
 
 pub fn detect_go_command(member_dir: &Path) -> Option<(String, Vec<String>, &'static str)> {
@@ -234,7 +292,7 @@ pub fn resolve_command(
     member: &WorkspaceMember,
     member_dir: &Path,
     workspace_root: &Path,
-) -> Result<(String, Vec<String>), String> {
+) -> Result<(String, Vec<String>), WorkspaceError> {
     if let Some(ref cmd) = member.exec_command {
         let trimmed = cmd.trim();
         if !trimmed.is_empty() {
@@ -252,10 +310,10 @@ pub fn resolve_command(
         return Ok((detected_cmd, args));
     }
 
-    Err(format!(
-        "Unable to determine execution command for workspace member '{}' at {:?}. Specify \"exec_command\" and \"exec_args\" in dmz-workspace.toml",
-        member.id, member_dir
-    ))
+    Err(WorkspaceError::CommandInferenceFailed {
+        member_id: member.id.clone(),
+        member_dir: member_dir.display().to_string(),
+    })
 }
 
 pub fn populate_detected_defaults(
@@ -307,7 +365,7 @@ impl WorkspaceMember {
         &self,
         member_dir: &Path,
         workspace_root: &Path,
-    ) -> Result<(String, Vec<String>), String> {
+    ) -> Result<(String, Vec<String>), WorkspaceError> {
         resolve_command(self, member_dir, workspace_root)
     }
 
@@ -362,6 +420,33 @@ mod tests {
         let (cmd, _, eco) = res.ok_or("missing go detection")?;
         assert_eq!(cmd, "go");
         assert_eq!(eco, "go");
+        Ok(())
+    }
+
+    #[test]
+    fn test_detect_standalone_python_script_without_manifest() -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        fs::write(dir.path().join("worker.py"), "print('ok')\n")?;
+        let res = detect_default_command(dir.path(), dir.path());
+        let (cmd, args, eco) = res.ok_or("missing standalone python detection")?;
+        assert!(cmd == "python3" || cmd == "python");
+        assert_eq!(args, vec!["worker.py"]);
+        assert_eq!(eco, "python");
+        Ok(())
+    }
+
+    #[test]
+    fn test_detect_pnpm_via_package_manager_field() -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"packageManager": "pnpm@9.0.0", "scripts": {"start": "node index.js"}}"#,
+        )?;
+        let (cmd, args, eco) =
+            detect_node_command(dir.path(), dir.path()).ok_or("missing pnpm detection")?;
+        assert_eq!(cmd, "pnpm");
+        assert_eq!(args, vec!["run", "start"]);
+        assert_eq!(eco, "node");
         Ok(())
     }
 }

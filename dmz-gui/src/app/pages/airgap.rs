@@ -141,7 +141,7 @@ pub(super) fn show(
                         ui.add_sized(
                             egui::vec2(field_width, components::FIELD_BUTTON_HEIGHT),
                             egui::TextEdit::singleline(&mut state.archive_path)
-                                .vertical_align(egui::Align::Center)
+                                .align(egui::Align2::LEFT_CENTER)
                                 .margin(egui::Margin::symmetric(8, 0)),
                         );
                         if components::field_button(ui, "Open...", Some(btn_width))
@@ -193,7 +193,7 @@ pub(super) fn show(
                 ui.add_sized(
                     egui::vec2(ui.available_width(), 32.0),
                     egui::TextEdit::singleline(&mut state.target_platform)
-                        .vertical_align(egui::Align::Center)
+                        .align(egui::Align2::LEFT_CENTER)
                         .margin(egui::Margin::symmetric(8, 0))
                         .hint_text("Optional (e.g. linux-x86_64, macos-arm64, host default)"),
                 );
@@ -474,7 +474,7 @@ pub(super) fn show(
                 ui.add_sized(
                     egui::vec2(field_width, components::FIELD_BUTTON_HEIGHT),
                     egui::TextEdit::singleline(&mut state.archive_path)
-                        .vertical_align(egui::Align::Center)
+                        .align(egui::Align2::LEFT_CENTER)
                         .margin(egui::Margin::symmetric(8, 0)),
                 );
 
@@ -658,14 +658,16 @@ mod tests {
         assert!(state.show_export_tip);
 
         for _ in 0..3 {
-            let _ = ctx.run_ui(Default::default(), |ui| {
+            let mut out = ctx.run_ui(Default::default(), |ui| {
                 show(&mut state, ui, &mut ws, &mut lock, &mut msg);
             });
+            out.textures_delta.clear();
         }
 
         state.show_export_tip = false;
-        let _ = ctx.run_ui(Default::default(), |ui| {
+        let mut out = ctx.run_ui(Default::default(), |ui| {
             show(&mut state, ui, &mut ws, &mut lock, &mut msg);
         });
+        out.textures_delta.clear();
     }
 }

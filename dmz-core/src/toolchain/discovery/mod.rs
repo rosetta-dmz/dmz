@@ -1,4 +1,5 @@
 use super::types::{DiscoveredToolchain, ToolchainEcosystem};
+use super::ToolchainError;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,7 +40,7 @@ pub trait ToolchainDiscoverer: Send + Sync {
     fn ecosystem(&self) -> ToolchainEcosystem;
 
     /// Discovers the host toolchain, returning resolved binaries, shared libraries, and metadata.
-    fn discover(&self) -> Result<Option<DiscoveredToolchain>, String>;
+    fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError>;
 }
 
 /// Registry coordinating one or more `ToolchainDiscoverer` implementations.
@@ -165,6 +166,44 @@ pub fn push_system_bin_candidates(candidates: &mut Vec<PathBuf>, bin_name: &str)
             push_unique_path(candidates, p);
         }
     }
+}
+
+/// Selects the highest-priority standalone candidate from `candidates`, emitting
+/// non-relocatable notices for non-standalone entries encountered before selection.
+pub fn select_preferred_candidate(candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    select_preferred_verified(candidates, |_| Some(())).map(|(p, ())| p)
+}
+
+/// Evaluates `candidates` (standalone first) using `probe`, returning the highest-priority
+/// standalone candidate whose probe returns `Some` (or the first successful fallback).
+pub fn select_preferred_verified<T, F>(
+    mut candidates: Vec<PathBuf>,
+    mut probe: F,
+) -> Option<(PathBuf, T)>
+where
+    F: FnMut(&Path) -> Option<T>,
+{
+    candidates.sort_by_key(|c| is_non_standalone_path(c));
+    let mut chosen: Option<(PathBuf, T)> = None;
+    for candidate in candidates {
+        let non_standalone = is_non_standalone_path(&candidate);
+        if non_standalone {
+            emit_non_relocatable_notice(&candidate);
+        }
+        if let Some(value) = probe(&candidate) {
+            let should_replace = match &chosen {
+                None => true,
+                Some((prev, _)) => !non_standalone && is_non_standalone_path(prev),
+            };
+            if should_replace {
+                chosen = Some((candidate, value));
+                if !non_standalone {
+                    break;
+                }
+            }
+        }
+    }
+    chosen
 }
 
 /// Recursively collects all files within a directory relative to a base directory,

@@ -1,39 +1,27 @@
 use crate::resolver::lockfile::DmzLockfile;
-use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use tracing::info;
 
 pub const DEFAULT_MAX_FILES: usize = 250_000;
 pub const DEFAULT_MAX_DECOMPRESSED_BYTES: u64 = 10 * 1024 * 1024 * 1024; // 10 GB
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PackagingImportError {
+    #[error("Import I/O Error: {0}")]
     IoError(String),
+    #[error("Cryptographic Verification Failed: {0}")]
     VerificationFailed(String),
+    #[error("Archive Extraction Failed: {0}")]
     ExtractionError(String),
+    #[error("Security Violation: {0}")]
     SecurityViolation(String),
+    #[error("Lockfile Verification Failed: {0}")]
     LockfileError(String),
+    #[error("Resource Quota Exceeded: {0}")]
     QuotaExceeded(String),
 }
-
-impl std::fmt::Display for PackagingImportError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::IoError(msg) => write!(f, "Import I/O Error: {}", msg),
-            Self::VerificationFailed(msg) => {
-                write!(f, "Cryptographic Verification Failed: {}", msg)
-            }
-            Self::ExtractionError(msg) => write!(f, "Archive Extraction Failed: {}", msg),
-            Self::SecurityViolation(msg) => write!(f, "Security Violation: {}", msg),
-            Self::LockfileError(msg) => write!(f, "Lockfile Verification Failed: {}", msg),
-            Self::QuotaExceeded(msg) => write!(f, "Resource Quota Exceeded: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for PackagingImportError {}
 
 impl From<PackagingImportError> for String {
     fn from(err: PackagingImportError) -> Self {
@@ -99,14 +87,13 @@ impl AirGapImporter {
         })?;
 
         // Cryptographic SHA-256 verification on the open file handle
-        let mut hasher = Sha256::new();
-        std::io::copy(&mut file, &mut hasher).map_err(|e| {
+        let computed_hash = crate::archive::exporter::hashing::calculate_reader_sha256(&mut file)
+            .map_err(|e| {
             PackagingImportError::IoError(format!(
                 "Failed to read archive for SHA-256 computation: {}",
                 e
             ))
         })?;
-        let computed_hash = format!("{:x}", hasher.finalize());
 
         if computed_hash != expected_sha256 {
             return Err(PackagingImportError::VerificationFailed(format!(
@@ -159,13 +146,13 @@ impl AirGapImporter {
                 )));
             }
 
-            total_bytes = total_bytes.saturating_add(entry.size());
-            if total_bytes > Self::DEFAULT_MAX_DECOMPRESSED_BYTES {
+            if total_bytes.saturating_add(entry.size()) > Self::DEFAULT_MAX_DECOMPRESSED_BYTES {
                 return Err(PackagingImportError::QuotaExceeded(format!(
                     "Archive exceeds maximum allowed decompressed size ({} bytes)",
                     Self::DEFAULT_MAX_DECOMPRESSED_BYTES
                 )));
             }
+            let remaining_quota = Self::DEFAULT_MAX_DECOMPRESSED_BYTES.saturating_sub(total_bytes);
 
             let entry_path = entry
                 .path()
@@ -197,6 +184,52 @@ impl AirGapImporter {
                         link_target
                     )));
                 }
+            }
+
+            if entry.header().entry_type().is_file() {
+                let mut current = extract_to.to_path_buf();
+                if let Some(parent) = entry_path.parent() {
+                    for comp in parent.components() {
+                        if let Component::Normal(part) = comp {
+                            current.push(part);
+                            if let Ok(meta) = fs::symlink_metadata(&current) {
+                                if meta.file_type().is_symlink() {
+                                    return Err(PackagingImportError::SecurityViolation(format!(
+                                        "Symlink traversal detected through intermediate directory {:?}",
+                                        current
+                                    )));
+                                }
+                            } else {
+                                fs::create_dir_all(&current)?;
+                            }
+                        }
+                    }
+                }
+                let outpath = extract_to.join(&entry_path);
+                if let Ok(meta) = fs::symlink_metadata(&outpath) {
+                    if meta.file_type().is_symlink() {
+                        fs::remove_file(&outpath)?;
+                    }
+                }
+                let mut outfile = File::create(&outpath)?;
+                let mut limited = (&mut entry).take(remaining_quota.saturating_add(1));
+                let copied = std::io::copy(&mut limited, &mut outfile)?;
+                if copied > remaining_quota {
+                    let _ = fs::remove_file(&outpath);
+                    return Err(PackagingImportError::QuotaExceeded(format!(
+                        "Archive exceeds maximum allowed decompressed size ({} bytes)",
+                        Self::DEFAULT_MAX_DECOMPRESSED_BYTES
+                    )));
+                }
+                total_bytes = total_bytes.saturating_add(copied);
+
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = entry.header().mode().unwrap_or(0o644) & 0o777;
+                    let _ = fs::set_permissions(&outpath, fs::Permissions::from_mode(mode));
+                }
+                continue;
             }
 
             // Boundary-checked extraction via unpack_in

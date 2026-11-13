@@ -79,7 +79,12 @@ impl ManagedChild {
                         }
                     }
                 }
-                let _ = self.child.kill().await;
+                if let Err(e) = self.child.kill().await {
+                    tracing::debug!(
+                        error = %e,
+                        "Non-fatal error calling child.kill() after grace period expiry"
+                    );
+                }
             }
         }
     }
@@ -98,7 +103,12 @@ impl Drop for ManagedChild {
                     }
                 }
             }
-            let _ = self.child.start_kill();
+            if let Err(e) = self.child.start_kill() {
+                tracing::debug!(
+                    error = %e,
+                    "Non-fatal error calling child.start_kill() in ManagedChild::drop"
+                );
+            }
         }
     }
 }

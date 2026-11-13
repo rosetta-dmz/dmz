@@ -159,7 +159,11 @@ pub fn package_multi_workspace_umbrella<W: Write>(
         let _ = header.set_username("");
         let _ = header.set_groupname("");
         header.set_cksum();
-        let _ = tar_builder.append_data(&mut header, "dmz-workspace.toml", toml_str.as_bytes());
+        tar_builder
+            .append_data(&mut header, "dmz-workspace.toml", toml_str.as_bytes())
+            .map_err(|e| {
+                ExportError::ArchiveError(format!("Failed to embed dmz-workspace.toml: {}", e))
+            })?;
     }
 
     // 4. Generate and embed VS Code Multi-Root Workspace (.code-workspace)
@@ -263,8 +267,12 @@ pub fn package_multi_workspace_umbrella<W: Write>(
                 } else {
                     "${workspaceFolder}/.venv/bin/python"
                 };
-                py_settings["python.defaultInterpreterPath"] =
-                    serde_json::Value::String(py_bin.to_string());
+                if let Some(obj) = py_settings.as_object_mut() {
+                    obj.insert(
+                        "python.defaultInterpreterPath".to_string(),
+                        serde_json::Value::String(py_bin.to_string()),
+                    );
+                }
             } else if has_bundled_py {
                 let py_bin = if rel_prefix == "." {
                     if cfg!(windows) {
@@ -283,10 +291,17 @@ pub fn package_multi_workspace_umbrella<W: Write>(
                         rel_prefix
                     )
                 };
-                py_settings["python.defaultInterpreterPath"] = serde_json::Value::String(py_bin);
+                if let Some(obj) = py_settings.as_object_mut() {
+                    obj.insert(
+                        "python.defaultInterpreterPath".to_string(),
+                        serde_json::Value::String(py_bin),
+                    );
+                }
             }
 
-            folder_entry["settings"] = py_settings;
+            if let Some(obj) = folder_entry.as_object_mut() {
+                obj.insert("settings".to_string(), py_settings);
+            }
         }
 
         folders.push(folder_entry);
@@ -336,11 +351,15 @@ pub fn package_multi_workspace_umbrella<W: Write>(
         let _ = header.set_username("");
         let _ = header.set_groupname("");
         header.set_cksum();
-        let _ = tar_builder.append_data(
-            &mut header,
-            format!("{}.code-workspace", workspace_display_name),
-            cw_bytes.as_slice(),
-        );
+        tar_builder
+            .append_data(
+                &mut header,
+                format!("{}.code-workspace", workspace_display_name),
+                cw_bytes.as_slice(),
+            )
+            .map_err(|e| {
+                ExportError::ArchiveError(format!("Failed to embed .code-workspace: {}", e))
+            })?;
     }
 
     // 5. Generate and embed comprehensive self-contained operational README.md
@@ -447,7 +466,9 @@ Each repository is pre-configured to build hermetically from the local `.dmz/sto
     let _ = header.set_username("");
     let _ = header.set_groupname("");
     header.set_cksum();
-    let _ = tar_builder.append_data(&mut header, "README.md", readme_content.as_bytes());
+    tar_builder
+        .append_data(&mut header, "README.md", readme_content.as_bytes())
+        .map_err(|e| ExportError::ArchiveError(format!("Failed to embed README.md: {}", e)))?;
 
     Ok(normalized_project)
 }

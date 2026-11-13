@@ -207,11 +207,13 @@ pub fn hydrate_offline_dependencies(
             let member_venv = dir.join(".venv");
             if member_venv.is_dir() {
                 let py_ver = crate::install::mappers::PyPiMapper::detect_python_version(dir);
-                crate::install::mappers::PyPiMapper::hydrate_venv_environment(
+                if let Err(e) = crate::install::mappers::PyPiMapper::hydrate_venv_environment(
                     dir,
                     &member_venv,
                     &py_ver,
-                );
+                ) {
+                    tracing::warn!(error = %e, "Failed to hydrate member .venv environment");
+                }
             }
 
             if is_umbrella {

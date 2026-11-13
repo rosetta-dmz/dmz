@@ -222,7 +222,7 @@ pub(super) fn path_browse_row(
             ui.add_sized(
                 egui::vec2(field_width, FIELD_BUTTON_HEIGHT),
                 egui::TextEdit::singleline(path_val)
-                    .vertical_align(egui::Align::Center)
+                    .align(egui::Align2::LEFT_CENTER)
                     .margin(egui::Margin::symmetric(8, 0)),
             );
             field_button(ui, btn_label, Some(btn_width)).clicked()
@@ -323,7 +323,7 @@ pub(super) fn dismissable_toast(ui: &mut egui::Ui, text: &str, open: &mut bool) 
             );
             let close_resp = ui.interact(
                 close_rect,
-                ui.id().with("toast_close"),
+                ui.scope_id().with("toast_close"),
                 egui::Sense::click(),
             );
             if close_resp.clicked() {

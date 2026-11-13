@@ -38,7 +38,12 @@ impl NpmMapper {
         if let Ok(content) = fs::read_to_string(&pkg_json_path) {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
                 let bin_dir = workspace_path.join("node_modules").join(".bin");
-                let _ = fs::create_dir_all(&bin_dir);
+                fs::create_dir_all(&bin_dir).map_err(|e| {
+                    InstallError::IoError(format!(
+                        "Failed to create npm bin dir {:?}: {}",
+                        bin_dir, e
+                    ))
+                })?;
 
                 let mut bin_map = std::collections::HashMap::new();
                 if let Some(bin_obj) = json.get("bin").and_then(|b| b.as_object()) {
@@ -299,11 +304,20 @@ fi
                 fallback = fallback_sh
             );
 
-            if fs::write(&sh_shim_path, sh_content).is_ok() {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(&sh_shim_path, fs::Permissions::from_mode(0o755));
+            match fs::write(&sh_shim_path, sh_content) {
+                Ok(()) => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        if let Err(e) =
+                            fs::set_permissions(&sh_shim_path, fs::Permissions::from_mode(0o755))
+                        {
+                            tracing::warn!(path = ?sh_shim_path, error = %e, "Failed to chmod .bin shim");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(path = ?sh_shim_path, error = %e, "Failed to write .bin sh shim");
                 }
             }
         }
@@ -346,7 +360,9 @@ if exist "%APP_DIR%\node_modules\{target}" (
                 fallback = fallback_cmd_str
             );
 
-            let _ = fs::write(&cmd_shim_path, cmd_content);
+            if let Err(e) = fs::write(&cmd_shim_path, cmd_content) {
+                tracing::warn!(path = ?cmd_shim_path, error = %e, "Failed to write .bin .cmd shim");
+            }
         }
 
         // 3. Windows PowerShell .ps1 wrapper
@@ -386,7 +402,9 @@ if (Test-Path $appTarget) {{
                 fallback = fallback_ps1_str
             );
 
-            let _ = fs::write(&ps1_shim_path, ps1_content);
+            if let Err(e) = fs::write(&ps1_shim_path, ps1_content) {
+                tracing::warn!(path = ?ps1_shim_path, error = %e, "Failed to write .bin .ps1 shim");
+            }
         }
     }
 
@@ -396,11 +414,21 @@ if (Test-Path $appTarget) {{
         pkg_name: &str,
     ) -> Result<(), InstallError> {
         let parent_store = archive_path.parent().unwrap_or(archive_path);
-        let cache_unpacked = parent_store.join(".unpacked");
+        let archive_stem = archive_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("default");
+        let cache_unpacked = parent_store.join(".unpacked").join(archive_stem);
 
         if cache_unpacked.join("package.json").exists() {
             // Instant CoW reflink or hardlink clone from unpacked cache
-            let _ = fs::create_dir_all(target_dir);
+            fs::create_dir_all(target_dir).map_err(|e| {
+                InstallError::IoError(format!(
+                    "Failed to create target directory {:?}: {}",
+                    target_dir, e
+                ))
+            })?;
             FastClone::clone_dir_recursive(&cache_unpacked, target_dir).map_err(|e| {
                 InstallError::MapperError(format!(
                     "Failed to fast-clone package {}: {}",
@@ -423,15 +451,23 @@ if (Test-Path $appTarget) {{
                     let path = entry.path();
                     if let Some(file_name) = path.file_name() {
                         let dest_path = target_dir.join(file_name);
-                        let _ = fs::rename(&path, &dest_path);
+                        fs::rename(&path, &dest_path).map_err(|e| {
+                            InstallError::IoError(format!(
+                                "Failed to flatten npm package entry {:?} -> {:?}: {}",
+                                path, dest_path, e
+                            ))
+                        })?;
                     }
                 }
             }
-            let _ = fs::remove_dir_all(&package_subdir);
+            if let Err(e) = fs::remove_dir_all(&package_subdir) {
+                tracing::warn!(dir = ?package_subdir, error = %e, "Failed to remove temporary package subdir");
+            }
         }
 
         // Seed the extracted structure in the store for instant subsequent member fast-cloning
         if !cache_unpacked.exists() {
+            let _ = fs::create_dir_all(cache_unpacked.parent().unwrap_or(parent_store));
             let _ = FastClone::clone_dir_recursive(target_dir, &cache_unpacked);
             // Mark cached store files read-only (Nix store immutability)
             #[cfg(unix)]

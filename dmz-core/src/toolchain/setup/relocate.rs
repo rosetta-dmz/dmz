@@ -1,5 +1,6 @@
 // Binary RPATH relocation and Mach-O / ELF code signing
 
+use super::super::ToolchainError;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
@@ -10,7 +11,7 @@ use std::process::Command;
 /// On macOS, uses `install_name_tool` to inject `@loader_path/../lib` and `@executable_path/../lib`,
 /// followed by ad-hoc codesigning (`codesign --force --sign -`) to satisfy Apple Silicon Gatekeeper.
 /// On Linux, uses `patchelf` to inject `$ORIGIN/../lib`.
-pub fn relocate_bundled_binaries(workspace_root: &Path) -> Result<(), String> {
+pub fn relocate_bundled_binaries(workspace_root: &Path) -> Result<(), ToolchainError> {
     let toolchains_dir = workspace_root.join(".dmz/toolchains");
     if !toolchains_dir.is_dir() {
         return Ok(());

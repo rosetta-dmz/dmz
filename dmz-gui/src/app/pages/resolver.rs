@@ -163,7 +163,7 @@ pub(super) fn show(
                     ui.add_sized(
                         egui::vec2(ui.available_width(), 32.0),
                         egui::TextEdit::singleline(&mut state.sidecar_id)
-                            .vertical_align(egui::Align::Center)
+                            .align(egui::Align2::LEFT_CENTER)
                             .margin(egui::Margin::symmetric(8, 0)),
                     );
                     ui.end_row();
@@ -172,7 +172,7 @@ pub(super) fn show(
                     ui.add_sized(
                         egui::vec2(ui.available_width(), 32.0),
                         egui::TextEdit::singleline(&mut state.sidecar_role)
-                            .vertical_align(egui::Align::Center)
+                            .align(egui::Align2::LEFT_CENTER)
                             .margin(egui::Margin::symmetric(8, 0))
                             .hint_text("member, sidecar, or service"),
                     );
@@ -183,7 +183,7 @@ pub(super) fn show(
                 ui.add_sized(
                     egui::vec2(ui.available_width(), 32.0),
                     egui::TextEdit::singleline(lockfile_path)
-                        .vertical_align(egui::Align::Center)
+                        .align(egui::Align2::LEFT_CENTER)
                         .margin(egui::Margin::symmetric(8, 0)),
                 );
                 ui.end_row();
@@ -205,7 +205,7 @@ pub(super) fn show(
                 ui.add_sized(
                     egui::vec2(ui.available_width(), 32.0),
                     egui::TextEdit::singleline(&mut state.target_platform)
-                        .vertical_align(egui::Align::Center)
+                        .align(egui::Align2::LEFT_CENTER)
                         .margin(egui::Margin::symmetric(8, 0))
                         .hint_text("Optional (e.g. macos-arm64, linux-x86_64, host default)"),
                 );
@@ -354,9 +354,11 @@ pub(super) fn show(
                             } else {
                                 dmz_core::workspace::MemberRole::Member
                             };
+                            let normalized_sc_path =
+                                dmz_core::workspace::normalize_member_path(&ws_canon, &sc_canon);
                             let mut sidecar_m = dmz_core::workspace::WorkspaceMember::new(
                                 &sidecar_id,
-                                &sc_canon,
+                                normalized_sc_path,
                                 sc_role,
                             );
                             sidecar_m.populate_detected_defaults(&sc_canon, &ws_canon);
@@ -370,15 +372,29 @@ pub(super) fn show(
                                 &ws_canon, &proj_cfg, None, target_opt,
                             ) {
                                 Ok(unified) => {
-                                    let _ = proj_cfg.save_to_file(&ws_canon.join("dmz-workspace.toml"));
+                                    let manifest_target = ws_canon.join("dmz-workspace.toml");
+                                    let manifest_save_err = proj_cfg.save_to_file(&manifest_target).err();
+                                    if let Some(ref e) = manifest_save_err {
+                                        tracing::warn!(
+                                            path = ?manifest_target,
+                                            error = %e,
+                                            "Failed to save dmz-workspace.toml after dual-workspace resolve"
+                                        );
+                                    }
                                     if let Err(e) = unified.save(&out) {
                                         ResolverTaskOutcome::StatusOnly(format!(
                                             "Error saving dual lockfile: {e}"
                                         ))
                                     } else {
+                                        let suffix = if manifest_save_err.is_some() {
+                                            " (warning: failed to write dmz-workspace.toml)"
+                                        } else {
+                                            " (saved dmz-workspace.toml)"
+                                        };
                                         ResolverTaskOutcome::ResolveSuccess {
                                             status_message: format!(
-                                                "Resolved dual workspaces (saved dmz-workspace.toml): {} total packages. Sig: {}",
+                                                "Resolved dual workspaces{}: {} total packages. Sig: {}",
+                                                suffix,
                                                 unified.packages.len(),
                                                 &unified.closure_signature
                                                     [..12.min(unified.closure_signature.len())]

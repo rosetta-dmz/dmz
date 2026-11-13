@@ -11,16 +11,27 @@ pub fn safe_socket_path(workspace: &Path, member_id: &str) -> PathBuf {
     let mut hasher = Sha256::new();
     let canonical = fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     hasher.update(canonical.to_string_lossy().as_bytes());
-    let hash_full = format!("{:x}", hasher.finalize());
+    let hash_full = crate::archive::exporter::hashing::format_sha256_hex(&hasher.finalize());
     let hash = hash_full.get(..10).unwrap_or(&hash_full);
 
     #[cfg(unix)]
     {
         let socket_dir = std::env::temp_dir().join("dmz");
-        let _ = fs::create_dir_all(&socket_dir);
-        {
+        if let Err(e) = fs::create_dir_all(&socket_dir) {
+            tracing::warn!(
+                dir = ?socket_dir,
+                error = %e,
+                "Failed to create Unix socket directory"
+            );
+        } else {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&socket_dir, fs::Permissions::from_mode(0o700));
+            if let Err(e) = fs::set_permissions(&socket_dir, fs::Permissions::from_mode(0o700)) {
+                tracing::warn!(
+                    dir = ?socket_dir,
+                    error = %e,
+                    "Failed to set 0o700 permissions on Unix socket directory"
+                );
+            }
         }
 
         // POSIX sockaddr_un.sun_path hard limits: 104 bytes on macOS/BSD, 108 bytes on Linux.
@@ -35,7 +46,8 @@ pub fn safe_socket_path(workspace: &Path, member_id: &str) -> PathBuf {
             // Member ID is too long for POSIX sun_path limit; generate bounded hash suffix
             let mut id_hasher = Sha256::new();
             id_hasher.update(member_id.as_bytes());
-            let id_hash_full = format!("{:x}", id_hasher.finalize());
+            let id_hash_full =
+                crate::archive::exporter::hashing::format_sha256_hex(&id_hasher.finalize());
             let id_short = id_hash_full.get(..8).unwrap_or(&id_hash_full);
             let bounded = format!("dmz_{}_{}.sock", hash, id_short);
             socket_dir.join(bounded)

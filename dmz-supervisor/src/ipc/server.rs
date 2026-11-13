@@ -108,7 +108,13 @@ impl IpcServer {
             .await
             .unwrap_or(false)
         {
-            let _ = tokio::fs::remove_file(&self.config.socket_path).await;
+            if let Err(e) = tokio::fs::remove_file(&self.config.socket_path).await {
+                warn!(
+                    path = ?self.config.socket_path,
+                    error = %e,
+                    "Failed to remove stale Unix IPC socket before bind"
+                );
+            }
         }
 
         let listener = UnixListener::bind(&self.config.socket_path).map_err(|e| {
@@ -164,10 +170,14 @@ impl IpcServer {
         }
 
         // Gracefully drain in-flight connection handlers with bounded timeout
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        if tokio::time::timeout(std::time::Duration::from_millis(500), async {
             while connection_set.join_next().await.is_some() {}
         })
-        .await;
+        .await
+        .is_err()
+        {
+            warn!("Timed out draining active Unix IPC connection handlers during shutdown");
+        }
 
         info!("Unix IPC server stopped");
         Ok(())
@@ -175,19 +185,97 @@ impl IpcServer {
 
     #[cfg(windows)]
     pub(crate) async fn listen_windows(&self) -> Result<(), IpcServerError> {
-        use tokio::net::windows::named_pipe::ServerOptions;
+        use std::ffi::c_void;
+        use std::path::Path;
+        use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+
+        /// RAII guard owning a heap-allocated Windows `PSECURITY_DESCRIPTOR` restricted to Owner/SYSTEM/Admins.
+        struct OwnerPipeSecurity {
+            descriptor: PSECURITY_DESCRIPTOR,
+            attrs: SECURITY_ATTRIBUTES,
+        }
+
+        impl OwnerPipeSecurity {
+            fn new_owner_only() -> Result<Self, std::io::Error> {
+                // Protected DACL ("D:P"): Full generic access exclusively to Owner Rights (OW), SYSTEM (SY), and Administrators (BA).
+                let sddl_utf16: Vec<u16> = "D:P(A;;GA;;;OW)(A;;GA;;;SY)(A;;GA;;;BA)\0"
+                    .encode_utf16()
+                    .collect();
+                let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+                // SAFETY: `sddl_utf16` is NUL-terminated UTF-16 and `descriptor` receives an Advapi32-allocated SD freed in `Drop`.
+                let ok = unsafe {
+                    ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                        sddl_utf16.as_ptr(),
+                        SDDL_REVISION_1,
+                        &mut descriptor,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if ok == 0 || descriptor.is_null() {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let attrs = SECURITY_ATTRIBUTES {
+                    nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                    lpSecurityDescriptor: descriptor,
+                    bInheritHandle: 0,
+                };
+                Ok(Self { descriptor, attrs })
+            }
+
+            fn as_mut_ptr(&mut self) -> *mut c_void {
+                &mut self.attrs as *mut SECURITY_ATTRIBUTES as *mut c_void
+            }
+        }
+
+        impl Drop for OwnerPipeSecurity {
+            fn drop(&mut self) {
+                if !self.descriptor.is_null() {
+                    // SAFETY: `self.descriptor` was allocated by `ConvertStringSecurityDescriptorToSecurityDescriptorW`.
+                    unsafe {
+                        LocalFree(self.descriptor);
+                    }
+                    self.descriptor = std::ptr::null_mut();
+                }
+            }
+        }
+
+        /// Binds a named pipe instance synchronously so the non-`Send` `OwnerPipeSecurity`
+        /// pointers are dropped before the async accept loop yields across `.await`.
+        fn create_owner_named_pipe(
+            pipe_name: &str,
+            socket_path: &Path,
+            first_instance: bool,
+        ) -> Result<NamedPipeServer, IpcServerError> {
+            let mut pipe_sec = OwnerPipeSecurity::new_owner_only().map_err(|e| {
+                IpcServerError::SocketBindFailed {
+                    path: socket_path.to_path_buf(),
+                    source: e,
+                }
+            })?;
+
+            let mut opts = ServerOptions::new();
+            opts.first_pipe_instance(first_instance);
+            opts.reject_remote_clients(true);
+            // SAFETY: `pipe_sec.as_mut_ptr()` points to a valid stack `SECURITY_ATTRIBUTES` initialized above.
+            // `CreateNamedPipeW` captures the security descriptor during handle creation, so `pipe_sec` can drop on return.
+            unsafe { opts.create_with_security_attributes_raw(pipe_name, pipe_sec.as_mut_ptr()) }
+                .map_err(|e| IpcServerError::SocketBindFailed {
+                    path: socket_path.to_path_buf(),
+                    source: e,
+                })
+        }
 
         let pipe_name = self.config.socket_path.to_string_lossy().into_owned();
         info!(pipe = %pipe_name, "DMZ Windows Named Pipe IPC server listening");
 
-        // Per official Tokio docs: claim first pipe instance before entering accept loop
-        let mut server = ServerOptions::new()
-            .first_pipe_instance(true)
-            .create(&pipe_name)
-            .map_err(|e| IpcServerError::SocketBindFailed {
-                path: self.config.socket_path.clone(),
-                source: e,
-            })?;
+        // Per official Tokio docs: claim first pipe instance before entering accept loop,
+        // rejecting remote network clients and restricting DACL to local owner/admins/SYSTEM.
+        let mut server = create_owner_named_pipe(&pipe_name, &self.config.socket_path, true)?;
 
         let mut connection_set = tokio::task::JoinSet::new();
 
@@ -198,12 +286,7 @@ impl IpcServer {
                         Ok(()) => {
                             let connected_client = server;
                             // Instantiate replacement pipe BEFORE spawning handler so incoming clients never get NotFound
-                            server = ServerOptions::new()
-                                .create(&pipe_name)
-                                .map_err(|e| IpcServerError::SocketBindFailed {
-                                    path: self.config.socket_path.clone(),
-                                    source: e,
-                                })?;
+                            server = create_owner_named_pipe(&pipe_name, &self.config.socket_path, false)?;
                             let ctx = self.dispatch_context();
                             connection_set.spawn(async move {
                                 handle_connection(connected_client, ctx).await;
@@ -219,10 +302,16 @@ impl IpcServer {
         }
 
         // Drain active connections with a bounded timeout
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        if tokio::time::timeout(std::time::Duration::from_millis(500), async {
             while connection_set.join_next().await.is_some() {}
         })
-        .await;
+        .await
+        .is_err()
+        {
+            warn!(
+                "Timed out draining active Windows Named Pipe connection handlers during shutdown"
+            );
+        }
 
         info!("Windows Named Pipe server stopped");
         Ok(())

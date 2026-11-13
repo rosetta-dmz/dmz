@@ -1,4 +1,5 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
+use super::super::ToolchainError;
 use super::{
     emit_non_relocatable_notice, is_non_standalone_path, push_unique_path, ToolchainDiscoverer,
 };
@@ -16,7 +17,7 @@ impl ToolchainDiscoverer for AppleSdkDiscoverer {
         ToolchainEcosystem::AppleSdk
     }
 
-    fn discover(&self) -> Result<Option<DiscoveredToolchain>, String> {
+    fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         let mut candidates: Vec<PathBuf> = Vec::new();
 
         // Explicit DEVELOPER_DIR or SDKROOT environment variables

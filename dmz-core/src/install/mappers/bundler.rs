@@ -23,14 +23,17 @@ impl BundlerMapper {
 
         // Automatically provision .bundle/config pointing Bundler to local vendor path
         let bundle_config_dir = workspace_path.join(".bundle");
-        let _ = fs::create_dir_all(&bundle_config_dir);
+        fs::create_dir_all(&bundle_config_dir).map_err(|e| {
+            InstallError::IoError(format!("Failed to create .bundle config dir: {}", e))
+        })?;
         let config_path = bundle_config_dir.join("config");
         let config_content = r#"---
 BUNDLE_PATH: "vendor/bundle"
 BUNDLE_FROZEN: "true"
 BUNDLE_LOCAL: "true"
 "#;
-        let _ = fs::write(config_path, config_content);
+        fs::write(&config_path, config_content)
+            .map_err(|e| InstallError::IoError(format!("Failed to write .bundle/config: {}", e)))?;
 
         Ok(())
     }

@@ -1,7 +1,7 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
+use super::super::ToolchainError;
 use super::{
-    emit_non_relocatable_notice, is_non_standalone_path, push_system_bin_candidates,
-    push_unique_path, ToolchainDiscoverer,
+    push_system_bin_candidates, push_unique_path, select_preferred_verified, ToolchainDiscoverer,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -16,7 +16,7 @@ impl ToolchainDiscoverer for MakeDiscoverer {
         ToolchainEcosystem::Make
     }
 
-    fn discover(&self) -> Result<Option<DiscoveredToolchain>, String> {
+    fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         let mut candidates: Vec<PathBuf> = Vec::new();
 
         if let Ok(root) = std::env::var("MAKE_HOME") {
@@ -56,46 +56,22 @@ impl ToolchainDiscoverer for MakeDiscoverer {
             return Ok(None);
         }
 
-        candidates.sort_by_key(|c| is_non_standalone_path(c));
-
-        let mut chosen_make: Option<PathBuf> = None;
-        let mut chosen_version: Option<String> = None;
-
-        for candidate in candidates {
-            if is_non_standalone_path(&candidate) {
-                emit_non_relocatable_notice(&candidate);
+        let Some((make_bin, version)) = select_preferred_verified(candidates, |candidate| {
+            let output = Command::new(candidate).arg("--version").output().ok()?;
+            if !output.status.success() {
+                return None;
             }
-
-            if let Ok(output) = Command::new(&candidate).arg("--version").output() {
-                if output.status.success() {
-                    let version_str = String::from_utf8_lossy(&output.stdout)
-                        .lines()
-                        .next()
-                        .unwrap_or("make")
-                        .trim()
-                        .to_string();
-
-                    let is_non_standalone = is_non_standalone_path(&candidate);
-                    let should_replace = match &chosen_make {
-                        None => true,
-                        Some(prev) => !is_non_standalone && is_non_standalone_path(prev),
-                    };
-                    if should_replace {
-                        chosen_make = Some(candidate);
-                        chosen_version = Some(version_str);
-                        if !is_non_standalone {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        let make_bin = match chosen_make {
-            Some(bin) => bin,
-            None => return Ok(None),
+            Some(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or("make")
+                    .trim()
+                    .to_string(),
+            )
+        }) else {
+            return Ok(None);
         };
-        let version = chosen_version.unwrap_or_else(|| "make".to_string());
         let root_dir = make_bin.parent().unwrap_or(Path::new("")).to_path_buf();
 
         info!(

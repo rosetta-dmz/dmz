@@ -36,37 +36,47 @@ pub fn run_bundle(args: BundleArgs) -> anyhow::Result<i32> {
     let effective_store =
         super::resolve_workspace_relative_path(&ws_canon, &args.store, DEFAULT_STORE_PATH);
 
-    let multi_workspace =
-        dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(&ws_canon)
-            .map(|(cfg, _)| cfg)
-            .or_else(|| {
-                args.sidecar.as_ref().map(|sc| {
-                    let primary = dmz_core::workspace::WorkspaceMember::new(
-                        "primary",
-                        &ws_canon,
-                        dmz_core::workspace::MemberRole::Primary,
-                    );
-                    let sidecar_m = dmz_core::workspace::WorkspaceMember::new(
-                        "sidecar",
-                        sc,
-                        dmz_core::workspace::MemberRole::Sidecar,
-                    );
-                    let proj_name = ws_canon
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("project");
-                    dmz_core::workspace::WorkspaceProjectConfig::new(
-                        proj_name,
-                        vec![primary, sidecar_m],
-                    )
-                })
-            })
-            .or_else(|| {
-                dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile(
-                    &ws_canon,
-                    &effective_lockfile,
+    let discovered_manifest =
+        match dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest_checked(
+            &ws_canon,
+        ) {
+            Ok(opt) => opt.map(|(cfg, _)| cfg),
+            Err(e) => {
+                error!("Failed to load dmz-workspace.toml: {}", e);
+                return Ok(1);
+            }
+        };
+
+    let multi_workspace = discovered_manifest
+        .or_else(|| {
+            args.sidecar.as_ref().map(|sc| {
+                let sc_canon = std::fs::canonicalize(sc).unwrap_or_else(|_| sc.clone());
+                let primary = dmz_core::workspace::WorkspaceMember::new(
+                    "primary",
+                    std::path::Path::new("."),
+                    dmz_core::workspace::MemberRole::Primary,
+                );
+                let sidecar_m = dmz_core::workspace::WorkspaceMember::new(
+                    "sidecar",
+                    dmz_core::workspace::normalize_member_path(&ws_canon, &sc_canon),
+                    dmz_core::workspace::MemberRole::Sidecar,
+                );
+                let proj_name = ws_canon
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("project");
+                dmz_core::workspace::WorkspaceProjectConfig::new(
+                    proj_name,
+                    vec![primary, sidecar_m],
                 )
-            });
+            })
+        })
+        .or_else(|| {
+            dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile(
+                &ws_canon,
+                &effective_lockfile,
+            )
+        });
 
     // Resolve manifests if lockfile is missing or refresh_lock is requested
     let should_resolve = args.refresh_lock || !effective_lockfile.exists();

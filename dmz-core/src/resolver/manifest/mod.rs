@@ -1,4 +1,5 @@
 pub mod cargo;
+pub mod go;
 pub mod npm;
 pub mod other;
 pub mod python;
@@ -6,6 +7,7 @@ pub mod types;
 
 pub use types::{DependencySpec, Ecosystem, ManifestError, ManifestInfo};
 
+use std::collections::HashSet;
 use std::path::Path;
 
 pub struct ManifestScanner;
@@ -23,6 +25,7 @@ impl ManifestScanner {
         cargo::CargoManifestScanner::scan(root_path, &mut results)?;
         npm::NpmManifestScanner::scan(root_path, &mut results)?;
         python::PythonManifestScanner::scan(root_path, &mut results)?;
+        go::GoManifestScanner::scan(root_path, &mut results)?;
         other::OtherManifestScanner::scan(root_path, &mut results)?;
         Ok(results)
     }
@@ -50,9 +53,11 @@ impl ManifestScanner {
 /// Merges locked transitive dependencies into direct dependencies, upgrading wildcard/range versions
 /// on direct dependencies to their exact locked version and appending unseen transitive packages.
 pub fn merge_locked_dependencies(direct: &mut Vec<DependencySpec>, locked: Vec<DependencySpec>) {
+    let mut upgraded_indices = HashSet::new();
     for lock_dep in locked {
-        if let Some(existing) = direct.iter_mut().find(|d| {
-            d.ecosystem == lock_dep.ecosystem
+        if let Some((idx, existing)) = direct.iter_mut().enumerate().find(|(i, d)| {
+            !upgraded_indices.contains(i)
+                && d.ecosystem == lock_dep.ecosystem
                 && (d.name == lock_dep.name
                     || (d.ecosystem == Ecosystem::PyPI
                         && python::PythonManifestScanner::normalize_pypi_name(&d.name)
@@ -61,7 +66,15 @@ pub fn merge_locked_dependencies(direct: &mut Vec<DependencySpec>, locked: Vec<D
             if !lock_dep.version_req.is_empty() && lock_dep.version_req != "*" {
                 existing.version_req = lock_dep.version_req;
             }
-        } else {
+            if !lock_dep.dependencies.is_empty() {
+                existing.dependencies = lock_dep.dependencies;
+            }
+            upgraded_indices.insert(idx);
+        } else if !direct.iter().any(|d| {
+            d.ecosystem == lock_dep.ecosystem
+                && d.name == lock_dep.name
+                && d.version_req == lock_dep.version_req
+        }) {
             direct.push(lock_dep);
         }
     }

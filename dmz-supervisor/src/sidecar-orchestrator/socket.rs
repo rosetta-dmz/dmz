@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::process::Child;
 use tokio::time::sleep;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::child::ManagedChild;
 use super::types::SidecarOrchestratorError;
@@ -31,12 +31,26 @@ pub fn prepare_safe_socket(
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+                if let Err(e) =
+                    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                {
+                    warn!(
+                        dir = ?parent,
+                        error = %e,
+                        "Failed to set 0o700 permissions on sidecar socket directory"
+                    );
+                }
             }
         }
     }
 
-    let _ = core_cleanup_stale_socket(&sock_path);
+    if let Err(e) = core_cleanup_stale_socket(&sock_path) {
+        warn!(
+            socket = ?sock_path,
+            error = %e,
+            "Failed to clean up stale sidecar socket prior to launch"
+        );
+    }
     Ok(sock_path)
 }
 

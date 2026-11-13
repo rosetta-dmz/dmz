@@ -203,6 +203,31 @@ fn test_infer_member_execution_tauri_and_npm() {
         .expect("infer member execution for pnpm");
     assert_eq!(pnpm_cmd, "pnpm");
     assert_eq!(pnpm_args, vec!["run", "tauri", "dev"]);
+
+    // With explicit workspace_root, nested members (e.g. apps/web) detect root pnpm-workspace.yaml
+    let mono_root = temp_dir.path().join("mono_ws");
+    let nested_web = mono_root.join("apps/web");
+    fs::create_dir_all(&nested_web).expect("create nested web dir");
+    fs::write(
+        mono_root.join("pnpm-workspace.yaml"),
+        "packages:\n  - 'apps/*'\n",
+    )
+    .expect("write pnpm-workspace.yaml");
+    fs::write(
+        nested_web.join("package.json"),
+        r#"{"name": "web", "scripts": {"dev": "vite"}}"#,
+    )
+    .expect("write nested package.json");
+    let nested_member = dmz_core::workspace::WorkspaceMember::new(
+        "web",
+        "apps/web",
+        dmz_core::workspace::MemberRole::Primary,
+    );
+    let (mono_cmd, mono_args) =
+        SidecarOrchestrator::infer_member_execution_in(&mono_root, &nested_web, &nested_member)
+            .expect("infer nested monorepo pnpm command");
+    assert_eq!(mono_cmd, "pnpm");
+    assert_eq!(mono_args, vec!["run", "dev"]);
 }
 
 #[test]

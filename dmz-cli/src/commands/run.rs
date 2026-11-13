@@ -13,50 +13,60 @@ pub fn run_run(args: RunArgs) -> anyhow::Result<i32> {
         warn!("--no-sandbox requested: Workspace members will execute under host user-space supervision.");
     }
 
-    let (mut project_config, effective_workspace_root) = if let Some((cfg, manifest_file)) =
-        dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(&args.workspace)
-    {
-        let root = manifest_file
-            .parent()
-            .unwrap_or(Path::new("."))
-            .to_path_buf();
-        let root = std::fs::canonicalize(&root).unwrap_or(root);
-        info!(
-            manifest = ?manifest_file,
-            "Loaded workspace project configuration"
-        );
-        (cfg, root)
-    } else {
-        let ws_canon =
-            std::fs::canonicalize(&args.workspace).unwrap_or_else(|_| args.workspace.clone());
-        let ws_name = ws_canon
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "workspace".to_string());
+    let (mut project_config, effective_workspace_root) =
+        match dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest_checked(
+            &args.workspace,
+        ) {
+            Ok(Some((cfg, manifest_file))) => {
+                let root = manifest_file
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .to_path_buf();
+                let root = std::fs::canonicalize(&root).unwrap_or(root);
+                info!(
+                    manifest = ?manifest_file,
+                    "Loaded workspace project configuration"
+                );
+                (cfg, root)
+            }
+            Ok(None) => {
+                let ws_canon = std::fs::canonicalize(&args.workspace)
+                    .unwrap_or_else(|_| args.workspace.clone());
+                let ws_name = ws_canon
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "workspace".to_string());
 
-        let mut members = Vec::new();
-        members.push(dmz_core::workspace::WorkspaceMember::new(
-            "primary",
-            Path::new("."),
-            dmz_core::workspace::MemberRole::Primary,
-        ));
+                let mut members = Vec::new();
+                members.push(dmz_core::workspace::WorkspaceMember::new(
+                    "primary",
+                    Path::new("."),
+                    dmz_core::workspace::MemberRole::Primary,
+                ));
 
-        if let Some(ref sc) = args.sidecar {
-            let sc_canon = std::fs::canonicalize(sc).unwrap_or_else(|_| sc.clone());
-            let sc_name = sc_canon
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "companion".to_string());
-            members.push(dmz_core::workspace::WorkspaceMember::new(
-                sc_name,
-                sc_canon,
-                dmz_core::workspace::MemberRole::Sidecar,
-            ));
-        }
+                if let Some(ref sc) = args.sidecar {
+                    let sc_canon = std::fs::canonicalize(sc).unwrap_or_else(|_| sc.clone());
+                    let sc_name = sc_canon
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "companion".to_string());
+                    let normalized_sc =
+                        dmz_core::workspace::normalize_member_path(&ws_canon, &sc_canon);
+                    members.push(dmz_core::workspace::WorkspaceMember::new(
+                        sc_name,
+                        normalized_sc,
+                        dmz_core::workspace::MemberRole::Sidecar,
+                    ));
+                }
 
-        let cfg = dmz_core::workspace::WorkspaceProjectConfig::new(ws_name, members);
-        (cfg, ws_canon)
-    };
+                let cfg = dmz_core::workspace::WorkspaceProjectConfig::new(ws_name, members);
+                (cfg, ws_canon)
+            }
+            Err(e) => {
+                error!("Failed to load workspace manifest: {}", e);
+                return Ok(1);
+            }
+        };
 
     // Auto-detect or apply command override for all members without an explicit command
     for member in &mut project_config.members {
@@ -79,7 +89,11 @@ pub fn run_run(args: RunArgs) -> anyhow::Result<i32> {
             let member_dir = std::fs::canonicalize(&member_dir).unwrap_or(member_dir);
 
             if let Ok((cmd, cmd_args)) =
-                dmz_supervisor::SidecarOrchestrator::infer_member_execution(&member_dir, member)
+                dmz_supervisor::SidecarOrchestrator::infer_member_execution_in(
+                    &effective_workspace_root,
+                    &member_dir,
+                    member,
+                )
             {
                 member.exec_command = Some(cmd);
                 if !cmd_args.is_empty() {

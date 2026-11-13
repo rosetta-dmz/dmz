@@ -100,9 +100,7 @@ fn test_airgap_offline_install_python_workflow() -> Result<(), Box<dyn std::erro
     let archive_path = pkg_store_dir.join(&archive_filename);
     fs::write(&archive_path, &payload)?;
 
-    let mut hasher = Sha256::new();
-    hasher.update(&payload);
-    let computed_sha256 = format!("{:x}", hasher.finalize());
+    let computed_sha256 = dmz_core::archive::format_sha256_hex(&Sha256::digest(&payload));
 
     let locked_pkg = LockedPackage {
         name: pkg_name.to_string(),
@@ -174,9 +172,7 @@ fn test_python_wheel_offline_install_and_console_script_hydration() {
     let archive_path = pkg_store_dir.join(format!("{}-{}.archive", safe_name, pkg_version));
     fs::write(&archive_path, &wheel_bytes).unwrap();
 
-    let mut hasher = Sha256::new();
-    hasher.update(&wheel_bytes);
-    let computed_sha256 = format!("{:x}", hasher.finalize());
+    let computed_sha256 = dmz_core::archive::format_sha256_hex(&Sha256::digest(&wheel_bytes));
 
     // 2. Create dmz.lock referencing this package
     let locked_pkg = LockedPackage {

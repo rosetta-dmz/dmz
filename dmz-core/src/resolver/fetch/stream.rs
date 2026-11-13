@@ -1,5 +1,6 @@
 //! Streaming network transport with constant O(1) memory overhead and exponential backoff retry.
 
+use crate::resolver::ResolverError;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -18,7 +19,7 @@ pub fn stream_download_with_retry(
     tmp_path: &Path,
     artifact_path: &Path,
     pkg_name: &str,
-) -> Result<String, String> {
+) -> Result<String, ResolverError> {
     let mut last_err = String::new();
     let mut computed_hash = String::new();
 
@@ -26,11 +27,11 @@ pub fn stream_download_with_retry(
         let mut response = match client.get(download_url).send() {
             Ok(resp) => {
                 if !resp.status().is_success() {
-                    return Err(format!(
+                    return Err(ResolverError::Network(format!(
                         "Failed to download {}: server returned status {}",
                         download_url,
                         resp.status()
-                    ));
+                    )));
                 }
                 resp
             }
@@ -41,17 +42,17 @@ pub fn stream_download_with_retry(
                     std::thread::sleep(std::time::Duration::from_millis(delay));
                     continue;
                 }
-                return Err(last_err);
+                return Err(ResolverError::Network(last_err));
             }
         };
 
         let mut out_file = match std::fs::File::create(tmp_path) {
             Ok(f) => f,
             Err(e) => {
-                return Err(format!(
+                return Err(ResolverError::Io(format!(
                     "Failed to create temporary file {:?}: {}",
                     tmp_path, e
-                ));
+                )));
             }
         };
 
@@ -95,32 +96,35 @@ pub fn stream_download_with_retry(
                 std::thread::sleep(std::time::Duration::from_millis(delay));
                 continue;
             }
-            return Err(last_err);
+            return Err(ResolverError::Network(last_err));
         }
 
         if let Err(e) = out_file.flush() {
             let _ = std::fs::remove_file(tmp_path);
-            return Err(format!("Failed to flush {:?}: {}", tmp_path, e));
+            return Err(ResolverError::Io(format!(
+                "Failed to flush {:?}: {}",
+                tmp_path, e
+            )));
         }
         drop(out_file);
 
         if let Err(e) = std::fs::rename(tmp_path, artifact_path) {
             let _ = std::fs::remove_file(tmp_path);
-            return Err(format!(
+            return Err(ResolverError::Io(format!(
                 "Failed to rename {:?} to {:?}: {}",
                 tmp_path, artifact_path, e
-            ));
+            )));
         }
 
-        computed_hash = format!("{:x}", hasher.finalize());
+        computed_hash = crate::archive::exporter::hashing::format_sha256_hex(&hasher.finalize());
         break;
     }
 
     if computed_hash.is_empty() {
-        return Err(format!(
+        return Err(ResolverError::Network(format!(
             "Failed to download {} after {} attempts: {}",
             pkg_name, MAX_DOWNLOAD_ATTEMPTS, last_err
-        ));
+        )));
     }
 
     Ok(computed_hash)

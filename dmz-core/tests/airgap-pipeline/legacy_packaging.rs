@@ -2,7 +2,6 @@ use dmz_core::packaging::{AirGapImporter, BuildConfig, BuildTarget, PackageBuild
 use dmz_core::resolver::lockfile::{DmzLockfile, LockedPackage};
 use dmz_core::resolver::manifest::Ecosystem;
 use dmz_core::vcs::GitProvider;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::Path;
@@ -151,10 +150,7 @@ fn test_air_gap_import_and_verification() {
     encoder.finish().unwrap();
 
     // Compute expected SHA-256 hash of the archive
-    let mut f = File::open(&archive_path).unwrap();
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut f, &mut hasher).unwrap();
-    let expected_hash = format!("{:x}", hasher.finalize());
+    let expected_hash = dmz_core::archive::calculate_file_sha256(&archive_path).unwrap();
 
     // Test offline import and verification
     let result = AirGapImporter::import_and_verify(&archive_path, &expected_hash, &extract_path);

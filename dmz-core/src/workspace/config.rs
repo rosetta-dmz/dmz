@@ -2,7 +2,9 @@
 // Re-exports configuration schemas, ecosystem inference, virtual layouts,
 // process environments, manifest discovery, and socket lifecycle helpers.
 
-pub use super::discovery::{discover_or_from_lockfile, discover_workspace_manifest};
+pub use super::discovery::{
+    discover_or_from_lockfile, discover_workspace_manifest, discover_workspace_manifest_checked,
+};
 pub use super::env::{
     build_member_env, host_target_triple, inject_node_env, inject_offline_env, inject_python_env,
     resolve_executable_in_env,
@@ -13,7 +15,8 @@ pub use super::inference::{
 };
 pub use super::layout::{canonical_virtual_path, resolve_member_layouts, sanitize_folder_name};
 pub use super::schema::{
-    IpcBridgeConfig, MemberRole, ResolvedMemberLayout, WorkspaceMember, WorkspaceProjectConfig,
+    normalize_member_path, IpcBridgeConfig, MemberRole, ResolvedMemberLayout, WorkspaceMember,
+    WorkspaceProjectConfig,
 };
 pub use super::socket::{cleanup_stale_socket, safe_socket_path};
 

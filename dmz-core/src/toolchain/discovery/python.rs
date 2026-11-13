@@ -1,7 +1,8 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
+use super::super::ToolchainError;
 use super::{
     collect_files_recursive, emit_non_relocatable_notice, is_non_standalone_path,
-    push_system_bin_candidates, push_unique_path, ToolchainDiscoverer,
+    push_system_bin_candidates, push_unique_path, select_preferred_candidate, ToolchainDiscoverer,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ impl ToolchainDiscoverer for PythonDiscoverer {
         ToolchainEcosystem::Python
     }
 
-    fn discover(&self) -> Result<Option<DiscoveredToolchain>, String> {
+    fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         let mut py_candidates: Vec<PathBuf> = Vec::new();
 
         // 1. Virtualenv if active
@@ -60,28 +61,8 @@ impl ToolchainDiscoverer for PythonDiscoverer {
             return Ok(None);
         }
 
-        py_candidates.sort_by_key(|c| is_non_standalone_path(c));
-
-        let mut chosen_py: Option<PathBuf> = None;
-        for candidate in py_candidates {
-            if is_non_standalone_path(&candidate) {
-                emit_non_relocatable_notice(&candidate);
-            }
-            let should_replace = match &chosen_py {
-                None => true,
-                Some(prev) => !is_non_standalone_path(&candidate) && is_non_standalone_path(prev),
-            };
-            if should_replace {
-                chosen_py = Some(candidate.clone());
-                if !is_non_standalone_path(&candidate) {
-                    break;
-                }
-            }
-        }
-
-        let py_bin = match chosen_py {
-            Some(p) => p,
-            None => return Ok(None),
+        let Some(py_bin) = select_preferred_candidate(py_candidates) else {
+            return Ok(None);
         };
 
         let version = Command::new(&py_bin)

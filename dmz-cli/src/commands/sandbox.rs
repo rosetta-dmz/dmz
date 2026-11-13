@@ -31,15 +31,21 @@ pub fn run_sandbox(
     let effective_closure = std::fs::canonicalize(&effective_closure).unwrap_or(effective_closure);
 
     let ipc_socket_path =
-        dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(&ws_canon)
-            .map(|(project, _)| {
-                dmz_core::workspace::safe_socket_path(&ws_canon, &project.ipc.socket_id)
-            })
-            .or_else(|| {
-                sc_canon
-                    .as_ref()
-                    .map(|_| dmz_core::workspace::safe_socket_path(&ws_canon, "sidecar"))
-            });
+        match dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest_checked(
+            &ws_canon,
+        ) {
+            Ok(Some((project, _))) => Some(dmz_core::workspace::safe_socket_path(
+                &ws_canon,
+                &project.ipc.socket_id,
+            )),
+            Ok(None) => sc_canon
+                .as_ref()
+                .map(|_| dmz_core::workspace::safe_socket_path(&ws_canon, "sidecar")),
+            Err(e) => {
+                error!("Failed to load dmz-workspace.toml: {}", e);
+                return Ok(1);
+            }
+        };
 
     if let Some(ref sock) = ipc_socket_path {
         if let Some(posix_warn) = dmz_core::workspace::check_socket_path_length(sock) {

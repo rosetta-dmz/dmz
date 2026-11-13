@@ -1,5 +1,6 @@
 // Hermetic compiler wrappers and Node package manager symlinks
 
+use super::super::ToolchainError;
 #[cfg(unix)]
 use std::fs;
 use std::path::Path;
@@ -7,7 +8,7 @@ use std::path::Path;
 /// Generate hermetic wrapper scripts for Clang/LLVM compiler binaries to ensure
 /// the Apple SDK sysroot (-isysroot) is automatically passed on macOS.
 #[cfg(unix)]
-pub fn generate_clang_wrappers(workspace_root: &Path) -> Result<(), String> {
+pub fn generate_clang_wrappers(workspace_root: &Path) -> Result<(), ToolchainError> {
     let cc_bin = workspace_root.join(".dmz/toolchains/cc/bin");
     if !cc_bin.is_dir() {
         return Ok(());
@@ -153,7 +154,10 @@ exec "$_REAL" "$@"
                         let _ = fs::remove_file(&orig_path);
                     } else {
                         fs::rename(&orig_path, &real_path).map_err(|e| {
-                            format!("Failed to rename {} to {}.real: {}", name, name, e)
+                            ToolchainError::SetupFailed(format!(
+                                "Failed to rename {} to {}.real: {}",
+                                name, name, e
+                            ))
                         })?;
                     }
                 } else if is_symlink {
@@ -161,15 +165,23 @@ exec "$_REAL" "$@"
                 }
             }
 
-            fs::write(&orig_path, wrapper_script)
-                .map_err(|e| format!("Failed to write wrapper script for {}: {}", name, e))?;
+            fs::write(&orig_path, wrapper_script).map_err(|e| {
+                ToolchainError::SetupFailed(format!(
+                    "Failed to write wrapper script for {}: {}",
+                    name, e
+                ))
+            })?;
             let _ = fs::set_permissions(&orig_path, fs::Permissions::from_mode(0o755));
             if real_path.exists() {
                 let _ = fs::set_permissions(&real_path, fs::Permissions::from_mode(0o755));
             }
         } else if real_path.exists() {
-            fs::write(&orig_path, wrapper_script)
-                .map_err(|e| format!("Failed to write wrapper script for {}: {}", name, e))?;
+            fs::write(&orig_path, wrapper_script).map_err(|e| {
+                ToolchainError::SetupFailed(format!(
+                    "Failed to write wrapper script for {}: {}",
+                    name, e
+                ))
+            })?;
             let _ = fs::set_permissions(&orig_path, fs::Permissions::from_mode(0o755));
             let _ = fs::set_permissions(&real_path, fs::Permissions::from_mode(0o755));
         } else if (*name == "cc"
@@ -177,8 +189,12 @@ exec "$_REAL" "$@"
             || (*name == "c++"
                 && (cc_bin.join("clang++.real").exists() || cc_bin.join("clang++").exists()))
         {
-            fs::write(&orig_path, wrapper_script)
-                .map_err(|e| format!("Failed to write wrapper script for {}: {}", name, e))?;
+            fs::write(&orig_path, wrapper_script).map_err(|e| {
+                ToolchainError::SetupFailed(format!(
+                    "Failed to write wrapper script for {}: {}",
+                    name, e
+                ))
+            })?;
             let _ = fs::set_permissions(&orig_path, fs::Permissions::from_mode(0o755));
         }
     }
@@ -187,13 +203,13 @@ exec "$_REAL" "$@"
 }
 
 #[cfg(not(unix))]
-pub fn generate_clang_wrappers(_workspace_root: &Path) -> Result<(), String> {
+pub fn generate_clang_wrappers(_workspace_root: &Path) -> Result<(), ToolchainError> {
     Ok(())
 }
 
 /// Ensures Node.js companion package managers (npm, npx, pnpm, yarn) are correctly wired
 /// to their module entry points in `lib/node_modules/`.
-pub fn setup_node_package_managers(workspace_root: &Path) -> Result<(), String> {
+pub fn setup_node_package_managers(workspace_root: &Path) -> Result<(), ToolchainError> {
     let node_dir = workspace_root.join(".dmz/toolchains/node");
     if !node_dir.is_dir() {
         return Ok(());

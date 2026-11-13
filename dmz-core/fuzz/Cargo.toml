@@ -1,0 +1,42 @@
+[package]
+name = "dmz-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+tempfile = "3"
+dmz-core = { path = ".." }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "dmz_lockfile_parse"
+path = "fuzz_targets/dmz_lockfile_parse.rs"
+doc = false
+
+[[bin]]
+name = "archive_extract"
+path = "fuzz_targets/archive_extract.rs"
+doc = false
+
+[[bin]]
+name = "pep508_parse"
+path = "fuzz_targets/pep508_parse.rs"
+doc = false
+
+[[bin]]
+name = "pnpm_lock_parse"
+path = "fuzz_targets/pnpm_lock_parse.rs"
+doc = false
+
+[[bin]]
+name = "pom_xml_parse"
+path = "fuzz_targets/pom_xml_parse.rs"
+doc = false

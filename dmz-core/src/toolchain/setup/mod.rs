@@ -14,6 +14,7 @@ pub use permissions::apply_permissions_and_quarantine;
 pub use relocate::relocate_bundled_binaries;
 pub use wrappers::{generate_clang_wrappers, setup_node_package_managers};
 
+use super::ToolchainError;
 use std::fs;
 use std::path::Path;
 
@@ -22,7 +23,7 @@ pub struct ToolchainSetup;
 
 impl ToolchainSetup {
     /// Set up imported toolchain directory: execution permissions, quarantine clearance, and activator scripts.
-    pub fn setup_imported_toolchains(workspace_root: &Path) -> Result<(), String> {
+    pub fn setup_imported_toolchains(workspace_root: &Path) -> Result<(), ToolchainError> {
         let toolchains_dir = workspace_root.join(".dmz/toolchains");
         let has_toolchains = toolchains_dir.exists()
             && fs::read_dir(&toolchains_dir)
@@ -45,37 +46,37 @@ impl ToolchainSetup {
     }
 
     /// Relocate bundled binaries and shared libraries using relative runtime search paths (RPATH).
-    pub fn relocate_bundled_binaries(workspace_root: &Path) -> Result<(), String> {
+    pub fn relocate_bundled_binaries(workspace_root: &Path) -> Result<(), ToolchainError> {
         relocate::relocate_bundled_binaries(workspace_root)
     }
 
     /// Generate hermetic wrapper scripts for Clang/LLVM compiler binaries.
-    pub fn generate_clang_wrappers(workspace_root: &Path) -> Result<(), String> {
+    pub fn generate_clang_wrappers(workspace_root: &Path) -> Result<(), ToolchainError> {
         wrappers::generate_clang_wrappers(workspace_root)
     }
 
     /// Ensures Node.js companion package managers are wired to entry points.
-    pub fn setup_node_package_managers(workspace_root: &Path) -> Result<(), String> {
+    pub fn setup_node_package_managers(workspace_root: &Path) -> Result<(), ToolchainError> {
         wrappers::setup_node_package_managers(workspace_root)
     }
 
     /// Generates .dmz/toolchains/dmz.toolchain.cmake for CMake projects.
-    pub fn generate_cmake_toolchain(workspace_root: &Path) -> Result<(), String> {
+    pub fn generate_cmake_toolchain(workspace_root: &Path) -> Result<(), ToolchainError> {
         cmake::generate_cmake_toolchain(workspace_root)
     }
 
     /// Generates shell and batch activator scripts in .dmz/ for immediate developer use.
-    pub fn generate_activator_scripts(workspace_root: &Path) -> Result<(), String> {
+    pub fn generate_activator_scripts(workspace_root: &Path) -> Result<(), ToolchainError> {
         activators::generate_activator_scripts(workspace_root)
     }
 
     /// Configures .vscode/settings.json for air-gapped IDE workflows.
-    pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), String> {
+    pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), ToolchainError> {
         ide::generate_ide_settings(workspace_root)
     }
 
     /// Generates or updates <project>.code-workspace for multi-root projects.
-    pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), String> {
+    pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), ToolchainError> {
         ide::generate_multi_root_workspace(workspace_root)
     }
 }

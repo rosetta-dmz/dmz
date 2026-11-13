@@ -1,5 +1,6 @@
 // Execution permissions and quarantine clearance for toolchains
 
+use super::super::ToolchainError;
 #[cfg(unix)]
 use std::fs;
 use std::path::Path;
@@ -7,7 +8,7 @@ use std::path::Path;
 use std::process::Command;
 
 /// Configure execution permissions (0o755) and clear macOS quarantine flags.
-pub fn apply_permissions_and_quarantine(toolchains_dir: &Path) -> Result<(), String> {
+pub fn apply_permissions_and_quarantine(toolchains_dir: &Path) -> Result<(), ToolchainError> {
     let _ = toolchains_dir;
     // Ensure 0o755 execution permissions on all binary files.
     #[cfg(unix)]

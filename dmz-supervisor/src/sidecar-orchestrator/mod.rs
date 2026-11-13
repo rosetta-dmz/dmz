@@ -13,7 +13,7 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 pub use child::ManagedChild;
-pub use execution::{infer_member_execution, spawn_member_process};
+pub use execution::{infer_member_execution, infer_member_execution_in, spawn_member_process};
 pub use socket::{
     cleanup_stale_socket, poll_socket_readiness, poll_socket_readiness_for_managed_children,
     poll_socket_readiness_with_child, prepare_safe_socket, safe_socket_path,
@@ -111,6 +111,15 @@ impl SidecarOrchestrator {
         member: &WorkspaceMember,
     ) -> Result<(String, Vec<String>), SidecarOrchestratorError> {
         execution::infer_member_execution(member_dir, member)
+    }
+
+    /// Infers execution command and arguments for a member using an explicit workspace root context.
+    pub fn infer_member_execution_in(
+        workspace_root: &Path,
+        member_dir: &Path,
+        member: &WorkspaceMember,
+    ) -> Result<(String, Vec<String>), SidecarOrchestratorError> {
+        execution::infer_member_execution_in(workspace_root, member_dir, member)
     }
 
     /// Orchestrate KEP-753 sequential execution of primary app and companion sidecars.

@@ -1,10 +1,11 @@
 // CMake hermetic toolchain file generation
 
+use super::super::ToolchainError;
 use std::fs;
 use std::path::Path;
 
 /// Generates `.dmz/toolchains/dmz.toolchain.cmake` to wire bundled compilers and tools for CMake.
-pub fn generate_cmake_toolchain(workspace_root: &Path) -> Result<(), String> {
+pub fn generate_cmake_toolchain(workspace_root: &Path) -> Result<(), ToolchainError> {
     let toolchains_dir = workspace_root.join(".dmz/toolchains");
     if !toolchains_dir.exists() {
         return Ok(());
@@ -131,8 +132,9 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Android" AND DEFINED ENV{ANDROID_NDK_HOME} AN
 endif()
 "#;
 
-    fs::write(&toolchain_cmake_path, cmake_content)
-        .map_err(|e| format!("Failed to write dmz.toolchain.cmake: {}", e))?;
+    fs::write(&toolchain_cmake_path, cmake_content).map_err(|e| {
+        ToolchainError::SetupFailed(format!("Failed to write dmz.toolchain.cmake: {}", e))
+    })?;
 
     Ok(())
 }

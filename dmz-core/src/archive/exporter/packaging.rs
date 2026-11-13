@@ -205,23 +205,33 @@ pub fn append_filtered_files<W: Write>(
     Ok(())
 }
 
-pub fn read_manifest_from_archive(path: &Path) -> Result<AirGapManifest, String> {
-    let file = File::open(path).map_err(|e| format!("Failed to open since archive: {}", e))?;
-    let decoder =
-        zstd::stream::read::Decoder::new(file).map_err(|e| format!("Zstd error: {}", e))?;
+pub fn read_manifest_from_archive(path: &Path) -> Result<AirGapManifest, ExportError> {
+    let file = File::open(path)
+        .map_err(|e| ExportError::IoError(format!("Failed to open since archive: {}", e)))?;
+    let decoder = zstd::stream::read::Decoder::new(file)
+        .map_err(|e| ExportError::ArchiveError(format!("Zstd error: {}", e)))?;
     let mut archive = tar::Archive::new(decoder);
-    for entry in archive.entries().map_err(|e| format!("Tar error: {}", e))? {
-        let mut entry = entry.map_err(|e| format!("Tar entry error: {}", e))?;
-        let entry_path = entry.path().map_err(|e| e.to_string())?.to_path_buf();
+    for entry in archive
+        .entries()
+        .map_err(|e| ExportError::ArchiveError(format!("Tar error: {}", e)))?
+    {
+        let mut entry =
+            entry.map_err(|e| ExportError::ArchiveError(format!("Tar entry error: {}", e)))?;
+        let entry_path = entry
+            .path()
+            .map_err(|e| ExportError::ArchiveError(e.to_string()))?
+            .to_path_buf();
         if entry_path == Path::new("airgap_manifest.json") {
             let mut content = String::new();
             entry
                 .read_to_string(&mut content)
-                .map_err(|e| format!("Read error: {}", e))?;
-            let manifest: AirGapManifest =
-                serde_json::from_str(&content).map_err(|e| format!("JSON parse error: {}", e))?;
+                .map_err(|e| ExportError::IoError(format!("Read error: {}", e)))?;
+            let manifest: AirGapManifest = serde_json::from_str(&content)
+                .map_err(|e| ExportError::ArchiveError(format!("JSON parse error: {}", e)))?;
             return Ok(manifest);
         }
     }
-    Err("airgap_manifest.json not found in archive".to_string())
+    Err(ExportError::ArchiveError(
+        "airgap_manifest.json not found in archive".to_string(),
+    ))
 }

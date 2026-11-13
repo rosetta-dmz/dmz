@@ -58,26 +58,17 @@ pub struct BuildResult {
     pub closure_signature: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    #[error("Packaging IO Error: {0}")]
     IoError(String),
+    #[error("Lockfile Verification Error: {0}")]
     LockfileError(String),
+    #[error("Archive Creation Error: {0}")]
     ArchiveError(String),
+    #[error("Resource Quota Exceeded: {0}")]
     QuotaExceeded(String),
 }
-
-impl std::fmt::Display for BuildError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::IoError(msg) => write!(f, "Packaging IO Error: {}", msg),
-            Self::LockfileError(msg) => write!(f, "Lockfile Verification Error: {}", msg),
-            Self::ArchiveError(msg) => write!(f, "Archive Creation Error: {}", msg),
-            Self::QuotaExceeded(msg) => write!(f, "Resource Quota Exceeded: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for BuildError {}
 
 impl From<std::io::Error> for BuildError {
     fn from(err: std::io::Error) -> Self {

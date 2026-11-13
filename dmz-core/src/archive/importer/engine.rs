@@ -1,6 +1,9 @@
 use super::backup::{create_backup_snapshot, restore_backup_snapshot};
 use super::hydration::{hydrate_offline_dependencies, relative_path_between};
-use super::security::{is_contained_path, is_safe_relative_path, unpack_tar_entry_contained};
+use super::security::{
+    is_contained_path, is_safe_relative_path, unpack_tar_entry_contained,
+    unpack_tar_entry_contained_bounded,
+};
 use super::types::{ImportConfig, ImportError, ImportResult};
 use crate::archive::exporter::AirGapManifest;
 use crate::ecosystem::EcosystemRegistry;
@@ -219,13 +222,13 @@ impl AirGapImporter {
                     Self::DEFAULT_MAX_FILES
                 )));
             }
-            total_bytes = total_bytes.saturating_add(entry.size());
-            if total_bytes > Self::DEFAULT_MAX_DECOMPRESSED_BYTES {
+            if total_bytes.saturating_add(entry.size()) > Self::DEFAULT_MAX_DECOMPRESSED_BYTES {
                 return Err(ImportError::ExtractionError(format!(
                     "Decompression quota exceeded: maximum byte limit ({} bytes) reached",
                     Self::DEFAULT_MAX_DECOMPRESSED_BYTES
                 )));
             }
+            let remaining_quota = Self::DEFAULT_MAX_DECOMPRESSED_BYTES.saturating_sub(total_bytes);
 
             let path = entry
                 .path()
@@ -233,10 +236,21 @@ impl AirGapImporter {
                 .to_path_buf();
 
             if path == Path::new("airgap_manifest.json") {
+                const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+                let cap = remaining_quota.min(MAX_MANIFEST_BYTES);
                 let mut content = String::new();
-                entry.read_to_string(&mut content).map_err(|e| {
-                    ImportError::ExtractionError(format!("Failed to read manifest: {}", e))
-                })?;
+                let n = (&mut entry)
+                    .take(cap.saturating_add(1))
+                    .read_to_string(&mut content)
+                    .map_err(|e| {
+                        ImportError::ExtractionError(format!("Failed to read manifest: {}", e))
+                    })?;
+                if (n as u64) > cap {
+                    return Err(ImportError::ExtractionError(
+                        "airgap_manifest.json exceeds maximum permitted size".to_string(),
+                    ));
+                }
+                total_bytes = total_bytes.saturating_add(n as u64);
 
                 let manifest: AirGapManifest = serde_json::from_str(&content).map_err(|e| {
                     ImportError::VerificationFailed(format!("Invalid airgap_manifest.json: {}", e))
@@ -318,10 +332,20 @@ impl AirGapImporter {
                 crate::workspace::atomic_write_file(&dest, &content)
                     .map_err(|e| ImportError::IoError(e.to_string()))?;
             } else if path == Path::new("dmz.lock") {
+                let cap = remaining_quota.min(crate::resolver::MAX_LOCKFILE_SIZE);
                 let mut content = String::new();
-                entry.read_to_string(&mut content).map_err(|e| {
-                    ImportError::ExtractionError(format!("Failed to read lockfile: {}", e))
-                })?;
+                let n = (&mut entry)
+                    .take(cap.saturating_add(1))
+                    .read_to_string(&mut content)
+                    .map_err(|e| {
+                        ImportError::ExtractionError(format!("Failed to read lockfile: {}", e))
+                    })?;
+                if (n as u64) > cap {
+                    return Err(ImportError::VerificationFailed(
+                        "Embedded dmz.lock exceeds maximum permitted lockfile size".to_string(),
+                    ));
+                }
+                total_bytes = total_bytes.saturating_add(n as u64);
 
                 let lockfile: DmzLockfile = serde_json::from_str(&content).map_err(|e| {
                     ImportError::VerificationFailed(format!("Invalid embedded dmz.lock: {}", e))
@@ -344,11 +368,13 @@ impl AirGapImporter {
             } else if path == Path::new("workspace.bundle") {
                 // Extract Git bundle into workspace and initialize / link repository
                 let bundle_dest = effective_workspace.join("workspace.bundle");
-                unpack_tar_entry_contained(
+                let written = unpack_tar_entry_contained_bounded(
                     &mut entry,
                     effective_workspace,
                     Path::new("workspace.bundle"),
+                    remaining_quota,
                 )?;
+                total_bytes = total_bytes.saturating_add(written);
                 info!(path = ?bundle_dest, "Unpacked embedded git bundle");
 
                 if let Err(e) = GitProvider::restore_bundle(effective_workspace, &bundle_dest) {
@@ -365,7 +391,13 @@ impl AirGapImporter {
                     continue;
                 }
 
-                unpack_tar_entry_contained(&mut entry, effective_store, rel_path)?;
+                let written = unpack_tar_entry_contained_bounded(
+                    &mut entry,
+                    effective_store,
+                    rel_path,
+                    remaining_quota,
+                )?;
+                total_bytes = total_bytes.saturating_add(written);
                 imported_count += 1;
             } else if path.starts_with("toolchains") || path.starts_with(".dmz/toolchains") {
                 let rel_path = path
@@ -377,11 +409,23 @@ impl AirGapImporter {
                 }
 
                 let tc_root = effective_workspace.join(".dmz/toolchains");
-                unpack_tar_entry_contained(&mut entry, &tc_root, rel_path)?;
+                let written = unpack_tar_entry_contained_bounded(
+                    &mut entry,
+                    &tc_root,
+                    rel_path,
+                    remaining_quota,
+                )?;
+                total_bytes = total_bytes.saturating_add(written);
                 has_toolchains = true;
             } else {
                 // Workspace source files (Cargo.toml, src/, etc.)
-                unpack_tar_entry_contained(&mut entry, effective_workspace, &path)?;
+                let written = unpack_tar_entry_contained_bounded(
+                    &mut entry,
+                    effective_workspace,
+                    &path,
+                    remaining_quota,
+                )?;
+                total_bytes = total_bytes.saturating_add(written);
             }
         }
 
@@ -499,17 +543,29 @@ impl AirGapImporter {
         // Materialize offline dependencies (.venv, node_modules, .cargo/vendor) from the local store
         // BEFORE generating final IDE settings and hydrating workspace configurations.
         let lockfile_path = effective_workspace.join("dmz.lock");
-        if lockfile_path.is_file() && effective_store.is_dir() {
-            let install_cfg = crate::install::InstallConfig {
-                workspace_path: effective_workspace.to_path_buf(),
-                lockfile_path,
-                store_dir: effective_store.to_path_buf(),
-            };
-            if let Err(e) = crate::install::InstallerEngine::install(&install_cfg) {
-                tracing::debug!(
-                    error = %e,
-                    "Post-extraction store install skipped or deferred (e.g. partial/synthetic store)"
-                );
+        if lockfile_path.is_file() && effective_store.is_dir() && imported_count > 0 {
+            let has_installable_packages = parsed_lockfile
+                .as_ref()
+                .map(|l| l.packages.values().any(|p| !p.is_local_path()))
+                .unwrap_or(false);
+            if has_installable_packages {
+                let install_cfg = crate::install::InstallConfig {
+                    workspace_path: effective_workspace.to_path_buf(),
+                    lockfile_path,
+                    store_dir: effective_store.to_path_buf(),
+                };
+                if let Err(e) = crate::install::InstallerEngine::install(&install_cfg) {
+                    if verify_closure_hash {
+                        return Err(ImportError::VerificationFailed(format!(
+                            "Post-extraction dependency install failed: {}",
+                            e
+                        )));
+                    }
+                    warn!(
+                        error = %e,
+                        "Post-extraction store install skipped or deferred (verify_closure_hash=false)"
+                    );
+                }
             }
         }
 
@@ -521,7 +577,10 @@ impl AirGapImporter {
         );
 
         // Re-synchronize IDE settings and .code-workspace after .venv and node_modules are materialized
-        let _ = crate::toolchain::ToolchainSetup::generate_ide_settings(effective_workspace);
+        if let Err(e) = crate::toolchain::ToolchainSetup::generate_ide_settings(effective_workspace)
+        {
+            warn!(error = %e, "Failed to update IDE settings after import");
+        }
 
         // Run post-import ecosystem validation using the registry
         let registry = EcosystemRegistry::new();

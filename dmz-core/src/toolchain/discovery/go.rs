@@ -1,7 +1,8 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
+use super::super::ToolchainError;
 use super::{
-    collect_files_recursive, emit_non_relocatable_notice, is_non_standalone_path,
-    push_system_bin_candidates, push_unique_path, ToolchainDiscoverer,
+    collect_files_recursive, push_system_bin_candidates, push_unique_path,
+    select_preferred_candidate, ToolchainDiscoverer,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ impl ToolchainDiscoverer for GoDiscoverer {
         ToolchainEcosystem::Go
     }
 
-    fn discover(&self) -> Result<Option<DiscoveredToolchain>, String> {
+    fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         let mut go_candidates: Vec<PathBuf> = Vec::new();
 
         // 1. Explicit GOROOT
@@ -61,28 +62,8 @@ impl ToolchainDiscoverer for GoDiscoverer {
             return Ok(None);
         }
 
-        go_candidates.sort_by_key(|c| is_non_standalone_path(c));
-
-        let mut chosen_go: Option<PathBuf> = None;
-        for candidate in go_candidates {
-            if is_non_standalone_path(&candidate) {
-                emit_non_relocatable_notice(&candidate);
-            }
-            let should_replace = match &chosen_go {
-                None => true,
-                Some(prev) => !is_non_standalone_path(&candidate) && is_non_standalone_path(prev),
-            };
-            if should_replace {
-                chosen_go = Some(candidate.clone());
-                if !is_non_standalone_path(&candidate) {
-                    break;
-                }
-            }
-        }
-
-        let go_bin = match chosen_go {
-            Some(g) => g,
-            None => return Ok(None),
+        let Some(go_bin) = select_preferred_candidate(go_candidates) else {
+            return Ok(None);
         };
 
         // Query GOROOT from go env

@@ -1,7 +1,8 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
+use super::super::ToolchainError;
 use super::{
-    collect_files_recursive, emit_non_relocatable_notice, is_non_standalone_path,
-    push_system_bin_candidates, push_unique_path, ToolchainDiscoverer,
+    collect_files_recursive, push_system_bin_candidates, push_unique_path,
+    select_preferred_verified, ToolchainDiscoverer,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -16,7 +17,7 @@ impl ToolchainDiscoverer for PkgConfigDiscoverer {
         ToolchainEcosystem::PkgConfig
     }
 
-    fn discover(&self) -> Result<Option<DiscoveredToolchain>, String> {
+    fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         let mut candidates: Vec<PathBuf> = Vec::new();
 
         if let Ok(root) = std::env::var("PKG_CONFIG_HOME") {
@@ -46,40 +47,16 @@ impl ToolchainDiscoverer for PkgConfigDiscoverer {
             return Ok(None);
         }
 
-        candidates.sort_by_key(|c| is_non_standalone_path(c));
-
-        let mut chosen_bin: Option<PathBuf> = None;
-        let mut chosen_version: Option<String> = None;
-
-        for candidate in candidates {
-            if let Ok(output) = Command::new(&candidate).arg("--version").output() {
-                if output.status.success() {
-                    let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    let is_non_standalone = is_non_standalone_path(&candidate);
-                    let should_replace = match &chosen_bin {
-                        None => true,
-                        Some(prev) => !is_non_standalone && is_non_standalone_path(prev),
-                    };
-                    if should_replace {
-                        chosen_bin = Some(candidate);
-                        chosen_version = Some(format!("pkg-config {}", version_str));
-                        if !is_non_standalone {
-                            break;
-                        }
-                    }
-                }
+        let Some((pkg_bin, version)) = select_preferred_verified(candidates, |candidate| {
+            let output = Command::new(candidate).arg("--version").output().ok()?;
+            if !output.status.success() {
+                return None;
             }
-        }
-
-        let pkg_bin = match chosen_bin {
-            Some(bin) => bin,
-            None => return Ok(None),
+            let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Some(format!("pkg-config {}", version_str))
+        }) else {
+            return Ok(None);
         };
-
-        if is_non_standalone_path(&pkg_bin) {
-            emit_non_relocatable_notice(&pkg_bin);
-        }
-        let version = chosen_version.unwrap_or_else(|| "pkg-config".to_string());
         let root_dir = pkg_bin.parent().unwrap_or(Path::new("")).to_path_buf();
 
         info!(
@@ -151,7 +128,7 @@ mod tests {
             {
                 let local_pkgconf = std::path::PathBuf::from(home).join(".local/bin/pkgconf");
                 if local_pkgconf.exists() {
-                    assert!(!is_non_standalone_path(&tc.root_dir));
+                    assert!(!super::super::is_non_standalone_path(&tc.root_dir));
                 }
             }
         }

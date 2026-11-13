@@ -86,16 +86,22 @@ pub fn run_resolve(
         // Auto-generate dmz-workspace.toml if absent
         let manifest_path = ws_canon.join("dmz-workspace.toml");
         if !manifest_path.exists() {
-            let primary_m = dmz_core::workspace::WorkspaceMember::new(
+            let mut primary_m = dmz_core::workspace::WorkspaceMember::new(
                 "primary",
-                &ws_canon,
+                std::path::Path::new("."),
                 dmz_core::workspace::MemberRole::Primary,
             );
-            let sidecar_m = dmz_core::workspace::WorkspaceMember::new(
+            primary_m.populate_detected_defaults(&ws_canon, &ws_canon);
+
+            let normalized_sc_path =
+                dmz_core::workspace::normalize_member_path(&ws_canon, &sc_canon);
+            let mut sidecar_m = dmz_core::workspace::WorkspaceMember::new(
                 "sidecar",
-                &sc_canon,
+                normalized_sc_path,
                 dmz_core::workspace::MemberRole::Sidecar,
             );
+            sidecar_m.populate_detected_defaults(&sc_canon, &ws_canon);
+
             let proj_name = ws_canon
                 .file_name()
                 .and_then(|n| n.to_str())

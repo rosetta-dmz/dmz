@@ -17,26 +17,17 @@ pub use packager::ToolchainArchivePackager;
 pub use setup::ToolchainSetup;
 pub use types::{DiscoveredToolchain, ToolchainEcosystem, ToolchainManifestEntry};
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ToolchainError {
+    #[error("Toolchain IO Error: {0}")]
     Io(String),
+    #[error("Toolchain Setup Error: {0}")]
     SetupFailed(String),
+    #[error("Toolchain Discovery Error: {0}")]
     DiscoveryFailed(String),
+    #[error("Toolchain Packaging Error: {0}")]
     PackagingFailed(String),
 }
-
-impl std::fmt::Display for ToolchainError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(msg) => write!(f, "Toolchain IO Error: {}", msg),
-            Self::SetupFailed(msg) => write!(f, "Toolchain Setup Error: {}", msg),
-            Self::DiscoveryFailed(msg) => write!(f, "Toolchain Discovery Error: {}", msg),
-            Self::PackagingFailed(msg) => write!(f, "Toolchain Packaging Error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for ToolchainError {}
 
 impl From<ToolchainError> for String {
     fn from(err: ToolchainError) -> Self {
@@ -132,85 +123,85 @@ impl ToolchainProvider {
 
     /// Discover the host Rust toolchain, prioritizing official standalone Rustup distributions.
     #[inline]
-    pub fn discover_rust() -> Result<Option<DiscoveredToolchain>, String> {
+    pub fn discover_rust() -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         RustDiscoverer.discover()
     }
 
     /// Discover the host Node.js runtime and npm binary.
     #[inline]
-    pub fn discover_node() -> Result<Option<DiscoveredToolchain>, String> {
+    pub fn discover_node() -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         NodeDiscoverer.discover()
     }
 
     /// Discover the host Python interpreter and site-packages.
     #[inline]
-    pub fn discover_python() -> Result<Option<DiscoveredToolchain>, String> {
+    pub fn discover_python() -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         PythonDiscoverer.discover()
     }
 
     /// Discover the host Go compiler and standard library packages.
     #[inline]
-    pub fn discover_go() -> Result<Option<DiscoveredToolchain>, String> {
+    pub fn discover_go() -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         GoDiscoverer.discover()
     }
 
     /// Discover standalone PHP runtime distribution.
     #[inline]
-    pub fn discover_php() -> Result<Option<DiscoveredToolchain>, String> {
+    pub fn discover_php() -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         PhpDiscoverer.discover()
     }
 
     /// Discover standalone Ruby runtime distribution.
     #[inline]
-    pub fn discover_ruby() -> Result<Option<DiscoveredToolchain>, String> {
+    pub fn discover_ruby() -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         RubyDiscoverer.discover()
     }
 
     /// Discover standalone CMake distribution.
     #[inline]
-    pub fn discover_cmake() -> Result<Option<DiscoveredToolchain>, String> {
+    pub fn discover_cmake() -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         CMakeDiscoverer.discover()
     }
 
     /// Discover standalone Ninja build tool distribution.
     #[inline]
-    pub fn discover_ninja() -> Result<Option<DiscoveredToolchain>, String> {
+    pub fn discover_ninja() -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         NinjaDiscoverer.discover()
     }
 
     /// Discover standalone GNU Make / BSD Make distribution.
     #[inline]
-    pub fn discover_make() -> Result<Option<DiscoveredToolchain>, String> {
+    pub fn discover_make() -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         MakeDiscoverer.discover()
     }
 
     /// Discover standalone JUCE framework distribution.
     #[inline]
-    pub fn discover_juce() -> Result<Option<DiscoveredToolchain>, String> {
+    pub fn discover_juce() -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         JuceDiscoverer.discover()
     }
 
     /// Discover standalone pkg-config distribution.
     #[inline]
-    pub fn discover_pkgconfig() -> Result<Option<DiscoveredToolchain>, String> {
+    pub fn discover_pkgconfig() -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         PkgConfigDiscoverer.discover()
     }
 
     /// Discover standalone C/C++ compiler toolchain.
     #[inline]
-    pub fn discover_cc() -> Result<Option<DiscoveredToolchain>, String> {
+    pub fn discover_cc() -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         CcDiscoverer.discover()
     }
 
     /// Discover standalone Android NDK distribution.
     #[inline]
-    pub fn discover_android_ndk() -> Result<Option<DiscoveredToolchain>, String> {
+    pub fn discover_android_ndk() -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         AndroidNdkDiscoverer.discover()
     }
 
     /// Discover Apple Developer SDK and toolchain distribution.
     #[inline]
-    pub fn discover_apple_sdk() -> Result<Option<DiscoveredToolchain>, String> {
+    pub fn discover_apple_sdk() -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         AppleSdkDiscoverer.discover()
     }
 }
@@ -223,7 +214,7 @@ impl ToolchainPackager {
     pub fn package_toolchains<W: std::io::Write>(
         workspace_root: &Path,
         tar_builder: &mut TarBuilder<W>,
-    ) -> Result<Vec<ToolchainManifestEntry>, String> {
+    ) -> Result<Vec<ToolchainManifestEntry>, ToolchainError> {
         Self::package_toolchains_with_lockfile(workspace_root, None, tar_builder)
     }
 
@@ -232,7 +223,7 @@ impl ToolchainPackager {
         workspace_root: &Path,
         lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
         tar_builder: &mut TarBuilder<W>,
-    ) -> Result<Vec<ToolchainManifestEntry>, String> {
+    ) -> Result<Vec<ToolchainManifestEntry>, ToolchainError> {
         Self::package_toolchains_with_epoch(workspace_root, lockfile, tar_builder, 315_532_800)
     }
 
@@ -242,14 +233,14 @@ impl ToolchainPackager {
         lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
         tar_builder: &mut TarBuilder<W>,
         deterministic_epoch: u64,
-    ) -> Result<Vec<ToolchainManifestEntry>, String> {
+    ) -> Result<Vec<ToolchainManifestEntry>, ToolchainError> {
         let toolchains = ToolchainProvider::discover_for_workspace(workspace_root, lockfile);
         ToolchainArchivePackager::package_with_epoch(tar_builder, &toolchains, deterministic_epoch)
     }
 
     /// Set up imported toolchain directory: execution permissions, quarantine clearance, and activator scripts.
     #[inline]
-    pub fn setup_imported_toolchains(workspace_root: &Path) -> Result<(), String> {
+    pub fn setup_imported_toolchains(workspace_root: &Path) -> Result<(), ToolchainError> {
         ToolchainSetup::setup_imported_toolchains(workspace_root)
     }
 
@@ -275,7 +266,7 @@ mod tests {
             self.ecosystem
         }
 
-        fn discover(&self) -> Result<Option<DiscoveredToolchain>, String> {
+        fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
             Ok(self.mock_toolchain.clone())
         }
     }

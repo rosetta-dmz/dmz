@@ -182,7 +182,13 @@ impl AirGapExporter {
         // Synchronize lockfile VCS provenance if not already set
         if lockfile.vcs.is_none() && vcs_provenance.is_some() {
             lockfile.vcs = vcs_provenance.clone();
-            let _ = lockfile.save(&effective_lockfile);
+            if let Err(e) = lockfile.save(&effective_lockfile) {
+                warn!(
+                    error = %e,
+                    path = ?effective_lockfile,
+                    "Failed to persist VCS provenance to dmz.lock before export"
+                );
+            }
         }
 
         // Ensure parent output directory exists
@@ -232,7 +238,7 @@ impl AirGapExporter {
         if config.mode == ExportMode::Unified || config.mode == ExportMode::DepsOnly {
             for pkg_info in lockfile.packages.values() {
                 // Skip local path dependencies/workspace members since they are in the workspace source
-                if pkg_info.version.starts_with("path:") || pkg_info.version.contains("path") {
+                if pkg_info.is_local_path() {
                     continue;
                 }
 

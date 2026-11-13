@@ -1,4 +1,5 @@
 use super::types::{DiscoveredToolchain, ToolchainManifestEntry};
+use super::ToolchainError;
 use std::fs;
 use std::path::Path;
 use tar::Builder as TarBuilder;
@@ -15,7 +16,7 @@ impl ToolchainArchivePackager {
     pub fn package<W: std::io::Write>(
         tar_builder: &mut TarBuilder<W>,
         toolchains: &[DiscoveredToolchain],
-    ) -> Result<Vec<ToolchainManifestEntry>, String> {
+    ) -> Result<Vec<ToolchainManifestEntry>, ToolchainError> {
         Self::package_with_epoch(tar_builder, toolchains, 315_532_800)
     }
 
@@ -27,7 +28,7 @@ impl ToolchainArchivePackager {
         tar_builder: &mut TarBuilder<W>,
         toolchains: &[DiscoveredToolchain],
         deterministic_epoch: u64,
-    ) -> Result<Vec<ToolchainManifestEntry>, String> {
+    ) -> Result<Vec<ToolchainManifestEntry>, ToolchainError> {
         let mut manifest_entries = Vec::new();
 
         for tc in toolchains {
@@ -59,10 +60,10 @@ impl ToolchainArchivePackager {
                         )
                     })
                 {
-                    return Err(format!(
+                    return Err(ToolchainError::PackagingFailed(format!(
                         "Refusing to package toolchain binary with insecure path: {}",
                         rel_path
-                    ));
+                    )));
                 }
 
                 let archive_entry_path = format!("{}/{}", base_archive_path, rel_path);
@@ -111,10 +112,10 @@ impl ToolchainArchivePackager {
                                         &mut std::io::empty(),
                                     )
                                     .map_err(|e| {
-                                        format!(
+                                        ToolchainError::PackagingFailed(format!(
                                             "Failed to append toolchain symlink {}: {}",
                                             archive_entry_path, e
-                                        )
+                                        ))
                                     })?;
                                 if let Some(name) =
                                     Path::new(rel_path).file_name().and_then(|n| n.to_str())
@@ -128,16 +129,16 @@ impl ToolchainArchivePackager {
                 }
 
                 let mut file = fs::File::open(host_path).map_err(|e| {
-                    format!(
+                    ToolchainError::Io(format!(
                         "Failed to open toolchain binary {:?} for {}: {}",
                         host_path, eco_str, e
-                    )
+                    ))
                 })?;
                 let metadata = file.metadata().map_err(|e| {
-                    format!(
+                    ToolchainError::Io(format!(
                         "Failed to read metadata for toolchain binary {:?}: {}",
                         host_path, e
-                    )
+                    ))
                 })?;
                 let mut header = tar::Header::new_gnu();
                 header.set_size(metadata.len());
@@ -151,10 +152,10 @@ impl ToolchainArchivePackager {
                 tar_builder
                     .append_data(&mut header, &archive_entry_path, &mut file)
                     .map_err(|e| {
-                        format!(
+                        ToolchainError::PackagingFailed(format!(
                             "Failed to append toolchain binary {}: {}",
                             archive_entry_path, e
-                        )
+                        ))
                     })?;
                 if let Some(name) = Path::new(rel_path).file_name().and_then(|n| n.to_str()) {
                     binary_names.push(name.to_string());
@@ -178,10 +179,10 @@ impl ToolchainArchivePackager {
                         )
                     })
                 {
-                    return Err(format!(
+                    return Err(ToolchainError::PackagingFailed(format!(
                         "Refusing to package toolchain asset with insecure path: {}",
                         rel_path
-                    ));
+                    )));
                 }
 
                 let archive_entry_path = format!("{}/{}", base_archive_path, rel_path);
@@ -226,10 +227,10 @@ impl ToolchainArchivePackager {
                                         &mut std::io::empty(),
                                     )
                                     .map_err(|e| {
-                                        format!(
+                                        ToolchainError::PackagingFailed(format!(
                                             "Failed to append toolchain symlink {}: {}",
                                             archive_entry_path, e
-                                        )
+                                        ))
                                     })?;
                                 continue;
                             }
@@ -285,10 +286,10 @@ impl ToolchainArchivePackager {
                 tar_builder
                     .append_data(&mut header, &archive_entry_path, &mut file)
                     .map_err(|e| {
-                        format!(
+                        ToolchainError::PackagingFailed(format!(
                             "Failed to append toolchain asset {}: {}",
                             archive_entry_path, e
-                        )
+                        ))
                     })?;
             }
 
@@ -450,7 +451,7 @@ mod tests {
         let res = ToolchainArchivePackager::package(&mut tar_builder, &[toolchain]);
 
         assert!(res.is_err());
-        assert!(res.unwrap_err().contains("insecure path"));
+        assert!(res.unwrap_err().to_string().contains("insecure path"));
 
         let toolchain_lib = DiscoveredToolchain {
             ecosystem: ToolchainEcosystem::Rust,
@@ -465,7 +466,7 @@ mod tests {
         let res2 = ToolchainArchivePackager::package(&mut tar_builder2, &[toolchain_lib]);
 
         assert!(res2.is_err());
-        assert!(res2.unwrap_err().contains("insecure path"));
+        assert!(res2.unwrap_err().to_string().contains("insecure path"));
     }
 
     #[test]

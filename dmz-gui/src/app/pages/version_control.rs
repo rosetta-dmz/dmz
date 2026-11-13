@@ -255,7 +255,7 @@ pub(super) fn show(
                         ui.add_sized(
                             egui::vec2(field_width, components::FIELD_BUTTON_HEIGHT),
                             egui::TextEdit::singleline(&mut state.bundle_output_path)
-                                .vertical_align(egui::Align::Center)
+                                .align(egui::Align2::LEFT_CENTER)
                                 .margin(egui::Margin::symmetric(8, 0)),
                         );
                         if components::field_button(ui, "Save As...", Some(btn_width)).clicked() {
@@ -336,7 +336,7 @@ pub(super) fn show(
                             egui::vec2(field_width, components::FIELD_BUTTON_HEIGHT),
                             egui::TextEdit::singleline(&mut state.since_ref)
                                 .hint_text("e.g. HEAD~1, v1.0.0, or previous_bundle.tar.zst")
-                                .vertical_align(egui::Align::Center)
+                                .align(egui::Align2::LEFT_CENTER)
                                 .margin(egui::Margin::symmetric(8, 0)),
                         );
                         if components::field_button(ui, "Browse...", Some(btn_width)).clicked() {
@@ -364,7 +364,7 @@ pub(super) fn show(
                         ui.add_sized(
                             egui::vec2(field_width, components::FIELD_BUTTON_HEIGHT),
                             egui::TextEdit::singleline(&mut state.delta_output_path)
-                                .vertical_align(egui::Align::Center)
+                                .align(egui::Align2::LEFT_CENTER)
                                 .margin(egui::Margin::symmetric(8, 0)),
                         );
                         if components::field_button(ui, "Save As...", Some(btn_width)).clicked() {
@@ -582,9 +582,10 @@ mod tests {
         let mut msg = String::new();
 
         for _ in 0..3 {
-            let _ = ctx.run_ui(Default::default(), |ui| {
+            let mut out = ctx.run_ui(Default::default(), |ui| {
                 show(&mut state, ui, &mut ws, &mut lock, &mut msg);
             });
+            out.textures_delta.clear();
         }
 
         // When all changes are committed, cached provenance must detect working tree clean (dirty == false)

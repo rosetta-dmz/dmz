@@ -77,20 +77,18 @@ fn test_dual_repo_umbrella_export_and_import_roundtrip() {
         .save_to_file(&primary_dir.join("dmz-workspace.toml"))
         .expect("Failed to write dmz-workspace.toml");
 
-    // Create dummy locked package and store artifact
+    // Create valid store crate archive and lock its real SHA-256 hash
     let store_dir = primary_dir.join(".dmz/store");
     fs::create_dir_all(&store_dir).unwrap();
 
     let dummy_pkg_name = "test-dep";
-    let pkg_dir = store_dir.join(dummy_pkg_name);
-    fs::create_dir_all(&pkg_dir).unwrap();
-    fs::write(pkg_dir.join("content.txt"), "dummy artifact").unwrap();
+    let real_sha = crate::write_mock_cargo_store_pkg(&store_dir, dummy_pkg_name, "1.0.0");
 
     let pkg = LockedPackage {
         name: dummy_pkg_name.to_string(),
         version: "1.0.0".to_string(),
         ecosystem: Ecosystem::Cargo,
-        sha256: "dummy-sha".to_string(),
+        sha256: real_sha,
         source_url: None,
         dependencies: vec![],
         member_id: Some("frontend".to_string()),

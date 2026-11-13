@@ -1,7 +1,8 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
+use super::super::ToolchainError;
 use super::{
     collect_files_recursive, emit_non_relocatable_notice, is_non_standalone_path,
-    push_system_bin_candidates, push_unique_path, ToolchainDiscoverer,
+    push_system_bin_candidates, push_unique_path, select_preferred_verified, ToolchainDiscoverer,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ impl ToolchainDiscoverer for CcDiscoverer {
         ToolchainEcosystem::Cc
     }
 
-    fn discover(&self) -> Result<Option<DiscoveredToolchain>, String> {
+    fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         let mut candidates: Vec<PathBuf> = Vec::new();
 
         // 1. Explicit environment variables
@@ -92,46 +93,22 @@ impl ToolchainDiscoverer for CcDiscoverer {
         }
 
         // Prioritize standalone distributions over machine-specific package managers
-        candidates.sort_by_key(|c| is_non_standalone_path(c));
-
-        let mut chosen_cc: Option<PathBuf> = None;
-        let mut chosen_version: Option<String> = None;
-
-        for candidate in candidates {
-            if is_non_standalone_path(&candidate) {
-                emit_non_relocatable_notice(&candidate);
+        let Some((cc_bin, version)) = select_preferred_verified(candidates, |candidate| {
+            let output = Command::new(candidate).arg("--version").output().ok()?;
+            if !output.status.success() {
+                return None;
             }
-
-            if let Ok(output) = Command::new(&candidate).arg("--version").output() {
-                if output.status.success() {
-                    let version_str = String::from_utf8_lossy(&output.stdout)
-                        .lines()
-                        .next()
-                        .unwrap_or("cc")
-                        .trim()
-                        .to_string();
-
-                    let is_non_standalone = is_non_standalone_path(&candidate);
-                    let should_replace = match &chosen_cc {
-                        None => true,
-                        Some(prev) => !is_non_standalone && is_non_standalone_path(prev),
-                    };
-                    if should_replace {
-                        chosen_cc = Some(candidate);
-                        chosen_version = Some(version_str);
-                        if !is_non_standalone {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        let cc_bin = match chosen_cc {
-            Some(bin) => bin,
-            None => return Ok(None),
+            Some(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or("cc")
+                    .trim()
+                    .to_string(),
+            )
+        }) else {
+            return Ok(None);
         };
-        let version = chosen_version.unwrap_or_else(|| "cc".to_string());
 
         let bin_dir = cc_bin.parent().unwrap_or(Path::new(""));
         let root_dir = bin_dir.parent().unwrap_or(bin_dir).to_path_buf();

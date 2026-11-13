@@ -12,26 +12,25 @@ pub use lockfile::{
 };
 pub use manifest::{DependencySpec, ManifestError, ManifestInfo, ManifestScanner};
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ResolverError {
+    #[error("Resolver IO Error: {0}")]
     Io(String),
+    #[error("Resolver Lockfile Error: {0}")]
     Lockfile(String),
+    #[error("Resolver Network Error: {0}")]
     Network(String),
+    #[error("Resolver Parse Error: {0}")]
     Parse(String),
+    #[error("Resolver Command Error: {0}")]
+    Command(String),
+    #[error("Fail-Fast Guardrail: Workspace scan detected manifests, but resolved 0 packages.")]
+    EmptyResolution,
+    #[error("Manifest Scan Error: {0}")]
+    Manifest(#[from] ManifestError),
+    #[error("Lockfile Error: {0}")]
+    Lock(#[from] LockError),
 }
-
-impl std::fmt::Display for ResolverError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(msg) => write!(f, "Resolver IO Error: {}", msg),
-            Self::Lockfile(msg) => write!(f, "Resolver Lockfile Error: {}", msg),
-            Self::Network(msg) => write!(f, "Resolver Network Error: {}", msg),
-            Self::Parse(msg) => write!(f, "Resolver Parse Error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for ResolverError {}
 
 impl From<ResolverError> for String {
     fn from(err: ResolverError) -> Self {
@@ -43,7 +42,7 @@ pub struct ResolverEngine;
 
 impl ResolverEngine {
     /// Scans project workspace, auto-resolves dependencies across ecosystems, and produces a cryptographic lockfile
-    pub fn resolve_workspace(workspace_dir: &Path) -> Result<DmzLockfile, String> {
+    pub fn resolve_workspace(workspace_dir: &Path) -> Result<DmzLockfile, ResolverError> {
         Self::resolve_workspace_with_target(workspace_dir, None)
     }
 
@@ -51,7 +50,7 @@ impl ResolverEngine {
     pub fn resolve_workspace_with_target(
         workspace_dir: &Path,
         target_platform: Option<String>,
-    ) -> Result<DmzLockfile, String> {
+    ) -> Result<DmzLockfile, ResolverError> {
         let manifest_path = workspace_dir.join("dmz-workspace.toml");
         if manifest_path.is_file() {
             if let Ok(manifest) =
@@ -77,7 +76,7 @@ impl ResolverEngine {
         project: &crate::workspace::WorkspaceProjectConfig,
         manifest_path: Option<&Path>,
         target_platform: Option<String>,
-    ) -> Result<DmzLockfile, String> {
+    ) -> Result<DmzLockfile, ResolverError> {
         let layouts = project.resolve_member_layouts(workspace_dir, manifest_path);
         if layouts.is_empty() {
             return Self::resolve_single_workspace_with_target(workspace_dir, target_platform);
@@ -94,10 +93,10 @@ impl ResolverEngine {
 
         for layout in &layouts {
             if !layout.host_path.is_dir() {
-                return Err(format!(
+                return Err(ResolverError::Io(format!(
                     "Workspace member '{}' directory does not exist at {:?}",
                     layout.id, layout.host_path
-                ));
+                )));
             }
 
             let member_cfg = project.find_member(&layout.id);
@@ -121,7 +120,7 @@ impl ResolverEngine {
                         closure_signature: Some(member_sig),
                     });
                 }
-                Err(e) if layouts.len() > 1 && e.contains("resolved 0 packages") => {
+                Err(ResolverError::EmptyResolution) if layouts.len() > 1 => {
                     info!(
                         member = %layout.id,
                         path = ?layout.host_path,
@@ -138,10 +137,10 @@ impl ResolverEngine {
                     });
                 }
                 Err(e) => {
-                    return Err(format!(
+                    return Err(ResolverError::Lockfile(format!(
                         "Failed to resolve member '{}' at {:?}: {}",
                         layout.id, layout.host_path, e
-                    ));
+                    )));
                 }
             }
         }
@@ -170,7 +169,7 @@ impl ResolverEngine {
         workspace_dir: &Path,
         manifest: &crate::workspace::WorkspaceProjectConfig,
         target_platform: Option<String>,
-    ) -> Result<DmzLockfile, String> {
+    ) -> Result<DmzLockfile, ResolverError> {
         Self::resolve_multi_workspace(workspace_dir, manifest, None, target_platform)
     }
 
@@ -178,7 +177,7 @@ impl ResolverEngine {
     pub fn resolve_single_workspace_with_target(
         workspace_dir: &Path,
         target_platform: Option<String>,
-    ) -> Result<DmzLockfile, String> {
+    ) -> Result<DmzLockfile, ResolverError> {
         info!(path = ?workspace_dir, "Scanning workspace and auto-resolving dependencies across ecosystems...");
 
         let mut locked_packages = Vec::new();
@@ -205,15 +204,22 @@ impl ResolverEngine {
                 .arg("1")
                 .current_dir(cargo_dir)
                 .output()
-                .map_err(|e| format!("Failed to execute `cargo metadata`: {}", e))?;
+                .map_err(|e| {
+                    ResolverError::Command(format!("Failed to execute `cargo metadata`: {}", e))
+                })?;
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(format!("Cargo metadata resolution failed:\n{}", stderr));
+                return Err(ResolverError::Command(format!(
+                    "Cargo metadata resolution failed:\n{}",
+                    stderr
+                )));
             }
 
-            let json_meta: serde_json::Value = serde_json::from_slice(&output.stdout)
-                .map_err(|e| format!("Failed to parse cargo metadata JSON: {}", e))?;
+            let json_meta: serde_json::Value =
+                serde_json::from_slice(&output.stdout).map_err(|e| {
+                    ResolverError::Parse(format!("Failed to parse cargo metadata JSON: {}", e))
+                })?;
 
             // Collect workspace member IDs for accurate local path identification
             let workspace_member_ids: Vec<String> = json_meta
@@ -276,8 +282,7 @@ impl ResolverEngine {
         }
 
         // Scan remaining non-Cargo ecosystems using the standard ManifestScanner
-        let manifests = crate::resolver::manifest::ManifestScanner::scan_dir(workspace_dir)
-            .map_err(|e| format!("Manifest Scan Error: {}", e))?;
+        let manifests = crate::resolver::manifest::ManifestScanner::scan_dir(workspace_dir)?;
 
         for manifest in manifests {
             info!(ecosystem = ?manifest.ecosystem, path = ?manifest.path, "Processing manifest");
@@ -298,7 +303,7 @@ impl ResolverEngine {
                         ecosystem: dep.ecosystem,
                         sha256: dummy_hash,
                         source_url: None,
-                        dependencies: Vec::new(),
+                        dependencies: dep.dependencies,
                         member_id: None,
                     });
                 }
@@ -306,10 +311,7 @@ impl ResolverEngine {
         }
 
         if locked_packages.is_empty() {
-            return Err(
-                "Fail-Fast Guardrail: Workspace scan detected manifests, but resolved 0 packages."
-                    .to_string(),
-            );
+            return Err(ResolverError::EmptyResolution);
         }
 
         // Auto-resolve companion native binary package for @tauri-apps/cli
@@ -374,7 +376,10 @@ impl ResolverEngine {
     }
 
     /// Fetches locked dependencies from dmz.lock, downloads real package artifacts, verifies hashes, and populates the local store cache
-    pub fn fetch_dependencies(lockfile_path: &Path, store_path: &Path) -> Result<usize, String> {
+    pub fn fetch_dependencies(
+        lockfile_path: &Path,
+        store_path: &Path,
+    ) -> Result<usize, ResolverError> {
         fetch::DependencyFetcher::fetch_dependencies(lockfile_path, store_path)
     }
 

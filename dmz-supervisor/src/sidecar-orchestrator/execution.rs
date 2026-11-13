@@ -9,35 +9,30 @@ use super::child::ManagedChild;
 use super::types::{SidecarOrchestratorError, SidecarPairConfig};
 
 /// Automatically infers execution command and arguments for a workspace member based on project manifests
-pub fn infer_member_execution(
+pub fn infer_member_execution_in(
+    workspace_root: &Path,
     member_dir: &Path,
     member: &WorkspaceMember,
 ) -> Result<(String, Vec<String>), SidecarOrchestratorError> {
-    let workspace_root = member_dir.parent().unwrap_or(member_dir);
     if let Ok(resolved) = member.resolve_command(member_dir, workspace_root) {
         return Ok(resolved);
-    }
-
-    // Fallback: check any standalone .py file in member_dir even if requirements.txt/pyproject.toml is absent
-    if let Ok(entries) = std::fs::read_dir(member_dir) {
-        let py_cmd = if cfg!(windows) {
-            "python".to_string()
-        } else {
-            "python3".to_string()
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() && path.extension().is_some_and(|e| e == "py") {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    return Ok((py_cmd, vec![name.to_string()]));
-                }
-            }
-        }
     }
 
     Err(SidecarOrchestratorError::ExecutionInferenceFailed {
         path: member_dir.display().to_string(),
     })
+}
+
+/// Automatically infers execution command and arguments for a workspace member based on project manifests.
+///
+/// Uses `member_dir.parent()` as a fallback workspace root when the workspace root is not passed explicitly;
+/// prefer [`infer_member_execution_in`] when `workspace_root` is known.
+pub fn infer_member_execution(
+    member_dir: &Path,
+    member: &WorkspaceMember,
+) -> Result<(String, Vec<String>), SidecarOrchestratorError> {
+    let workspace_root = member_dir.parent().unwrap_or(member_dir);
+    infer_member_execution_in(workspace_root, member_dir, member)
 }
 
 pub async fn spawn_member_process(

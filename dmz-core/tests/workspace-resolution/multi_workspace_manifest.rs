@@ -207,8 +207,9 @@ fn test_member_command_detection_and_fail_fast_validation() {
     let err = empty_member
         .resolve_command(&empty_dir, root)
         .expect_err("Expected fail-fast error for unconfigured member");
-    assert!(err.contains("Unable to determine execution command"));
-    assert!(err.contains("exec_command"));
+    let err_msg = err.to_string();
+    assert!(err_msg.contains("Unable to determine execution command"));
+    assert!(err_msg.contains("exec_command"));
 
     // 2. Node with pnpm-lock.yaml and dev script
     let node_dir = root.join("node-app");

@@ -64,6 +64,7 @@ impl PythonManifestScanner {
                     version_req,
                     ecosystem: Ecosystem::PyPI,
                     is_dev: false,
+                    dependencies: Vec::new(),
                 });
             }
         }
@@ -98,6 +99,7 @@ impl PythonManifestScanner {
                             version_req,
                             ecosystem: Ecosystem::PyPI,
                             is_dev: false,
+                            dependencies: Vec::new(),
                         });
                     }
                 }
@@ -130,6 +132,7 @@ impl PythonManifestScanner {
                                         version_req,
                                         ecosystem: Ecosystem::PyPI,
                                         is_dev: true,
+                                        dependencies: Vec::new(),
                                     });
                                 }
                             }
@@ -172,6 +175,7 @@ impl PythonManifestScanner {
                     version_req,
                     ecosystem: Ecosystem::PyPI,
                     is_dev: false,
+                    dependencies: Vec::new(),
                 });
             }
         }
@@ -397,6 +401,7 @@ impl PythonManifestScanner {
                     version_req: version.to_string(),
                     ecosystem: Ecosystem::PyPI,
                     is_dev: false,
+                    dependencies: Vec::new(),
                 });
             }
         }

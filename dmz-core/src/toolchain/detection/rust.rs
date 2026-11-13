@@ -68,7 +68,7 @@ impl RustDetector {
     ) {
         let cargo_toml = workspace_root.join("Cargo.toml");
         if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
-            if let Ok(val) = content.parse::<toml::Value>() {
+            if let Ok(val) = toml::from_str::<toml::Value>(&content) {
                 Self::check_cargo_toml_build_tool_deps(&val, ecosystems);
                 if let Some(workspace) = val.get("workspace") {
                     if let Some(members) = workspace.get("members").and_then(|m| m.as_array()) {
@@ -79,7 +79,8 @@ impl RustDetector {
                                 {
                                     let member_toml = member_dir.join("Cargo.toml");
                                     if let Ok(m_content) = std::fs::read_to_string(&member_toml) {
-                                        if let Ok(m_val) = m_content.parse::<toml::Value>() {
+                                        if let Ok(m_val) = toml::from_str::<toml::Value>(&m_content)
+                                        {
                                             Self::check_cargo_toml_build_tool_deps(
                                                 &m_val, ecosystems,
                                             );
@@ -101,7 +102,7 @@ impl RustDetector {
     ) {
         let cargo_toml = workspace_root.join("Cargo.toml");
         if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
-            if let Ok(val) = content.parse::<toml::Value>() {
+            if let Ok(val) = toml::from_str::<toml::Value>(&content) {
                 if let Some(workspace) = val.get("workspace") {
                     if let Some(members) = workspace.get("members").and_then(|m| m.as_array()) {
                         for m in members {

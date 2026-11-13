@@ -59,6 +59,7 @@ impl NpmManifestScanner {
                     version_req: ver,
                     ecosystem: Ecosystem::Npm,
                     is_dev: false,
+                    dependencies: Vec::new(),
                 });
             }
         }
@@ -72,6 +73,7 @@ impl NpmManifestScanner {
                     version_req: ver,
                     ecosystem: Ecosystem::Npm,
                     is_dev: true,
+                    dependencies: Vec::new(),
                 });
             }
         }
@@ -211,6 +213,9 @@ impl NpmManifestScanner {
         };
 
         let mut in_packages_or_snapshots = false;
+        let mut current_entry: Option<(usize, usize)> = None; // (deps vec idx, entry indent)
+        let mut deps_block_indent: Option<usize> = None;
+
         for line in content.lines() {
             let trimmed_end = line.trim_end();
             if trimmed_end.is_empty() || trimmed_end.trim_start().starts_with('#') {
@@ -220,6 +225,8 @@ impl NpmManifestScanner {
             if !trimmed_end.starts_with(' ') && !trimmed_end.starts_with('\t') {
                 in_packages_or_snapshots =
                     trimmed_end == "packages:" || trimmed_end == "snapshots:";
+                current_entry = None;
+                deps_block_indent = None;
                 continue;
             }
             if !in_packages_or_snapshots {
@@ -227,13 +234,59 @@ impl NpmManifestScanner {
             }
 
             let indent = trimmed_end.len() - trimmed_end.trim_start().len();
+            let trimmed = trimmed_end.trim();
+
+            if let Some(dep_indent) = deps_block_indent {
+                if indent > dep_indent {
+                    if let Some((idx, _)) = current_entry {
+                        if let Some((raw_dep_name, raw_dep_ver)) = trimmed.split_once(':') {
+                            let dep_name = raw_dep_name
+                                .trim()
+                                .trim_matches('\'')
+                                .trim_matches('"')
+                                .to_string();
+                            let raw_ver = raw_dep_ver.trim().trim_matches('\'').trim_matches('"');
+                            let ver_clean = raw_ver
+                                .split('(')
+                                .next()
+                                .unwrap_or(raw_ver)
+                                .split('_')
+                                .next()
+                                .unwrap_or(raw_ver)
+                                .trim();
+                            if !dep_name.is_empty() && !ver_clean.is_empty() {
+                                let edge = format!("{}@{}", dep_name, ver_clean);
+                                if let Some(spec) = deps.get_mut(idx) {
+                                    if !spec.dependencies.contains(&edge) {
+                                        spec.dependencies.push(edge);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                } else {
+                    deps_block_indent = None;
+                }
+            }
+
+            if let Some((_, entry_indent)) = current_entry {
+                if indent > entry_indent {
+                    if trimmed == "dependencies:" || trimmed == "optionalDependencies:" {
+                        deps_block_indent = Some(indent);
+                    }
+                    continue;
+                }
+            }
+
             let is_entry = trimmed_end.ends_with(':') || trimmed_end.ends_with(": {}");
             if !(2..=4).contains(&indent) || !is_entry {
+                current_entry = None;
+                deps_block_indent = None;
                 continue;
             }
 
-            let key = trimmed_end
-                .trim()
+            let key = trimmed
                 .trim_end_matches(": {}")
                 .trim_end_matches(':')
                 .trim_matches('\'')
@@ -242,19 +295,29 @@ impl NpmManifestScanner {
 
             if let Some((name, version)) = Self::parse_pnpm_package_key(key) {
                 if !Self::is_compatible_npm_platform_pkg(&name) {
+                    current_entry = None;
+                    deps_block_indent = None;
                     continue;
                 }
-                if !deps
+                if let Some(existing_idx) = deps
                     .iter()
-                    .any(|d: &DependencySpec| d.name == name && d.version_req == version)
+                    .position(|d: &DependencySpec| d.name == name && d.version_req == version)
                 {
+                    current_entry = Some((existing_idx, indent));
+                } else {
                     deps.push(DependencySpec {
                         name,
                         version_req: version,
                         ecosystem: Ecosystem::Npm,
                         is_dev: false,
+                        dependencies: Vec::new(),
                     });
+                    current_entry = Some((deps.len() - 1, indent));
                 }
+                deps_block_indent = None;
+            } else {
+                current_entry = None;
+                deps_block_indent = None;
             }
         }
 
@@ -339,6 +402,7 @@ impl NpmManifestScanner {
                         version_req: version.to_string(),
                         ecosystem: Ecosystem::Npm,
                         is_dev: meta.get("dev").and_then(|d| d.as_bool()).unwrap_or(false),
+                        dependencies: Vec::new(),
                     });
                 }
             }
@@ -357,6 +421,7 @@ impl NpmManifestScanner {
                                 version_req: version.to_string(),
                                 ecosystem: Ecosystem::Npm,
                                 is_dev: false,
+                                dependencies: Vec::new(),
                             });
                         }
                     }
@@ -424,6 +489,7 @@ impl NpmManifestScanner {
                             version_req: version.to_string(),
                             ecosystem: Ecosystem::Npm,
                             is_dev: false,
+                            dependencies: Vec::new(),
                         });
                     }
                     current_pkg_name = None;

@@ -35,7 +35,7 @@ pub(super) fn show(state: &mut AgentState, ui: &mut egui::Ui, status_message: &m
                 ui.add_sized(
                     egui::vec2(ui.available_width(), 32.0),
                     egui::TextEdit::singleline(&mut state.agent_id)
-                        .vertical_align(egui::Align::Center)
+                        .align(egui::Align2::LEFT_CENTER)
                         .margin(egui::Margin::symmetric(8, 0)),
                 );
                 ui.end_row();
@@ -44,7 +44,7 @@ pub(super) fn show(state: &mut AgentState, ui: &mut egui::Ui, status_message: &m
                 ui.add_sized(
                     egui::vec2(ui.available_width(), 32.0),
                     egui::TextEdit::singleline(&mut state.allowed_domains)
-                        .vertical_align(egui::Align::Center)
+                        .align(egui::Align2::LEFT_CENTER)
                         .margin(egui::Margin::symmetric(8, 0))
                         .hint_text("api.example.com, *.example.org"),
                 );

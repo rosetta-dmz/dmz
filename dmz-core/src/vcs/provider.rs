@@ -3,7 +3,6 @@
 
 use git2::{DiffOptions, Error as GitError, ErrorClass, ErrorCode, Repository, StatusOptions};
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
@@ -34,58 +33,23 @@ pub struct BundleInfo {
 }
 
 /// Typed errors originating from VCS and repository operations.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum VcsError {
     /// Underlying libgit2 failure
-    Git(GitError),
+    #[error("VCS Git Error: {0}")]
+    Git(#[from] GitError),
     /// Underlying filesystem I/O failure
-    Io(std::io::Error),
+    #[error("VCS IO Error: {0}")]
+    Io(#[from] std::io::Error),
     /// Bundle format or structural parsing error
+    #[error("Malformed VCS bundle: {0}")]
     MalformedBundle(String),
     /// Missing prerequisite commit required for incremental restoration
+    #[error("Missing prerequisite commit {commit} for incremental bundle")]
     MissingPrerequisite { commit: String },
     /// Working tree or head reference checkout failure
+    #[error("VCS checkout failed: {0}")]
     CheckoutFailed(String),
-}
-
-impl fmt::Display for VcsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Git(e) => write!(f, "VCS Git Error: {}", e),
-            Self::Io(e) => write!(f, "VCS IO Error: {}", e),
-            Self::MalformedBundle(msg) => write!(f, "Malformed VCS bundle: {}", msg),
-            Self::MissingPrerequisite { commit } => {
-                write!(
-                    f,
-                    "Missing prerequisite commit {} for incremental bundle",
-                    commit
-                )
-            }
-            Self::CheckoutFailed(msg) => write!(f, "VCS checkout failed: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for VcsError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Git(e) => Some(e),
-            Self::Io(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<GitError> for VcsError {
-    fn from(e: GitError) -> Self {
-        Self::Git(e)
-    }
-}
-
-impl From<std::io::Error> for VcsError {
-    fn from(e: std::io::Error) -> Self {
-        Self::Io(e)
-    }
 }
 
 impl From<VcsError> for GitError {
