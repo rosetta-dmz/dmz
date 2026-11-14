@@ -1,5 +1,4 @@
 use crate::install::archive::SafeArchiveExtractor;
-use crate::install::fast_clone::FastClone;
 use crate::install::InstallError;
 use crate::resolver::lockfile::LockedPackage;
 use std::fs;
@@ -160,7 +159,7 @@ impl PyPiMapper {
             let sh_content = format!(
                 r#"#!/bin/sh
 VENV_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-export PYTHONPATH="$VENV_DIR/lib/{py_ver}/site-packages:$PYTHONPATH"
+export PYTHONPATH="$VENV_DIR/../.dmz/venv/lib/{py_ver}/site-packages:$VENV_DIR/lib/{py_ver}/site-packages:${{PYTHONPATH:-}}"
 if [ -x "$VENV_DIR/bin/python3" ]; then
   exec "$VENV_DIR/bin/python3" -c "import sys; from {module} import {func}; sys.exit({func}())" "$@"
 elif [ -x "$VENV_DIR/../.dmz/toolchains/python/bin/python3" ]; then
@@ -185,7 +184,7 @@ fi
             r#"@echo off
 setlocal
 set "VENV_DIR=%~dp0.."
-set "PYTHONPATH=%VENV_DIR%\lib\{py_ver}\site-packages;%PYTHONPATH%"
+set "PYTHONPATH=%VENV_DIR%\..\.dmz\venv\lib\{py_ver}\site-packages;%VENV_DIR%\lib\{py_ver}\site-packages;%PYTHONPATH%"
 if exist "%VENV_DIR%\Scripts\python.exe" (
   "%VENV_DIR%\Scripts\python.exe" -c "import sys; from {module} import {func}; sys.exit({func}())" %*
 ) else (
@@ -202,7 +201,7 @@ if exist "%VENV_DIR%\Scripts\python.exe" (
         let ps1_path = bin_dir.join(format!("{}.ps1", cmd_name));
         let ps1_content = format!(
             r#"$VenvDir = Split-Path (Split-Path $PSScriptRoot -Parent)
-$env:PYTHONPATH = "$VenvDir/lib/{py_ver}/site-packages;$env:PYTHONPATH"
+$env:PYTHONPATH = "$VenvDir/../.dmz/venv/lib/{py_ver}/site-packages;$VenvDir/lib/{py_ver}/site-packages;$env:PYTHONPATH"
 python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
 "#,
             py_ver = py_ver,
@@ -242,16 +241,17 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
         // Hydrate console scripts (e.g., uvicorn, flask, pytest, jinja2)
         Self::hydrate_console_scripts(workspace_path, &venv_site_packages, &py_ver);
 
-        // Mirror/link into workspace .venv so virtual environment commands and IDE static analyzers
-        // (Pylance/Pyright) can locate dependencies directly inside .venv/lib/<py_ver>/site-packages
+        // Expose `.dmz/venv/lib/<py_ver>/site-packages` via lightweight `.pth` pointers inside
+        // `.venv` instead of cloning every extracted file twice across the workspace.
         let root_venv = workspace_path.join(".venv");
         let root_site_packages = root_venv.join("lib").join(&py_ver).join("site-packages");
         fs::create_dir_all(&root_site_packages).map_err(|e| {
             InstallError::IoError(format!("Failed to create .venv site-packages: {}", e))
         })?;
-        FastClone::clone_dir_recursive(&venv_site_packages, &root_site_packages).map_err(|e| {
-            InstallError::IoError(format!("Failed to mirror site-packages into .venv: {}", e))
-        })?;
+        let pth_target = format!("../../../../.dmz/venv/lib/{}/site-packages\n", py_ver);
+        let pth_file = root_site_packages.join("dmz_store.pth");
+        crate::workspace::atomic_write_file(&pth_file, pth_target.as_bytes())
+            .map_err(|e| InstallError::IoError(format!("Failed to write {:?}: {}", pth_file, e)))?;
         #[cfg(unix)]
         {
             let py3_alias = root_venv.join("lib").join("python3");
@@ -263,24 +263,24 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
         }
         #[cfg(windows)]
         {
-            let py3_alias = root_venv.join("lib").join("python3");
-            if !py3_alias.exists() {
-                FastClone::clone_dir_recursive(
-                    &root_site_packages,
-                    &py3_alias.join("site-packages"),
-                )?;
-            }
+            let py3_sp = root_venv.join("lib").join("python3").join("site-packages");
+            fs::create_dir_all(&py3_sp).map_err(|e| {
+                InstallError::IoError(format!("Failed to create {:?}: {}", py3_sp, e))
+            })?;
+            crate::workspace::atomic_write_file(
+                &py3_sp.join("dmz_store.pth"),
+                pth_target.as_bytes(),
+            )
+            .map_err(|e| InstallError::IoError(format!("Failed to write py3 .pth: {}", e)))?;
+
             let win_sp = root_venv.join("Lib").join("site-packages");
-            if !win_sp.exists() {
-                FastClone::clone_dir_recursive(&root_site_packages, &win_sp)?;
-            }
+            fs::create_dir_all(&win_sp).map_err(|e| {
+                InstallError::IoError(format!("Failed to create {:?}: {}", win_sp, e))
+            })?;
+            let win_pth = format!("../../../.dmz/venv/lib/{}/site-packages\n", py_ver);
+            crate::workspace::atomic_write_file(&win_sp.join("dmz_store.pth"), win_pth.as_bytes())
+                .map_err(|e| InstallError::IoError(format!("Failed to write Lib .pth: {}", e)))?;
         }
-        let pth_file = root_site_packages.join("dmz_store.pth");
-        fs::write(
-            &pth_file,
-            format!("../../../../.dmz/venv/lib/{}/site-packages\n", py_ver),
-        )
-        .map_err(|e| InstallError::IoError(format!("Failed to write {:?}: {}", pth_file, e)))?;
 
         // Hydrate runnable python interpreter launcher and pyvenv.cfg
         Self::hydrate_venv_environment(workspace_path, &root_venv, &py_ver)?;
@@ -318,7 +318,7 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
 VENV_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 export VIRTUAL_ENV="$VENV_DIR"
 export PATH="$VENV_DIR/bin:$PATH"
-export PYTHONPATH="$VENV_DIR/lib/{py_ver}/site-packages:${{PYTHONPATH:-}}"
+export PYTHONPATH="$VENV_DIR/../.dmz/venv/lib/{py_ver}/site-packages:$VENV_DIR/lib/{py_ver}/site-packages:${{PYTHONPATH:-}}"
 
 # Check bundled toolchain python across single-repo and umbrella member depths
 _PY=""
@@ -396,7 +396,7 @@ export PATH
 set "VENV_DIR=%~dp0.."
 set "VIRTUAL_ENV=%VENV_DIR%"
 set "PATH=%VENV_DIR%\Scripts;%PATH%"
-set "PYTHONPATH=%VENV_DIR%\lib\{py_ver}\site-packages;%PYTHONPATH%"
+set "PYTHONPATH=%VENV_DIR%\..\.dmz\venv\lib\{py_ver}\site-packages;%VENV_DIR%\lib\{py_ver}\site-packages;%PYTHONPATH%"
 
 set "_PY=python"
 if exist "%VENV_DIR%\..\.dmz\toolchains\python\python.exe" (

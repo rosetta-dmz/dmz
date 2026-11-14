@@ -14,6 +14,14 @@ pub struct ManifestScanner;
 
 impl ManifestScanner {
     pub fn scan_dir(root_path: &Path) -> Result<Vec<ManifestInfo>, ManifestError> {
+        Self::scan_dir_with_options(root_path, None, true)
+    }
+
+    pub fn scan_dir_with_options(
+        root_path: &Path,
+        target_platform: Option<&str>,
+        include_dev: bool,
+    ) -> Result<Vec<ManifestInfo>, ManifestError> {
         if !root_path.exists() || !root_path.is_dir() {
             return Err(ManifestError::IoError(format!(
                 "Directory does not exist: {}",
@@ -23,8 +31,18 @@ impl ManifestScanner {
 
         let mut results = Vec::new();
         cargo::CargoManifestScanner::scan(root_path, &mut results)?;
-        npm::NpmManifestScanner::scan(root_path, &mut results)?;
-        python::PythonManifestScanner::scan(root_path, &mut results)?;
+        npm::NpmManifestScanner::scan_with_options(
+            root_path,
+            target_platform,
+            include_dev,
+            &mut results,
+        )?;
+        python::PythonManifestScanner::scan_with_options(
+            root_path,
+            &mut results,
+            target_platform,
+            include_dev,
+        )?;
         go::GoManifestScanner::scan(root_path, &mut results)?;
         other::OtherManifestScanner::scan(root_path, &mut results)?;
         Ok(results)
@@ -34,12 +52,29 @@ impl ManifestScanner {
         python::PythonManifestScanner::parse_pep508_requirement(raw_line)
     }
 
+    pub fn parse_pep508_requirement_for_target(
+        raw_line: &str,
+        target_platform: Option<&str>,
+    ) -> Option<(String, String)> {
+        python::PythonManifestScanner::parse_pep508_requirement_for_target(
+            raw_line,
+            target_platform,
+        )
+    }
+
     pub fn normalize_pypi_name(name: &str) -> String {
         python::PythonManifestScanner::normalize_pypi_name(name)
     }
 
     pub fn is_compatible_npm_platform_pkg(name: &str) -> bool {
         npm::NpmManifestScanner::is_compatible_npm_platform_pkg(name)
+    }
+
+    pub fn is_compatible_npm_platform_pkg_for_target(
+        name: &str,
+        target_platform: Option<&str>,
+    ) -> bool {
+        npm::NpmManifestScanner::is_compatible_npm_platform_pkg_for_target(name, target_platform)
     }
 
     pub fn merge_locked_dependencies(

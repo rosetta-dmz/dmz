@@ -98,6 +98,7 @@ mod tests {
             target_store_dir: store,
             target_workspace_dir: ws,
             verify_closure_hash: false,
+            ..Default::default()
         };
 
         let result = AirGapImporter::import(&config);
@@ -172,6 +173,7 @@ mod tests {
             target_store_dir: store,
             target_workspace_dir: ws,
             verify_closure_hash: false,
+            ..Default::default()
         };
 
         let result = AirGapImporter::import(&config);

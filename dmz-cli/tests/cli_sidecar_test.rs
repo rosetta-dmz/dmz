@@ -346,3 +346,134 @@ fn test_cli_resolve_workspace_relative_path_resolution() {
         dmz_cli::commands::resolve_workspace_relative_path(ws, rel_candidate, ".dmz/store");
     assert_eq!(res_rel, PathBuf::from("/workspace/sub/custom_store"));
 }
+
+#[test]
+fn test_cli_include_dev_and_toolchain_profile_defaults_and_overrides(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use dmz_cli::cli::CliToolchainProfile;
+
+    let res_default = Cli::try_parse_from(["dmz", "resolve"])?;
+    if let Commands::Resolve { include_dev, .. } = res_default.command {
+        assert!(!include_dev);
+    } else {
+        return Err("Expected Commands::Resolve".into());
+    }
+
+    let res_dev = Cli::try_parse_from(["dmz", "resolve", "--include-dev"])?;
+    if let Commands::Resolve { include_dev, .. } = res_dev.command {
+        assert!(include_dev);
+    } else {
+        return Err("Expected Commands::Resolve".into());
+    }
+
+    let bundle_default = Cli::try_parse_from(["dmz", "bundle"])?;
+    if let Commands::Bundle(args) = bundle_default.command {
+        assert!(!args.include_dev);
+        assert_eq!(args.toolchain_profile, CliToolchainProfile::Minimal);
+    } else {
+        return Err("Expected Commands::Bundle".into());
+    }
+
+    let bundle_full = Cli::try_parse_from([
+        "dmz",
+        "bundle",
+        "--include-dev",
+        "--toolchain-profile",
+        "full",
+    ])?;
+    if let Commands::Bundle(args) = bundle_full.command {
+        assert!(args.include_dev);
+        assert_eq!(args.toolchain_profile, CliToolchainProfile::Full);
+    } else {
+        return Err("Expected Commands::Bundle".into());
+    }
+
+    let export_full = Cli::try_parse_from([
+        "dmz",
+        "export",
+        "--output",
+        "out.tar.zst",
+        "--toolchain-profile",
+        "full",
+    ])?;
+    if let Commands::Export(args) = export_full.command {
+        assert!(!args.include_dev);
+        assert_eq!(args.toolchain_profile, CliToolchainProfile::Full);
+    } else {
+        return Err("Expected Commands::Export".into());
+    }
+
+    let import_dev =
+        Cli::try_parse_from(["dmz", "import", "--archive", "in.tar.zst", "--include-dev"])?;
+    if let Commands::Import(args) = import_dev.command {
+        assert!(args.include_dev);
+    } else {
+        return Err("Expected Commands::Import".into());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_cli_bundle_ignores_unrelated_ancestor_dmz_workspace_toml(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use dmz_core::resolver::lockfile::{DmzLockfile, LockedPackage};
+    use dmz_core::resolver::manifest::Ecosystem;
+
+    let tmp = tempfile::tempdir()?;
+    let ancestor = tmp.path();
+    let child_ws = ancestor.join("standalone-app");
+    let out_archive = child_ws.join("dist/bundle.tar.zst");
+
+    // Ancestor umbrella referencing an unrelated non-existent sibling member.
+    // If `run_bundle` climbed ancestors, exporting the umbrella would fail.
+    std::fs::write(
+        ancestor.join("dmz-workspace.toml"),
+        r#"
+name = "unrelated-umbrella"
+[[members]]
+id = "missing-sidecar"
+path = "nonexistent-sibling"
+role = "sidecar"
+ecosystem = "python"
+"#,
+    )?;
+
+    std::fs::create_dir_all(child_ws.join("src"))?;
+    std::fs::write(
+        child_ws.join("Cargo.toml"),
+        "[package]\nname = \"standalone-app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )?;
+    std::fs::write(child_ws.join("src/lib.rs"), "pub fn ok() {}\n")?;
+
+    let lockfile = DmzLockfile::new(vec![LockedPackage {
+        name: "standalone-app".to_string(),
+        version: "path:Cargo.toml".to_string(),
+        ecosystem: Ecosystem::Cargo,
+        sha256: DmzLockfile::hash_bytes(b"standalone-app"),
+        source_url: None,
+        dependencies: Vec::new(),
+        member_id: None,
+    }]);
+    lockfile.save(&child_ws.join("dmz.lock"))?;
+
+    let ws_str = child_ws.to_string_lossy().into_owned();
+    let out_str = out_archive.to_string_lossy().into_owned();
+    let parsed = Cli::try_parse_from([
+        "dmz",
+        "bundle",
+        "--workspace",
+        &ws_str,
+        "--output",
+        &out_str,
+        "--mode",
+        "code-only",
+        "--no-toolchain",
+    ])?;
+
+    let exit_code = dmz_cli::commands::dispatch(parsed.command)?;
+    assert_eq!(exit_code, 0);
+    assert!(out_archive.is_file());
+
+    Ok(())
+}

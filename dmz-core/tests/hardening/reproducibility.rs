@@ -45,6 +45,7 @@ fn test_deterministic_archive_reproducibility() -> anyhow::Result<()> {
         since: None,
         with_toolchain: false,
         multi_workspace: None,
+        ..Default::default()
     };
 
     let manifest1 = AirGapExporter::export(&export_cfg1)?;
@@ -70,6 +71,7 @@ fn test_deterministic_archive_reproducibility() -> anyhow::Result<()> {
         since: None,
         with_toolchain: false,
         multi_workspace: None,
+        ..Default::default()
     };
 
     let manifest2 = AirGapExporter::export(&export_cfg2)?;
@@ -121,6 +123,7 @@ fn test_single_pass_streaming_hash_matches_disk_hash() -> anyhow::Result<()> {
         since: None,
         with_toolchain: false,
         multi_workspace: None,
+        ..Default::default()
     };
 
     let manifest = AirGapExporter::export(&export_cfg)?;
@@ -180,6 +183,7 @@ fn test_export_symlink_containment() -> anyhow::Result<()> {
         since: None,
         with_toolchain: false,
         multi_workspace: None,
+        ..Default::default()
     };
 
     let manifest = AirGapExporter::export(&export_cfg)?;

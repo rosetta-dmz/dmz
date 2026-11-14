@@ -34,18 +34,20 @@ impl OtherManifestScanner {
             .map_err(|e| ManifestError::ParseError(format!("Invalid composer.json: {}", e)))?;
 
         let mut dependencies = Vec::new();
-        if let Some(require) = value.get("require").and_then(|r| r.as_object()) {
-            for (name, val) in require {
-                if name == "php" || name.starts_with("ext-") {
-                    continue;
+        for (section, is_dev) in [("require", false), ("require-dev", true)] {
+            if let Some(require) = value.get(section).and_then(|r| r.as_object()) {
+                for (name, val) in require {
+                    if name == "php" || name.starts_with("ext-") || name.starts_with("lib-") {
+                        continue;
+                    }
+                    dependencies.push(DependencySpec {
+                        name: name.clone(),
+                        version_req: val.as_str().unwrap_or("*").to_string(),
+                        ecosystem: Ecosystem::Composer,
+                        is_dev,
+                        dependencies: Vec::new(),
+                    });
                 }
-                dependencies.push(DependencySpec {
-                    name: name.clone(),
-                    version_req: val.as_str().unwrap_or("*").to_string(),
-                    ecosystem: Ecosystem::Composer,
-                    is_dev: false,
-                    dependencies: Vec::new(),
-                });
             }
         }
 
@@ -60,11 +62,26 @@ impl OtherManifestScanner {
         let content = fs::read_to_string(path)
             .map_err(|e| ManifestError::IoError(format!("Failed to read Gemfile: {}", e)))?;
         let mut dependencies = Vec::new();
+        let mut in_dev_group = false;
 
         for line in content.lines() {
-            let line = line.trim();
-            if line.starts_with("gem ") {
-                let parts: Vec<&str> = line.split(',').collect();
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if trimmed.starts_with("group ") && trimmed.contains(" do") {
+                let lower = trimmed.to_ascii_lowercase();
+                in_dev_group = lower.contains(":development") || lower.contains(":test");
+                continue;
+            }
+            if trimmed == "end" && in_dev_group {
+                in_dev_group = false;
+                continue;
+            }
+            if trimmed.starts_with("gem ") {
+                let lower = trimmed.to_ascii_lowercase();
+                let inline_dev = lower.contains(":development") || lower.contains(":test");
+                let parts: Vec<&str> = trimmed.split(',').collect();
                 if let Some(gem_part) = parts.first() {
                     let name = gem_part
                         .trim_start_matches("gem")
@@ -72,7 +89,9 @@ impl OtherManifestScanner {
                         .trim_matches(|c| c == '\'' || c == '"');
                     let version_req = parts
                         .get(1)
-                        .map(|v| v.trim().trim_matches(|c| c == '\'' || c == '"'))
+                        .map(|v| v.trim())
+                        .filter(|v| !v.contains(':') && !v.contains("=>"))
+                        .map(|v| v.trim_matches(|c| c == '\'' || c == '"'))
                         .unwrap_or("*")
                         .to_string();
 
@@ -80,7 +99,7 @@ impl OtherManifestScanner {
                         name: name.to_string(),
                         version_req,
                         ecosystem: Ecosystem::Bundler,
-                        is_dev: false,
+                        is_dev: in_dev_group || inline_dev,
                         dependencies: Vec::new(),
                     });
                 }
@@ -108,6 +127,8 @@ impl OtherManifestScanner {
                 let artifact_id = Self::extract_xml_tag(dep_block, "artifactId");
                 let version =
                     Self::extract_xml_tag(dep_block, "version").unwrap_or_else(|| "*".to_string());
+                let is_dev = Self::extract_xml_tag(dep_block, "scope")
+                    .is_some_and(|s| s.eq_ignore_ascii_case("test"));
 
                 if let Some(artifact) = artifact_id {
                     let coord = match group_id {
@@ -118,7 +139,7 @@ impl OtherManifestScanner {
                         name: coord,
                         version_req: version,
                         ecosystem: Ecosystem::MavenGradle,
-                        is_dev: false,
+                        is_dev,
                         dependencies: Vec::new(),
                     });
                 }

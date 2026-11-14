@@ -1,10 +1,13 @@
-use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
+use super::super::types::{
+    DiscoveredToolchain, ToolchainDiscoveryContext, ToolchainEcosystem, ToolchainProfile,
+};
 use super::super::ToolchainError;
 use super::{
     collect_files_recursive, emit_non_relocatable_notice, is_macos_usr_bin_stub,
     is_non_standalone_path, push_system_bin_candidates, push_unique_path, redact_home_prefix,
     resolve_prefix_root, select_strict_standalone_verified, ToolchainDiscoverer,
 };
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -20,6 +23,13 @@ impl ToolchainDiscoverer for GoDiscoverer {
     }
 
     fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
+        self.discover_with_context(&ToolchainDiscoveryContext::default())
+    }
+
+    fn discover_with_context(
+        &self,
+        ctx: &ToolchainDiscoveryContext,
+    ) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         let go_candidates = collect_go_candidates();
         if go_candidates.is_empty() {
             return Ok(None);
@@ -36,11 +46,13 @@ impl ToolchainDiscoverer for GoDiscoverer {
         info!(
             goroot = %redacted_root,
             version = %version,
+            profile = %ctx.profile,
             "Discovered host Go toolchain"
         );
 
         let bin_files = vec![(go_bin, "bin/go".into())];
-        let lib_files = collect_go_libs(&goroot_dir);
+        let lib_files =
+            collect_go_libs_for_context(&goroot_dir, ctx.profile, ctx.target_platform.as_deref());
 
         Ok(Some(DiscoveredToolchain {
             ecosystem: ToolchainEcosystem::Go,
@@ -128,14 +140,59 @@ fn probe_go_version(go_bin: &Path) -> String {
         .unwrap_or_else(|| "go".to_string())
 }
 
-fn collect_go_libs(goroot_dir: &Path) -> Vec<(PathBuf, String)> {
+fn to_go_os_arch(os: &str, arch: &str) -> String {
+    let go_os = match os {
+        "macos" => "darwin",
+        other => other,
+    };
+    let go_arch = match arch {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        other => other,
+    };
+    format!("{}_{}", go_os, go_arch)
+}
+
+fn collect_go_libs_for_context(
+    goroot_dir: &Path,
+    profile: ToolchainProfile,
+    target_platform: Option<&str>,
+) -> Vec<(PathBuf, String)> {
     let mut lib_files = Vec::new();
 
-    for (sub, prefix) in &[
-        ("pkg/tool", "pkg/tool"),
-        ("src", "src"),
-        ("pkg/include", "pkg/include"),
-    ] {
+    let pkg_tool = goroot_dir.join("pkg/tool");
+    if pkg_tool.is_dir() {
+        match profile {
+            ToolchainProfile::Full => {
+                collect_files_recursive(&pkg_tool, &pkg_tool, &mut lib_files, "pkg/tool");
+            }
+            ToolchainProfile::Minimal => {
+                let mut allowed_targets = HashSet::new();
+                allowed_targets.insert(to_go_os_arch(std::env::consts::OS, std::env::consts::ARCH));
+                let (t_os, t_arch) = crate::workspace::resolve_target_os_arch(target_platform);
+                allowed_targets.insert(to_go_os_arch(t_os, t_arch));
+
+                if let Ok(entries) = fs::read_dir(&pkg_tool) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        if p.is_file() {
+                            lib_files.push((p, format!("pkg/tool/{}", name)));
+                        } else if p.is_dir() && allowed_targets.contains(&name) {
+                            collect_files_recursive(
+                                &p,
+                                &p,
+                                &mut lib_files,
+                                &format!("pkg/tool/{}", name),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (sub, prefix) in &[("src", "src"), ("pkg/include", "pkg/include")] {
         let dir = goroot_dir.join(sub);
         if dir.is_dir() {
             collect_files_recursive(&dir, &dir, &mut lib_files, prefix);
@@ -187,5 +244,45 @@ mod tests {
         let rel_paths: Vec<String> = lib_files.into_iter().map(|(_, r)| r).collect();
         assert!(rel_paths.contains(&"src/fmt/print.go".to_string()));
         assert!(rel_paths.iter().any(|p| p.starts_with("pkg/tool/")));
+    }
+
+    #[test]
+    fn test_go_minimal_profile_prunes_foreign_pkg_tool_targets(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let goroot = temp.path().join("fake_goroot");
+        fs::create_dir_all(goroot.join("src/fmt"))?;
+        fs::create_dir_all(goroot.join("pkg/include"))?;
+        fs::create_dir_all(goroot.join("pkg/tool/linux_amd64"))?;
+        fs::create_dir_all(goroot.join("pkg/tool/windows_amd64"))?;
+        fs::create_dir_all(goroot.join("pkg/tool/freebsd_amd64"))?;
+
+        fs::write(goroot.join("src/fmt/print.go"), "package fmt")?;
+        fs::write(goroot.join("pkg/include/textflag.h"), "#define NOSPLIT")?;
+        fs::write(goroot.join("pkg/tool/linux_amd64/compile"), "linux")?;
+        fs::write(goroot.join("pkg/tool/windows_amd64/compile.exe"), "win")?;
+        fs::write(goroot.join("pkg/tool/freebsd_amd64/compile"), "bsd")?;
+
+        let min_rels: Vec<String> =
+            collect_go_libs_for_context(&goroot, ToolchainProfile::Minimal, Some("linux-x64"))
+                .into_iter()
+                .map(|(_, r)| r)
+                .collect();
+        assert!(min_rels.contains(&"pkg/tool/linux_amd64/compile".to_string()));
+        assert!(min_rels.contains(&"pkg/include/textflag.h".to_string()));
+        assert!(min_rels.contains(&"src/fmt/print.go".to_string()));
+        assert!(!min_rels.iter().any(|r| r.contains("windows_amd64")));
+        assert!(!min_rels.iter().any(|r| r.contains("freebsd_amd64")));
+
+        let full_rels: Vec<String> =
+            collect_go_libs_for_context(&goroot, ToolchainProfile::Full, Some("linux-x64"))
+                .into_iter()
+                .map(|(_, r)| r)
+                .collect();
+        assert!(full_rels.contains(&"pkg/tool/linux_amd64/compile".to_string()));
+        assert!(full_rels.contains(&"pkg/tool/windows_amd64/compile.exe".to_string()));
+        assert!(full_rels.contains(&"pkg/tool/freebsd_amd64/compile".to_string()));
+
+        Ok(())
     }
 }

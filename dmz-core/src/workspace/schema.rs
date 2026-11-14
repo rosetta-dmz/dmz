@@ -144,25 +144,23 @@ pub fn normalize_member_path(workspace_root: &Path, target: &Path) -> PathBuf {
         return target_canon;
     }
 
-    let mut common_len = 0;
-    while common_len < ws_components.len()
-        && common_len < target_components.len()
-        && ws_components[common_len] == target_components[common_len]
-    {
-        common_len += 1;
-    }
+    let common_len = ws_components
+        .iter()
+        .zip(target_components.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
 
     if common_len == 0 {
         return target_canon;
     }
 
     let mut rel = PathBuf::new();
-    for comp in &ws_components[common_len..] {
+    for comp in ws_components.iter().skip(common_len) {
         if matches!(comp, std::path::Component::Normal(_)) {
             rel.push("..");
         }
     }
-    for comp in &target_components[common_len..] {
+    for comp in target_components.iter().skip(common_len) {
         rel.push(comp.as_os_str());
     }
 

@@ -104,6 +104,7 @@ fn test_archive_importer_rejects_symlink_traversal() -> anyhow::Result<()> {
         target_store_dir: store,
         target_workspace_dir: ws,
         verify_closure_hash: false,
+        ..Default::default()
     };
 
     let result = dmz_core::archive::importer::AirGapImporter::import(&config);

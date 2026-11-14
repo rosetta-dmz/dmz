@@ -108,22 +108,7 @@ impl DmzLockfile {
     pub fn with_platform(packages: Vec<LockedPackage>, target_platform: Option<String>) -> Self {
         let mut package_map = BTreeMap::new();
         for pkg in packages {
-            let base_key = format!("{}:{}", pkg.name, pkg.version);
-            let key = if let Some(existing) = package_map.get(&base_key) {
-                let existing_pkg: &LockedPackage = existing;
-                if existing_pkg.member_id != pkg.member_id {
-                    if let Some(ref mid) = pkg.member_id {
-                        format!("{}@{}", mid, base_key)
-                    } else {
-                        base_key
-                    }
-                } else {
-                    base_key
-                }
-            } else {
-                base_key
-            };
-            package_map.insert(key, pkg);
+            Self::insert_package(&mut package_map, pkg);
         }
 
         let closure_signature = Self::compute_closure_hash(&package_map);
@@ -136,6 +121,27 @@ impl DmzLockfile {
             closure_signature,
             packages: package_map,
         }
+    }
+
+    /// Inserts `pkg` into `packages` using the canonical `name:version` key
+    /// (disambiguated as `member_id@name:version` when another workspace member
+    /// already holds the base key).
+    pub fn insert_package(packages: &mut BTreeMap<String, LockedPackage>, pkg: LockedPackage) {
+        let base_key = format!("{}:{}", pkg.name, pkg.version);
+        let key = if let Some(existing) = packages.get(&base_key) {
+            if existing.member_id != pkg.member_id {
+                if let Some(ref mid) = pkg.member_id {
+                    format!("{}@{}", mid, base_key)
+                } else {
+                    base_key
+                }
+            } else {
+                base_key
+            }
+        } else {
+            base_key
+        };
+        packages.insert(key, pkg);
     }
 
     pub fn with_vcs(mut self, vcs: Option<VcsProvenance>) -> Self {

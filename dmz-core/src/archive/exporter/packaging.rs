@@ -134,17 +134,7 @@ pub fn append_dir_all<W: Write>(
 
         // --- SKIP HEAVY BUILD ARTIFACTS & CACHES ---
         if (file_type.is_dir() || file_type.is_symlink())
-            && (name_str == "target"
-                || name_str == "node_modules"
-                || name_str == ".git"
-                || name_str == "dist"
-                || name_str == ".dmz"
-                || name_str == ".venv"
-                || name_str == "venv"
-                || name_str == "__pycache__"
-                || name_str == ".pytest_cache"
-                || name_str == ".mypy_cache"
-                || name_str == ".ruff_cache")
+            && crate::workspace::should_skip_workspace_artifact_dir(&path, &name_str, None)
         {
             continue;
         }
@@ -172,33 +162,38 @@ pub fn append_filtered_files<W: Write>(
     files: &HashSet<PathBuf>,
     deterministic_epoch: u64,
 ) -> Result<(), ExportError> {
+    append_filtered_files_prefixed(
+        tar,
+        workspace_root,
+        Path::new(""),
+        files,
+        deterministic_epoch,
+    )
+}
+
+pub fn append_filtered_files_prefixed<W: Write>(
+    tar: &mut TarBuilder<W>,
+    workspace_root: &Path,
+    dest_prefix: &Path,
+    files: &HashSet<PathBuf>,
+    deterministic_epoch: u64,
+) -> Result<(), ExportError> {
     let mut sorted_files: Vec<_> = files.iter().collect();
     sorted_files.sort();
 
     for rel_path in sorted_files {
-        // Skip .git, target, node_modules, dist, .dmz, .venv, venv, __pycache__
-        let starts_with_ignored = rel_path.components().any(|c| {
-            let s = c.as_os_str().to_string_lossy();
-            s == "target"
-                || s == "node_modules"
-                || s == ".git"
-                || s == "dist"
-                || s == ".dmz"
-                || s == ".venv"
-                || s == "venv"
-                || s == "__pycache__"
-                || s == ".pytest_cache"
-                || s == ".mypy_cache"
-                || s == ".ruff_cache"
-        });
-
-        if starts_with_ignored {
+        if crate::workspace::is_ignored_workspace_rel_path(rel_path) {
             continue;
         }
 
         let full_path = workspace_root.join(rel_path);
         if full_path.is_file() {
-            let normalized_path = rel_path.to_string_lossy().replace('\\', "/");
+            let dest_rel = if dest_prefix.as_os_str().is_empty() {
+                rel_path.to_path_buf()
+            } else {
+                dest_prefix.join(rel_path)
+            };
+            let normalized_path = dest_rel.to_string_lossy().replace('\\', "/");
             append_file_normalized(tar, &full_path, &normalized_path, deterministic_epoch)?;
         }
     }

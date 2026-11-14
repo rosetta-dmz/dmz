@@ -433,7 +433,7 @@ pub(super) fn show(
 
                     thread::spawn(move || {
                         let multi_workspace =
-                            dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest(
+                            dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest_scoped(
                                 &ws,
                             )
                             .map(|(cfg, _)| cfg);
@@ -450,6 +450,7 @@ pub(super) fn show(
                             since: Some(since_ref),
                             with_toolchain: false,
                             multi_workspace,
+                            ..Default::default()
                         };
 
                         let outcome = match AirGapExporter::export(&config) {

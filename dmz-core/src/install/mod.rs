@@ -120,7 +120,8 @@ impl InstallerEngine {
         if direct_manifest.is_file() {
             WorkspaceProjectConfig::load_from_file(&direct_manifest).ok()
         } else {
-            WorkspaceProjectConfig::discover_workspace_manifest(workspace_path).map(|(p, _)| p)
+            WorkspaceProjectConfig::discover_workspace_manifest_scoped(workspace_path)
+                .map(|(p, _)| p)
         }
     }
 
@@ -257,63 +258,7 @@ impl InstallerEngine {
         store_dir: &Path,
         pkg: &LockedPackage,
     ) -> Result<PathBuf, InstallError> {
-        // Sanitize package name (flatten scoped packages and eliminate directory traversal characters)
-        let safe_name = pkg.name.replace(['/', '\\'], "__");
-
-        if safe_name.is_empty() || safe_name == "." || safe_name == ".." || safe_name.contains("..")
-        {
-            return Err(InstallError::MapperError(format!(
-                "Invalid package name contains path traversal sequence: {}",
-                pkg.name
-            )));
-        }
-
-        let pkg_store_dir = store_dir.join(&safe_name);
-
-        // Robustly resolve archive file in store directory (handling version specificity differences)
-        let exact_name = format!("{}-{}.archive", safe_name, pkg.version);
-        let exact_path = pkg_store_dir.join(&exact_name);
-
-        let archive_path = if exact_path.exists() {
-            exact_path
-        } else if let Ok(entries) = fs::read_dir(&pkg_store_dir) {
-            let prefix = format!("{}-", safe_name);
-            let mut matched_path = None;
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().is_some_and(|ext| ext == "archive") {
-                    if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
-                        if fname.starts_with(&prefix) && fname.contains(&pkg.version) {
-                            matched_path = Some(path);
-                            break;
-                        }
-                    }
-                }
-            }
-            matched_path.unwrap_or(exact_path)
-        } else {
-            exact_path
-        };
-
-        // Ensure artifact path does not escape store directory (CWE-22)
-        let canonical_store = store_dir
-            .canonicalize()
-            .unwrap_or_else(|_| store_dir.to_path_buf());
-        if !archive_path.starts_with(&canonical_store) && !archive_path.starts_with(store_dir) {
-            return Err(InstallError::MapperError(format!(
-                "Store artifact path {:?} escapes store directory {:?}",
-                archive_path, store_dir
-            )));
-        }
-
-        if !archive_path.exists() {
-            return Err(InstallError::ArtifactMissing {
-                package: pkg.name.clone(),
-                path: archive_path,
-            });
-        }
-
-        Ok(archive_path)
+        locate_locked_store_artifact(store_dir, pkg)
     }
 
     /// Computes streaming SHA-256 and validates cryptographic supply chain integrity
@@ -443,6 +388,65 @@ impl InstallerEngine {
 
         Ok(())
     }
+}
+
+/// Resolves and validates a locked package's single `.archive` artifact inside `store_dir`.
+pub fn locate_locked_store_artifact(
+    store_dir: &Path,
+    pkg: &LockedPackage,
+) -> Result<PathBuf, InstallError> {
+    let safe_name = pkg.name.replace(['/', '\\'], "__");
+
+    if safe_name.is_empty() || safe_name == "." || safe_name == ".." || safe_name.contains("..") {
+        return Err(InstallError::MapperError(format!(
+            "Invalid package name contains path traversal sequence: {}",
+            pkg.name
+        )));
+    }
+
+    let pkg_store_dir = store_dir.join(&safe_name);
+    let exact_name = format!("{}-{}.archive", safe_name, pkg.version);
+    let exact_path = pkg_store_dir.join(&exact_name);
+
+    let archive_path = if exact_path.exists() {
+        exact_path
+    } else if let Ok(entries) = fs::read_dir(&pkg_store_dir) {
+        let prefix = format!("{}-", safe_name);
+        let mut matched_path = None;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "archive") {
+                if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
+                    if fname.starts_with(&prefix) && fname.contains(&pkg.version) {
+                        matched_path = Some(path);
+                        break;
+                    }
+                }
+            }
+        }
+        matched_path.unwrap_or(exact_path)
+    } else {
+        exact_path
+    };
+
+    let canonical_store = store_dir
+        .canonicalize()
+        .unwrap_or_else(|_| store_dir.to_path_buf());
+    if !archive_path.starts_with(&canonical_store) && !archive_path.starts_with(store_dir) {
+        return Err(InstallError::MapperError(format!(
+            "Store artifact path {:?} escapes store directory {:?}",
+            archive_path, store_dir
+        )));
+    }
+
+    if !archive_path.exists() {
+        return Err(InstallError::ArtifactMissing {
+            package: pkg.name.clone(),
+            path: archive_path,
+        });
+    }
+
+    Ok(archive_path)
 }
 
 #[cfg(test)]

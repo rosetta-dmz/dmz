@@ -9,7 +9,8 @@ use dmz_core::archive::{
     AirGapExporter, AirGapImporter, AirGapManifest, ExportConfig, ImportConfig,
 };
 use dmz_core::install::{InstallConfig, InstallerEngine};
-use dmz_core::resolver::ResolverEngine;
+use dmz_core::resolver::{ResolveOptions, ResolverEngine};
+use dmz_core::toolchain::ToolchainProfile;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum GuiExportMode {
@@ -47,6 +48,9 @@ pub(super) struct AirGapState {
     auto_install: bool,
     verify_closure: bool,
     with_toolchain: bool,
+    toolchain_profile: ToolchainProfile,
+    include_dev: bool,
+    import_include_dev: bool,
     show_export_tip: bool,
     pub(super) active_task: Option<(String, Receiver<AirGapTaskOutcome>)>,
 }
@@ -62,6 +66,9 @@ impl Default for AirGapState {
             auto_install: true,
             verify_closure: true,
             with_toolchain: true,
+            toolchain_profile: ToolchainProfile::Minimal,
+            include_dev: false,
+            import_include_dev: false,
             show_export_tip: true,
             active_task: None,
         }
@@ -237,6 +244,25 @@ pub(super) fn show(
             "Package compiler toolchains into bundle",
         );
 
+        ui.add_space(4.0);
+        ui.add_enabled_ui(state.with_toolchain, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Toolchain Profile:");
+                ui.radio_value(
+                    &mut state.toolchain_profile,
+                    ToolchainProfile::Minimal,
+                    "Minimal (Recommended)",
+                );
+                ui.radio_value(&mut state.toolchain_profile, ToolchainProfile::Full, "Full");
+            });
+        });
+
+        ui.add_space(4.0);
+        ui.checkbox(
+            &mut state.include_dev,
+            "Include dev dependencies (devDependencies, dev-dependencies, test/lint extras)",
+        );
+
         let is_busy = state.is_busy();
         ui.add_space(12.0);
         ui.horizontal_wrapped(|ui| {
@@ -275,6 +301,8 @@ pub(super) fn show(
                     let zstd_level = state.zstd_level;
                     let export_mode = state.export_mode;
                     let with_toolchain = state.with_toolchain;
+                    let toolchain_profile = state.toolchain_profile;
+                    let include_dev = state.include_dev;
                     let (tx, rx) = channel();
                     let ctx = ui.ctx().clone();
                     state.active_task = Some((
@@ -284,21 +312,26 @@ pub(super) fn show(
 
                     thread::spawn(move || {
                         let multi_workspace =
-                            dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile(
+                            dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile_scoped(
                                 &ws_canon, &lockfile,
                             );
 
                         if !lockfile.exists() {
+                            let resolve_options = ResolveOptions {
+                                target_platform: target_opt.clone(),
+                                include_dev,
+                            };
                             let resolve_res = if let Some(ref mws) = multi_workspace {
-                                ResolverEngine::resolve_multi_workspace_with_target(
+                                ResolverEngine::resolve_multi_workspace_with_options(
                                     &ws_canon,
                                     mws,
-                                    target_opt.clone(),
+                                    None,
+                                    &resolve_options,
                                 )
                             } else {
-                                ResolverEngine::resolve_workspace_with_target(
+                                ResolverEngine::resolve_workspace_with_options(
                                     &ws_canon,
-                                    target_opt.clone(),
+                                    resolve_options,
                                 )
                             };
 
@@ -333,6 +366,8 @@ pub(super) fn show(
                             mode: export_mode.into(),
                             target_platform: target_opt,
                             with_toolchain,
+                            include_dev,
+                            toolchain_profile,
                             multi_workspace,
                             ..Default::default()
                         };
@@ -387,6 +422,8 @@ pub(super) fn show(
                     let zstd_level = state.zstd_level;
                     let export_mode = state.export_mode;
                     let with_toolchain = state.with_toolchain;
+                    let toolchain_profile = state.toolchain_profile;
+                    let include_dev = state.include_dev;
                     let (tx, rx) = channel();
                     let ctx = ui.ctx().clone();
                     state.active_task = Some((
@@ -396,7 +433,7 @@ pub(super) fn show(
 
                     thread::spawn(move || {
                         let multi_workspace =
-                            dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile(
+                            dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile_scoped(
                                 &ws_canon, &lockfile,
                             );
 
@@ -409,6 +446,8 @@ pub(super) fn show(
                             mode: export_mode.into(),
                             target_platform: target_opt,
                             with_toolchain,
+                            include_dev,
+                            toolchain_profile,
                             multi_workspace,
                             ..Default::default()
                         };
@@ -481,7 +520,7 @@ pub(super) fn show(
             },
         );
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.checkbox(
                 &mut state.auto_install,
                 "Install offline dependencies into workspace",
@@ -490,6 +529,11 @@ pub(super) fn show(
             ui.checkbox(
                 &mut state.verify_closure,
                 "Cryptographically verify closure hash",
+            );
+            ui.add_space(16.0);
+            ui.checkbox(
+                &mut state.import_include_dev,
+                "Include dev dependencies (toolchain validation)",
             );
         });
 
@@ -533,6 +577,7 @@ pub(super) fn show(
 
                     let verify_closure = state.verify_closure;
                     let auto_install = state.auto_install;
+                    let include_dev = state.import_include_dev;
                     let (tx, rx) = channel();
                     let ctx = ui.ctx().clone();
                     state.active_task =
@@ -544,6 +589,7 @@ pub(super) fn show(
                             target_store_dir: store.clone(),
                             target_workspace_dir: ws_canon.clone(),
                             verify_closure_hash: verify_closure,
+                            include_dev,
                         };
 
                         let outcome = match AirGapImporter::import(&config) {

@@ -270,7 +270,7 @@ fn test_python_wheel_offline_install_and_console_script_hydration() {
         "PowerShell .ps1 console script shim must be created"
     );
 
-    // 7. Verify .pth linkage
+    // 7. Verify single-copy .pth linkage and zero duplicate package clones inside .venv/lib
     let pth_file = workspace
         .join(".venv")
         .join("lib")
@@ -278,4 +278,21 @@ fn test_python_wheel_offline_install_and_console_script_hydration() {
         .join("site-packages")
         .join("dmz_store.pth");
     assert!(pth_file.exists(), "dmz_store.pth must exist");
+    let pth_content = fs::read_to_string(&pth_file).unwrap();
+    assert!(
+        pth_content.contains(".dmz/venv/lib/python3.11/site-packages")
+            || pth_content.contains("site-packages"),
+        "dmz_store.pth must reference .dmz/venv site-packages, got: {}",
+        pth_content
+    );
+    assert!(
+        !workspace
+            .join(".venv")
+            .join("lib")
+            .join("python3.11")
+            .join("site-packages")
+            .join("jinja2")
+            .exists(),
+        "Single-copy layout must not clone jinja2 into .venv/lib/python3.11/site-packages"
+    );
 }

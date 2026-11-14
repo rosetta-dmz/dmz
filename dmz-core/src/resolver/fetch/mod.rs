@@ -66,6 +66,7 @@ impl DependencyFetcher {
         let mut mutated_lockfile = false;
 
         for (key, mut pkg) in std::mem::take(&mut lockfile.packages) {
+            let mut package_dirty = false;
             if pkg.ecosystem == Ecosystem::PyPI {
                 if let Some((clean_name, extracted_ver)) =
                     ManifestScanner::parse_pep508_requirement(&pkg.name)
@@ -75,18 +76,20 @@ impl DependencyFetcher {
                         if (pkg.version == "*" || pkg.version.is_empty()) && extracted_ver != "*" {
                             pkg.version = extracted_ver;
                         }
+                        package_dirty = true;
                         mutated_lockfile = true;
                     }
                 }
             }
-            let effective_key = format!("{}@{}", pkg.name, pkg.version);
-            if effective_key != key {
-                mutated_lockfile = true;
+            if package_dirty {
+                DmzLockfile::insert_package(&mut sanitized_packages, pkg);
+            } else {
+                sanitized_packages.insert(key, pkg);
             }
-            sanitized_packages.insert(effective_key, pkg);
         }
         lockfile.packages = sanitized_packages;
         if mutated_lockfile {
+            lockfile.closure_signature = DmzLockfile::compute_closure_hash(&lockfile.packages);
             lockfile.save(lockfile_path)?;
         }
 
@@ -189,14 +192,14 @@ impl DependencyFetcher {
             for res in rx {
                 if let Some((old_key, updated_pkg)) = res? {
                     fetched_count += 1;
-                    let new_key = format!("{}@{}", updated_pkg.name, updated_pkg.version);
-                    if old_key != new_key {
-                        lockfile.packages.remove(&old_key);
-                    }
+                    lockfile.packages.remove(&old_key);
                     if updated_pkg.ecosystem == Ecosystem::PyPI {
                         for dep_str in &updated_pkg.dependencies {
                             if let Some((dep_name, dep_ver)) =
-                                ManifestScanner::parse_pep508_requirement(dep_str)
+                                ManifestScanner::parse_pep508_requirement_for_target(
+                                    dep_str,
+                                    target_platform.as_deref(),
+                                )
                             {
                                 let norm = ManifestScanner::normalize_pypi_name(&dep_name);
                                 if seen_pypi.insert(norm) {
@@ -204,7 +207,7 @@ impl DependencyFetcher {
                                         format!("{}:{}:{:?}", dep_name, dep_ver, Ecosystem::PyPI)
                                             .as_bytes(),
                                     );
-                                    let dep_key = format!("{}@{}", dep_name, dep_ver);
+                                    let dep_key = format!("{}:{}", dep_name, dep_ver);
                                     next_wave.push((
                                         dep_key,
                                         LockedPackage {
@@ -221,7 +224,7 @@ impl DependencyFetcher {
                             }
                         }
                     }
-                    lockfile.packages.insert(new_key, updated_pkg);
+                    DmzLockfile::insert_package(&mut lockfile.packages, updated_pkg);
                 }
             }
             current_wave = next_wave;
@@ -705,5 +708,60 @@ mod tests {
                 h
             );
         }
+    }
+
+    #[test]
+    fn test_fetch_dependencies_preserves_integrity_with_local_paths_and_sanitization() {
+        let temp = tempdir().unwrap();
+        let store_path = temp.path().join("store");
+
+        // 1. Clean local-path-only lockfile preserves canonical key and signature
+        let local_lock_path = temp.path().join("local.lock");
+        let local_pkg = LockedPackage {
+            name: "standalone-app".to_string(),
+            version: "path:Cargo.toml".to_string(),
+            ecosystem: Ecosystem::Cargo,
+            sha256: DmzLockfile::hash_bytes(b"standalone-app"),
+            source_url: None,
+            dependencies: Vec::new(),
+            member_id: None,
+        };
+        DmzLockfile::new(vec![local_pkg])
+            .save(&local_lock_path)
+            .unwrap();
+
+        let count = DependencyFetcher::fetch_dependencies(&local_lock_path, &store_path).unwrap();
+        assert_eq!(count, 0);
+        let reloaded_local = DmzLockfile::load_and_verify(&local_lock_path).unwrap();
+        assert!(reloaded_local
+            .packages
+            .contains_key("standalone-app:path:Cargo.toml"));
+
+        // 2. Dirty PEP 508 local-path lockfile (mutated_lockfile = true, fetched_count = 0)
+        //    recomputes closure_signature before saving
+        let dirty_lock_path = temp.path().join("dirty_local.lock");
+        let dirty_pkg = LockedPackage {
+            name: "dirty_pkg>=1.0".to_string(),
+            version: "path:local_pkg".to_string(),
+            ecosystem: Ecosystem::PyPI,
+            sha256: DmzLockfile::hash_bytes(b"dirty_pkg"),
+            source_url: None,
+            dependencies: Vec::new(),
+            member_id: None,
+        };
+        DmzLockfile::new(vec![dirty_pkg])
+            .save(&dirty_lock_path)
+            .unwrap();
+
+        let dirty_count =
+            DependencyFetcher::fetch_dependencies(&dirty_lock_path, &store_path).unwrap();
+        assert_eq!(dirty_count, 0);
+        let reloaded_dirty = DmzLockfile::load_and_verify(&dirty_lock_path).unwrap();
+        assert!(reloaded_dirty
+            .packages
+            .contains_key("dirty_pkg:path:local_pkg"));
+        assert!(!reloaded_dirty
+            .packages
+            .contains_key("dirty_pkg>=1.0:path:local_pkg"));
     }
 }

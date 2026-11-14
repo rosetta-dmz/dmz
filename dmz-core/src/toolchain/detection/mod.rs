@@ -16,12 +16,19 @@ pub use apple::AppleDetector;
 pub use helpers::{check_member_native_manifests, expand_workspace_member_dirs};
 pub use juce::JuceDetector;
 pub use native::{
-    has_explicit_ninja_manifest, makefile_has_native_c_recipes, workspace_has_native_c_sources,
+    has_explicit_ninja_manifest, has_explicit_ninja_manifest_with_options,
+    makefile_has_native_c_recipes, workspace_has_native_c_sources,
     workspace_requires_c_compiler_for_make, NativeBuildDetector,
 };
 pub use node::NodeDetector;
 pub use rust::RustDetector;
 pub use scripting::ScriptingDetector;
+
+/// Options controlling manifest-based toolchain ecosystem detection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ToolchainDetectOptions {
+    pub include_dev: bool,
+}
 
 /// Manifest-driven workspace ecosystem and toolchain detector trait.
 pub trait EcosystemDetector: Send + Sync {
@@ -38,11 +45,63 @@ impl ToolchainDetector {
         members: &[crate::workspace::WorkspaceMember],
         lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
     ) -> HashSet<ToolchainEcosystem> {
+        Self::detect_multi_workspace_ecosystems_with_options(
+            members,
+            lockfile,
+            ToolchainDetectOptions::default(),
+        )
+    }
+
+    /// Aggregates active toolchains across declared workspace members while scoping lockfile packages
+    /// by `member_id` so excluded members cannot pull in extraneous ecosystems.
+    pub fn detect_multi_workspace_ecosystems_with_options(
+        members: &[crate::workspace::WorkspaceMember],
+        lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
+        options: ToolchainDetectOptions,
+    ) -> HashSet<ToolchainEcosystem> {
         let mut ecosystems = HashSet::new();
+        let active_ids: HashSet<&str> = members.iter().map(|m| m.id.as_str()).collect();
         for member in members {
-            let member_ecosystems = Self::detect_workspace_ecosystems(&member.path, lockfile);
-            ecosystems.extend(member_ecosystems);
+            Self::detect_dir_ecosystems_with_options(&member.path, &mut ecosystems, options);
+            let sub_manifest = member.path.join("dmz-workspace.toml");
+            if sub_manifest.is_file() {
+                if let Ok(proj) =
+                    crate::workspace::WorkspaceProjectConfig::load_from_file(&sub_manifest)
+                {
+                    for sub_m in &proj.members {
+                        let sub_dir = if sub_m.path.is_absolute() {
+                            sub_m.path.clone()
+                        } else {
+                            member.path.join(&sub_m.path)
+                        };
+                        if sub_dir.is_dir() {
+                            Self::detect_dir_ecosystems_with_options(
+                                &sub_dir,
+                                &mut ecosystems,
+                                options,
+                            );
+                        }
+                    }
+                }
+            }
         }
+        if let Some(lf) = lockfile {
+            for pkg in lf.packages.values() {
+                let matches_member = match pkg.member_id.as_deref() {
+                    Some(id) => active_ids.contains(id),
+                    None => lf.workspaces.is_empty(),
+                };
+                if matches_member {
+                    if let Some(eco) = ToolchainEcosystem::from_resolver_ecosystem(&pkg.ecosystem) {
+                        ecosystems.insert(eco);
+                    }
+                }
+            }
+        }
+        Self::propagate_native_companion_ecosystems_from_dirs(
+            members.iter().map(|m| m.path.as_path()),
+            &mut ecosystems,
+        );
         ecosystems
     }
 
@@ -51,41 +110,72 @@ impl ToolchainDetector {
         workspace_root: &Path,
         lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
     ) -> HashSet<ToolchainEcosystem> {
+        Self::detect_workspace_ecosystems_with_options(
+            workspace_root,
+            lockfile,
+            ToolchainDetectOptions::default(),
+        )
+    }
+
+    /// Detects active workspace ecosystems with explicit detection options.
+    pub fn detect_workspace_ecosystems_with_options(
+        workspace_root: &Path,
+        lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
+        options: ToolchainDetectOptions,
+    ) -> HashSet<ToolchainEcosystem> {
         let mut ecosystems = HashSet::new();
 
         if !workspace_root.exists() || !workspace_root.is_dir() {
             return ecosystems;
         }
 
-        // Detect ecosystems declared at workspace root
-        Self::detect_dir_ecosystems(workspace_root, &mut ecosystems);
+        Self::detect_dir_ecosystems_with_options(workspace_root, &mut ecosystems, options);
 
         // Auto-discover declared multi-workspace members in dmz-workspace.toml
         let manifest_path = workspace_root.join("dmz-workspace.toml");
+        let mut active_member_ids: Option<HashSet<String>> = None;
         if manifest_path.is_file() {
             if let Ok(manifest) =
                 crate::workspace::WorkspaceProjectConfig::load_from_file(&manifest_path)
             {
+                let mut ids = HashSet::new();
                 for member in &manifest.members {
+                    ids.insert(member.id.clone());
                     let member_dir = if member.path.is_absolute() {
                         member.path.clone()
                     } else {
                         workspace_root.join(&member.path)
                     };
                     if member_dir.is_dir() {
-                        Self::detect_dir_ecosystems(&member_dir, &mut ecosystems);
+                        Self::detect_dir_ecosystems_with_options(
+                            &member_dir,
+                            &mut ecosystems,
+                            options,
+                        );
                     }
+                }
+                if !ids.is_empty() {
+                    active_member_ids = Some(ids);
                 }
             }
         }
 
-        // Map resolver lockfile ecosystems
+        // Map resolver lockfile ecosystems (scoped to active members when present)
         let map_lockfile =
             |lf: &crate::resolver::lockfile::DmzLockfile,
              ecosystems: &mut HashSet<ToolchainEcosystem>| {
                 for pkg in lf.packages.values() {
-                    if let Some(eco) = ToolchainEcosystem::from_resolver_ecosystem(&pkg.ecosystem) {
-                        ecosystems.insert(eco);
+                    let allowed = match (&active_member_ids, pkg.member_id.as_deref()) {
+                        (Some(ids), Some(id)) => ids.contains(id),
+                        (Some(_), None) => lf.workspaces.is_empty(),
+                        (None, _) => true,
+                    };
+                    if allowed {
+                        if let Some(eco) =
+                            ToolchainEcosystem::from_resolver_ecosystem(&pkg.ecosystem)
+                        {
+                            ecosystems.insert(eco);
+                        }
                     }
                 }
             };
@@ -104,6 +194,20 @@ impl ToolchainDetector {
         }
 
         // Minimal companion propagation for native tools
+        Self::propagate_native_companion_ecosystems_from_dirs(
+            std::iter::once(workspace_root),
+            &mut ecosystems,
+        );
+
+        ecosystems
+    }
+
+    fn propagate_native_companion_ecosystems_from_dirs<'a, I>(
+        dirs: I,
+        ecosystems: &mut HashSet<ToolchainEcosystem>,
+    ) where
+        I: IntoIterator<Item = &'a Path>,
+    {
         if ecosystems.contains(&ToolchainEcosystem::CMake) {
             ecosystems.insert(ToolchainEcosystem::Cc);
         }
@@ -111,7 +215,9 @@ impl ToolchainDetector {
             ecosystems.insert(ToolchainEcosystem::Cc);
         }
         if ecosystems.contains(&ToolchainEcosystem::Make)
-            && Self::workspace_requires_c_compiler_for_make(workspace_root)
+            && dirs
+                .into_iter()
+                .any(Self::workspace_requires_c_compiler_for_make)
         {
             ecosystems.insert(ToolchainEcosystem::Cc);
         }
@@ -132,17 +238,28 @@ impl ToolchainDetector {
         if ecosystems.contains(&ToolchainEcosystem::Cc) {
             ecosystems.insert(ToolchainEcosystem::AppleSdk);
         }
-
-        ecosystems
     }
 
     /// Detects language and native build ecosystems in a specific project directory.
     pub fn detect_dir_ecosystems(dir: &Path, ecosystems: &mut HashSet<ToolchainEcosystem>) {
+        Self::detect_dir_ecosystems_with_options(
+            dir,
+            ecosystems,
+            ToolchainDetectOptions::default(),
+        );
+    }
+
+    /// Detects language and native build ecosystems in a specific directory with explicit options.
+    pub fn detect_dir_ecosystems_with_options(
+        dir: &Path,
+        ecosystems: &mut HashSet<ToolchainEcosystem>,
+        options: ToolchainDetectOptions,
+    ) {
         if !dir.exists() || !dir.is_dir() {
             return;
         }
 
-        RustDetector::detect(dir, ecosystems);
+        RustDetector::detect_with_options(dir, ecosystems, options.include_dev);
         NodeDetector::detect(dir, ecosystems);
         ScriptingDetector::detect(dir, ecosystems);
         NativeBuildDetector::detect(dir, ecosystems);
@@ -155,6 +272,14 @@ impl ToolchainDetector {
     /// or explicitly declares a `ninja` dependency in its manifest tables.
     pub fn has_explicit_ninja_manifest(workspace_root: &Path) -> bool {
         native::has_explicit_ninja_manifest(workspace_root)
+    }
+
+    /// Options-aware check for explicit `build.ninja` or `ninja` dependency in manifest tables.
+    pub fn has_explicit_ninja_manifest_with_options(
+        workspace_root: &Path,
+        include_dev: bool,
+    ) -> bool {
+        native::has_explicit_ninja_manifest_with_options(workspace_root, include_dev)
     }
 
     /// Check whether any Makefile in the given directory explicitly contains C/C++ compiler invocations.

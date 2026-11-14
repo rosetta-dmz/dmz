@@ -37,6 +37,7 @@ fn test_toolchain_packaging_and_import_roundtrip() -> anyhow::Result<()> {
         since: None,
         with_toolchain: true,
         multi_workspace: None,
+        ..Default::default()
     };
 
     let manifest = AirGapExporter::export(&export_config)?;
@@ -65,6 +66,7 @@ fn test_toolchain_packaging_and_import_roundtrip() -> anyhow::Result<()> {
         target_store_dir: store_path,
         target_workspace_dir: import_target.clone(),
         verify_closure_hash: true,
+        ..Default::default()
     };
 
     let result = AirGapImporter::import(&import_config)?;

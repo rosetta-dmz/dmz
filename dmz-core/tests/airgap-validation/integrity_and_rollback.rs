@@ -55,6 +55,7 @@ fn test_sidecar_sha256_generation_and_tamper_detection() {
         target_store_dir: import_ws.path().join("store"),
         target_workspace_dir: import_ws.path().join("ws"),
         verify_closure_hash: true,
+        ..Default::default()
     };
     let import_res =
         AirGapImporter::import(&import_cfg).expect("Import with valid sidecar must succeed");
@@ -72,6 +73,7 @@ fn test_sidecar_sha256_generation_and_tamper_detection() {
         target_store_dir: tamper_import_ws.path().join("store"),
         target_workspace_dir: tamper_import_ws.path().join("ws"),
         verify_closure_hash: true,
+        ..Default::default()
     };
     let tamper_err =
         AirGapImporter::import(&tamper_cfg).expect_err("Import with tampered sidecar must fail");
@@ -121,6 +123,7 @@ fn test_pre_import_backup_snapshot_and_rollback_on_failure() {
         target_store_dir: target_ws.join(".dmz/store"),
         target_workspace_dir: target_ws.to_path_buf(),
         verify_closure_hash: true,
+        ..Default::default()
     };
     let res = AirGapImporter::import(&import_cfg).expect("Import should succeed");
     assert!(res.workspace_path.join("Cargo.toml").exists());
@@ -149,6 +152,7 @@ fn test_pre_import_backup_snapshot_and_rollback_on_failure() {
         target_store_dir: target_ws.join(".dmz/store"),
         target_workspace_dir: target_ws.to_path_buf(),
         verify_closure_hash: true,
+        ..Default::default()
     };
     let err = AirGapImporter::import(&corrupt_import_cfg)
         .expect_err("Importing corrupted bundle must fail");
@@ -275,6 +279,7 @@ fn test_export_fails_fast_when_locked_store_artifact_is_missing_and_import_verif
         target_store_dir: import_target.join(".dmz/store"),
         target_workspace_dir: import_target,
         verify_closure_hash: true,
+        ..Default::default()
     };
     let import_err = AirGapImporter::import(&import_cfg)
         .expect_err("Import must fail when a declared toolchain binary is missing");

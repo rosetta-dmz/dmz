@@ -24,6 +24,7 @@ pub(super) enum ResolverTaskOutcome {
 
 pub(super) struct ResolverState {
     pub(super) target_platform: String,
+    pub(super) include_dev: bool,
     pub(super) store_dir: String,
     pub(super) discovered_stacks: Vec<String>,
     pub(super) is_dual_repo: bool,
@@ -39,6 +40,7 @@ impl Default for ResolverState {
     fn default() -> Self {
         Self {
             target_platform: String::new(),
+            include_dev: false,
             store_dir: String::from(".dmz/store"),
             discovered_stacks: Vec::new(),
             is_dual_repo: false,
@@ -209,6 +211,12 @@ pub(super) fn show(
                 ui.end_row();
             });
 
+        ui.add_space(6.0);
+        ui.checkbox(
+            &mut state.include_dev,
+            "Include dev dependencies (devDependencies, dev-dependencies, test/lint extras)",
+        );
+
         // Display custom registry mirrors if configured via DMZ_REGISTRY_* environment variables
         let mut custom_mirrors = Vec::new();
         for (var, label) in [
@@ -315,6 +323,7 @@ pub(super) fn show(
                     };
 
                     let is_dual_repo = state.is_dual_repo;
+                    let include_dev = state.include_dev;
                     let sidecar_path = state.sidecar_path.clone();
                     let sidecar_role = state.sidecar_role.clone();
                     let sidecar_id = state.sidecar_id.clone();
@@ -324,6 +333,10 @@ pub(super) fn show(
                         Some(("Scanning and resolving dependencies...".to_string(), rx));
 
                     thread::spawn(move || {
+                        let resolve_options = dmz_core::resolver::ResolveOptions {
+                            target_platform: target_opt,
+                            include_dev,
+                        };
                         if is_dual_repo && !sidecar_path.trim().is_empty() {
                             let sc_path = PathBuf::from(&sidecar_path);
                             let sc_canon =
@@ -365,8 +378,11 @@ pub(super) fn show(
                                 vec![primary_m, sidecar_m],
                             );
 
-                            let outcome = match ResolverEngine::resolve_multi_workspace(
-                                &ws_canon, &proj_cfg, None, target_opt,
+                            let outcome = match ResolverEngine::resolve_multi_workspace_with_options(
+                                &ws_canon,
+                                &proj_cfg,
+                                None,
+                                &resolve_options,
                             ) {
                                 Ok(unified) => {
                                     let manifest_target = ws_canon.join("dmz-workspace.toml");
@@ -406,8 +422,9 @@ pub(super) fn show(
                             };
                             let _ = tx.send(outcome);
                         } else {
-                            let outcome = match ResolverEngine::resolve_workspace_with_target(
-                                &ws_canon, target_opt,
+                            let outcome = match ResolverEngine::resolve_workspace_with_options(
+                                &ws_canon,
+                                resolve_options,
                             ) {
                                 Ok(lockfile) => {
                                     if let Err(error) = lockfile.save(&out) {

@@ -71,7 +71,8 @@ pub fn dispatch(command: Commands) -> anyhow::Result<i32> {
             sidecar,
             output,
             target,
-        } => run_resolve(workspace, sidecar, output, target),
+            include_dev,
+        } => run_resolve(workspace, sidecar, output, target, include_dev),
 
         Commands::Fetch { lockfile, store } => run_fetch(lockfile, store),
 
@@ -140,7 +141,11 @@ pub fn dispatch(command: Commands) -> anyhow::Result<i32> {
             args,
         ),
 
-        Commands::Init { workspace, target } => run_init(workspace, target),
+        Commands::Init {
+            workspace,
+            target,
+            include_dev,
+        } => run_init(workspace, target, include_dev),
 
         Commands::Ecosystem { action } => run_ecosystem(action),
 

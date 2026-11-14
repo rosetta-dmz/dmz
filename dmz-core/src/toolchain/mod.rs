@@ -6,7 +6,7 @@ pub mod preflight;
 pub mod setup;
 pub mod types;
 
-pub use detection::ToolchainDetector;
+pub use detection::{ToolchainDetectOptions, ToolchainDetector};
 pub use discovery::{
     emit_non_relocatable_notice, is_apple_system_toolchain_path, is_non_standalone_path,
     AndroidNdkDiscoverer, AppleSdkDiscoverer, CMakeDiscoverer, CcDiscoverer, DiscoveryRegistry,
@@ -22,7 +22,10 @@ pub use preflight::{
     workspace_requires_apple_clt, ApplePrereqStatus,
 };
 pub use setup::ToolchainSetup;
-pub use types::{DiscoveredToolchain, ToolchainEcosystem, ToolchainManifestEntry};
+pub use types::{
+    DiscoveredToolchain, ToolchainDiscoveryContext, ToolchainEcosystem, ToolchainManifestEntry,
+    ToolchainProfile,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolchainError {
@@ -79,12 +82,47 @@ impl ToolchainProvider {
         ToolchainDetector::detect_workspace_ecosystems(workspace_root, lockfile)
     }
 
+    /// Discover active workspace ecosystems with explicit detection options.
+    #[inline]
+    pub fn detect_workspace_ecosystems_with_options(
+        workspace_root: &Path,
+        lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
+        options: ToolchainDetectOptions,
+    ) -> HashSet<ToolchainEcosystem> {
+        ToolchainDetector::detect_workspace_ecosystems_with_options(
+            workspace_root,
+            lockfile,
+            options,
+        )
+    }
+
     /// Discover standalone host toolchains scoped strictly to the target workspace's ecosystems.
     pub fn discover_for_workspace(
         workspace_root: &Path,
         lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
     ) -> Vec<DiscoveredToolchain> {
-        let ecosystems = Self::detect_workspace_ecosystems(workspace_root, lockfile);
+        Self::discover_for_workspace_with_options(
+            workspace_root,
+            lockfile,
+            ToolchainDetectOptions::default(),
+            ToolchainProfile::Minimal,
+            lockfile.and_then(|l| l.target_platform.as_deref()),
+        )
+    }
+
+    /// Discover standalone host toolchains scoped by detection options, toolchain profile, and target platform.
+    pub fn discover_for_workspace_with_options(
+        workspace_root: &Path,
+        lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
+        detect_options: ToolchainDetectOptions,
+        profile: ToolchainProfile,
+        target_platform: Option<&str>,
+    ) -> Vec<DiscoveredToolchain> {
+        let ecosystems = Self::detect_workspace_ecosystems_with_options(
+            workspace_root,
+            lockfile,
+            detect_options,
+        );
         if ecosystems.is_empty() {
             tracing::info!(
                 workspace = ?workspace_root,
@@ -95,12 +133,19 @@ impl ToolchainProvider {
 
         tracing::info!(
             workspace = ?workspace_root,
+            profile = %profile,
             ecosystems = ?ecosystems.iter().map(|e| e.as_str()).collect::<Vec<_>>(),
             "Discovered target workspace ecosystems for toolchain capture"
         );
 
+        let ctx = ToolchainDiscoveryContext {
+            profile,
+            target_platform: target_platform.map(str::to_string),
+            workspace_root: Some(workspace_root.to_path_buf()),
+            ecosystems: ecosystems.clone(),
+        };
         let registry = DiscoveryRegistry::with_default_discoverers();
-        let toolchains = registry.discover_for_ecosystems(&ecosystems);
+        let toolchains = registry.discover_for_ecosystems_with_context(&ecosystems, &ctx);
 
         for eco in &ecosystems {
             if eco.is_host_prerequisite() {
@@ -114,7 +159,10 @@ impl ToolchainProvider {
             if !toolchains.iter().any(|tc| tc.ecosystem == *eco) {
                 let is_strictly_required = match eco {
                     ToolchainEcosystem::Ninja => {
-                        ToolchainDetector::has_explicit_ninja_manifest(workspace_root)
+                        ToolchainDetector::has_explicit_ninja_manifest_with_options(
+                            workspace_root,
+                            detect_options.include_dev,
+                        )
                     }
                     _ => true,
                 };
@@ -251,7 +299,34 @@ impl ToolchainPackager {
         tar_builder: &mut TarBuilder<W>,
         deterministic_epoch: u64,
     ) -> Result<Vec<ToolchainManifestEntry>, ToolchainError> {
-        let toolchains = ToolchainProvider::discover_for_workspace(workspace_root, lockfile);
+        Self::package_toolchains_with_options(
+            workspace_root,
+            lockfile,
+            tar_builder,
+            deterministic_epoch,
+            ToolchainDetectOptions::default(),
+            ToolchainProfile::Minimal,
+            lockfile.and_then(|l| l.target_platform.as_deref()),
+        )
+    }
+
+    /// Package discovered toolchains with explicit detection options, toolchain profile, and target platform.
+    pub fn package_toolchains_with_options<W: std::io::Write>(
+        workspace_root: &Path,
+        lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
+        tar_builder: &mut TarBuilder<W>,
+        deterministic_epoch: u64,
+        detect_options: ToolchainDetectOptions,
+        profile: ToolchainProfile,
+        target_platform: Option<&str>,
+    ) -> Result<Vec<ToolchainManifestEntry>, ToolchainError> {
+        let toolchains = ToolchainProvider::discover_for_workspace_with_options(
+            workspace_root,
+            lockfile,
+            detect_options,
+            profile,
+            target_platform,
+        );
         ToolchainArchivePackager::package_with_epoch(tar_builder, &toolchains, deterministic_epoch)
     }
 

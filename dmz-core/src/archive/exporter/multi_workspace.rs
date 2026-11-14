@@ -1,4 +1,4 @@
-use super::packaging::{append_dir_all, append_filtered_files};
+use super::packaging::{append_dir_all, append_filtered_files_prefixed};
 use super::types::ExportError;
 use crate::resolver::lockfile::DmzLockfile;
 use crate::workspace::{MemberRole, WorkspaceProjectConfig};
@@ -100,9 +100,10 @@ pub fn package_multi_workspace_umbrella<W: Write>(
         "Packaging primary workspace files into workspaces namespace"
     );
     if let Some(changed_files) = changed_files_filter {
-        append_filtered_files(
+        append_filtered_files_prefixed(
             tar_builder,
             workspace_root,
+            &primary_dest,
             changed_files,
             deterministic_epoch,
         )?;

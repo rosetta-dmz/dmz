@@ -55,18 +55,89 @@ pub fn discover_workspace_manifest(start_dir: &Path) -> Option<(WorkspaceProject
     }
 }
 
-/// Discovers `dmz-workspace.toml` or reconstructs multi-workspace configuration from `dmz.lock` metadata.
+/// Discovers `dmz-workspace.toml` starting in `selected_root`, climbing ancestors ONLY when
+/// an ancestor manifest explicitly declares a non-root member matching or enclosing `selected_root`.
 ///
-/// # Async Runtime Note
-/// Performs synchronous lockfile reading and manifest discovery.
-/// When invoking from an asynchronous Tokio runtime context, offload via `tokio::task::spawn_blocking`.
-pub fn discover_or_from_lockfile(
+/// Prevents a standalone child project from accidentally pulling in an unrelated ancestor umbrella.
+pub fn discover_workspace_manifest_scoped_checked(
+    selected_root: &Path,
+) -> Result<Option<(WorkspaceProjectConfig, PathBuf)>, anyhow::Error> {
+    let abs_start = if selected_root.is_relative() {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(selected_root))
+            .unwrap_or_else(|_| selected_root.to_path_buf())
+    } else {
+        selected_root.to_path_buf()
+    };
+    let start_dir = if abs_start.is_file() {
+        abs_start.parent().unwrap_or(Path::new("/")).to_path_buf()
+    } else {
+        abs_start
+    };
+    let canon_start = fs::canonicalize(&start_dir).unwrap_or_else(|_| start_dir.clone());
+
+    let direct_candidate = start_dir.join("dmz-workspace.toml");
+    if direct_candidate.is_file() {
+        let config = WorkspaceProjectConfig::load_from_file(&direct_candidate)?;
+        return Ok(Some((config, direct_candidate)));
+    }
+
+    let mut curr = start_dir;
+    while curr.pop() {
+        let candidate = curr.join("dmz-workspace.toml");
+        if !candidate.is_file() {
+            continue;
+        }
+        let config = WorkspaceProjectConfig::load_from_file(&candidate)?;
+        let ancestor_canon = fs::canonicalize(&curr).unwrap_or_else(|_| curr.clone());
+        let matches_declared_member = config.members.iter().any(|member| {
+            let resolved_member = if member.path.is_absolute() {
+                member.path.clone()
+            } else {
+                curr.join(&member.path)
+            };
+            let member_canon = fs::canonicalize(&resolved_member).unwrap_or(resolved_member);
+            member_canon == canon_start
+                || (member_canon != ancestor_canon && canon_start.starts_with(&member_canon))
+        });
+        if matches_declared_member {
+            return Ok(Some((config, candidate)));
+        }
+        break;
+    }
+
+    Ok(None)
+}
+
+/// Searches for `dmz-workspace.toml` scoped to `selected_root` (no unrelated parent bleed).
+pub fn discover_workspace_manifest_scoped(
+    selected_root: &Path,
+) -> Option<(WorkspaceProjectConfig, PathBuf)> {
+    match discover_workspace_manifest_scoped_checked(selected_root) {
+        Ok(found) => found,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to parse scoped dmz-workspace.toml");
+            None
+        }
+    }
+}
+
+/// Scoped counterpart of [`discover_or_from_lockfile`] that prevents an unrelated ancestor
+/// umbrella manifest from expanding a standalone selected repository.
+pub fn discover_or_from_lockfile_scoped(
+    selected_root: &Path,
+    lockfile_path: &Path,
+) -> Option<WorkspaceProjectConfig> {
+    if let Some((cfg, _)) = discover_workspace_manifest_scoped(selected_root) {
+        return Some(cfg);
+    }
+    reconstruct_multi_workspace_from_lockfile(selected_root, lockfile_path)
+}
+
+fn reconstruct_multi_workspace_from_lockfile(
     start_dir: &Path,
     lockfile_path: &Path,
 ) -> Option<WorkspaceProjectConfig> {
-    if let Some((cfg, _)) = discover_workspace_manifest(start_dir) {
-        return Some(cfg);
-    }
     if let Ok(lf) = crate::resolver::lockfile::DmzLockfile::load_and_verify(lockfile_path) {
         if lf.workspaces.len() > 1 {
             let mut members = Vec::new();
@@ -97,6 +168,21 @@ pub fn discover_or_from_lockfile(
     None
 }
 
+/// Discovers `dmz-workspace.toml` or reconstructs multi-workspace configuration from `dmz.lock` metadata.
+///
+/// # Async Runtime Note
+/// Performs synchronous lockfile reading and manifest discovery.
+/// When invoking from an asynchronous Tokio runtime context, offload via `tokio::task::spawn_blocking`.
+pub fn discover_or_from_lockfile(
+    start_dir: &Path,
+    lockfile_path: &Path,
+) -> Option<WorkspaceProjectConfig> {
+    if let Some((cfg, _)) = discover_workspace_manifest(start_dir) {
+        return Some(cfg);
+    }
+    reconstruct_multi_workspace_from_lockfile(start_dir, lockfile_path)
+}
+
 impl WorkspaceProjectConfig {
     pub fn discover_workspace_manifest(start_dir: &Path) -> Option<(Self, PathBuf)> {
         discover_workspace_manifest(start_dir)
@@ -108,8 +194,25 @@ impl WorkspaceProjectConfig {
         discover_workspace_manifest_checked(start_dir)
     }
 
+    pub fn discover_workspace_manifest_scoped(selected_root: &Path) -> Option<(Self, PathBuf)> {
+        discover_workspace_manifest_scoped(selected_root)
+    }
+
+    pub fn discover_workspace_manifest_scoped_checked(
+        selected_root: &Path,
+    ) -> Result<Option<(Self, PathBuf)>, anyhow::Error> {
+        discover_workspace_manifest_scoped_checked(selected_root)
+    }
+
     pub fn discover_or_from_lockfile(start_dir: &Path, lockfile_path: &Path) -> Option<Self> {
         discover_or_from_lockfile(start_dir, lockfile_path)
+    }
+
+    pub fn discover_or_from_lockfile_scoped(
+        selected_root: &Path,
+        lockfile_path: &Path,
+    ) -> Option<Self> {
+        discover_or_from_lockfile_scoped(selected_root, lockfile_path)
     }
 }
 
@@ -196,6 +299,47 @@ mod tests {
             .err()
             .ok_or("expected parse error for malformed dmz-workspace.toml")?;
         assert!(err.to_string().contains("Invalid workspace manifest"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_scoped_discovery_ignores_unrelated_ancestor_umbrella() -> Result<(), Box<dyn Error>> {
+        let root = tempdir()?;
+        let sibling_sidecar = root.path().join("sidecar");
+        let standalone_child = root.path().join("standalone-child");
+        let declared_member = root.path().join("declared-member");
+        fs::create_dir_all(&sibling_sidecar)?;
+        fs::create_dir_all(&standalone_child)?;
+        fs::create_dir_all(&declared_member)?;
+
+        fs::write(
+            root.path().join("dmz-workspace.toml"),
+            r#"name = "parent-umbrella"
+[[members]]
+id = "primary"
+path = "."
+role = "primary"
+
+[[members]]
+id = "declared-member"
+path = "declared-member"
+role = "sidecar"
+"#,
+        )?;
+
+        // Standalone sibling child not listed in ancestor dmz-workspace.toml must stay isolated
+        assert!(discover_workspace_manifest_scoped(&standalone_child).is_none());
+        assert!(discover_workspace_manifest_scoped_checked(&standalone_child)?.is_none());
+
+        // Explicitly declared non-root member resolves back to its umbrella manifest
+        let found = discover_workspace_manifest_scoped(&declared_member)
+            .ok_or("expected declared member to resolve to parent umbrella")?;
+        assert_eq!(found.0.name, "parent-umbrella");
+
+        // Root itself finds its direct dmz-workspace.toml
+        let direct = discover_workspace_manifest_scoped(root.path())
+            .ok_or("expected root manifest to be discovered")?;
+        assert_eq!(direct.0.name, "parent-umbrella");
         Ok(())
     }
 }

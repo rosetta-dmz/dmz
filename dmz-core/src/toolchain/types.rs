@@ -157,6 +157,48 @@ pub struct DiscoveredToolchain {
     pub lib_files: Vec<(PathBuf, String)>,
 }
 
+/// Controls whether toolchain discovery captures only runtime/build essentials (`Minimal`)
+/// or includes optional IDE/linter/doc tooling and extra targets (`Full`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolchainProfile {
+    #[default]
+    Minimal,
+    Full,
+}
+
+impl ToolchainProfile {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Full => "full",
+        }
+    }
+
+    pub fn from_str_name(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "minimal" | "min" | "slim" => Some(Self::Minimal),
+            "full" | "all" | "complete" => Some(Self::Full),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ToolchainProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Workspace- and target-scoped hints passed to toolchain discoverers.
+#[derive(Debug, Clone, Default)]
+pub struct ToolchainDiscoveryContext {
+    pub profile: ToolchainProfile,
+    pub target_platform: Option<String>,
+    pub workspace_root: Option<PathBuf>,
+    pub ecosystems: std::collections::HashSet<ToolchainEcosystem>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

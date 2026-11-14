@@ -53,6 +53,8 @@ pub struct ExportConfig {
     pub since: Option<String>,
     pub with_toolchain: bool,
     pub multi_workspace: Option<crate::workspace::WorkspaceProjectConfig>,
+    pub include_dev: bool,
+    pub toolchain_profile: crate::toolchain::ToolchainProfile,
 }
 
 impl Default for ExportConfig {
@@ -69,6 +71,8 @@ impl Default for ExportConfig {
             since: None,
             with_toolchain: false,
             multi_workspace: None,
+            include_dev: false,
+            toolchain_profile: crate::toolchain::ToolchainProfile::Minimal,
         }
     }
 }

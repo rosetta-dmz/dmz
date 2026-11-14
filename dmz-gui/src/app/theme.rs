@@ -221,16 +221,21 @@ fn parse_color(value: &str) -> Result<egui::Color32, String> {
         return Err(format!("not a valid hex color: {value:?}"));
     }
     let mut channels = Vec::with_capacity(4);
-    for i in (0..hex.len()).step_by(2) {
-        let pair = &hex[i..i + 2];
-        let byte = u8::from_str_radix(pair, 16)
+    for pair in hex.as_bytes().as_chunks::<2>().0 {
+        let pair_str =
+            std::str::from_utf8(pair).map_err(|_| format!("not a valid hex color: {value:?}"))?;
+        let byte = u8::from_str_radix(pair_str, 16)
             .map_err(|_| format!("not a valid hex color: {value:?}"))?;
         channels.push(byte);
     }
+    let (Some(&r), Some(&g), Some(&b)) = (channels.first(), channels.get(1), channels.get(2))
+    else {
+        return Err(format!("not a valid hex color: {value:?}"));
+    };
     Ok(egui::Color32::from_rgba_unmultiplied(
-        channels[0],
-        channels[1],
-        channels[2],
+        r,
+        g,
+        b,
         channels.get(3).copied().unwrap_or(255),
     ))
 }

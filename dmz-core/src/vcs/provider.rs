@@ -139,8 +139,7 @@ impl GitProvider {
             Ok(c) => c,
             Err(_) => return Ok(None),
         };
-        let time_secs = commit.time().seconds();
-        let timestamp = if time_secs > 0 { time_secs as u64 } else { 0 };
+        let timestamp = u64::try_from(commit.time().seconds()).unwrap_or(0);
         Ok(Some(timestamp))
     }
 

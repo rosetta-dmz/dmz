@@ -53,9 +53,9 @@ impl CargoMapper {
             vendor_rel_dir
         );
         if !config_path.exists() {
-            return fs::write(config_path, block).map_err(|e| {
-                InstallError::IoError(format!("Failed to write {:?}: {}", config_path, e))
-            });
+            return crate::workspace::atomic_write_file(config_path, block.as_bytes()).map_err(
+                |e| InstallError::IoError(format!("Failed to write {:?}: {}", config_path, e)),
+            );
         }
         let existing = fs::read_to_string(config_path).map_err(|e| {
             InstallError::IoError(format!("Failed to read {:?}: {}", config_path, e))
@@ -66,7 +66,7 @@ impl CargoMapper {
             } else {
                 format!("{}\n\n{}", existing.trim_end(), block)
             };
-            fs::write(config_path, merged).map_err(|e| {
+            crate::workspace::atomic_write_file(config_path, merged.as_bytes()).map_err(|e| {
                 InstallError::IoError(format!("Failed to update {:?}: {}", config_path, e))
             })?;
         }

@@ -1,4 +1,4 @@
-use super::types::{DiscoveredToolchain, ToolchainEcosystem};
+use super::types::{DiscoveredToolchain, ToolchainDiscoveryContext, ToolchainEcosystem};
 use super::ToolchainError;
 use std::collections::HashSet;
 use std::fs;
@@ -41,6 +41,14 @@ pub trait ToolchainDiscoverer: Send + Sync {
 
     /// Discovers the host toolchain, returning resolved binaries, shared libraries, and metadata.
     fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError>;
+
+    /// Discovers the host toolchain using profile, target platform, and workspace context.
+    fn discover_with_context(
+        &self,
+        _ctx: &ToolchainDiscoveryContext,
+    ) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
+        self.discover()
+    }
 }
 
 /// Registry coordinating one or more `ToolchainDiscoverer` implementations.
@@ -105,10 +113,23 @@ impl DiscoveryRegistry {
         &self,
         ecosystems: &HashSet<ToolchainEcosystem>,
     ) -> Vec<DiscoveredToolchain> {
+        let ctx = ToolchainDiscoveryContext {
+            ecosystems: ecosystems.clone(),
+            ..ToolchainDiscoveryContext::default()
+        };
+        self.discover_for_ecosystems_with_context(ecosystems, &ctx)
+    }
+
+    /// Discovers standalone host toolchains scoped strictly to `ecosystems` and `ctx`.
+    pub fn discover_for_ecosystems_with_context(
+        &self,
+        ecosystems: &HashSet<ToolchainEcosystem>,
+        ctx: &ToolchainDiscoveryContext,
+    ) -> Vec<DiscoveredToolchain> {
         let mut toolchains = Vec::new();
         for discoverer in &self.discoverers {
             if ecosystems.contains(&discoverer.ecosystem()) {
-                if let Ok(Some(tc)) = discoverer.discover() {
+                if let Ok(Some(tc)) = discoverer.discover_with_context(ctx) {
                     toolchains.push(tc);
                 }
             }

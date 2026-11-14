@@ -37,7 +37,7 @@ pub fn run_bundle(args: BundleArgs) -> anyhow::Result<i32> {
         super::resolve_workspace_relative_path(&ws_canon, &args.store, DEFAULT_STORE_PATH);
 
     let discovered_manifest =
-        match dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest_checked(
+        match dmz_core::workspace::WorkspaceProjectConfig::discover_workspace_manifest_scoped_checked(
             &ws_canon,
         ) {
             Ok(opt) => opt.map(|(cfg, _)| cfg),
@@ -72,7 +72,7 @@ pub fn run_bundle(args: BundleArgs) -> anyhow::Result<i32> {
             })
         })
         .or_else(|| {
-            dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile(
+            dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile_scoped(
                 &ws_canon,
                 &effective_lockfile,
             )
@@ -82,10 +82,19 @@ pub fn run_bundle(args: BundleArgs) -> anyhow::Result<i32> {
     let should_resolve = args.refresh_lock || !effective_lockfile.exists();
     if should_resolve {
         info!("Resolving workspace dependency manifests at {:?}", ws_canon);
+        let resolve_options = dmz_core::resolver::ResolveOptions {
+            target_platform: args.target.clone(),
+            include_dev: args.include_dev,
+        };
         let resolve_res = if let Some(ref mws) = multi_workspace {
-            ResolverEngine::resolve_multi_workspace_with_target(&ws_canon, mws, args.target.clone())
+            ResolverEngine::resolve_multi_workspace_with_options(
+                &ws_canon,
+                mws,
+                None,
+                &resolve_options,
+            )
         } else {
-            ResolverEngine::resolve_workspace_with_target(&ws_canon, args.target.clone())
+            ResolverEngine::resolve_workspace_with_options(&ws_canon, resolve_options)
         };
 
         match resolve_res {
@@ -151,6 +160,8 @@ pub fn run_bundle(args: BundleArgs) -> anyhow::Result<i32> {
         with_git_history: args.with_git_history,
         since: args.since,
         with_toolchain,
+        include_dev: args.include_dev,
+        toolchain_profile: args.toolchain_profile.into(),
         multi_workspace,
     };
 

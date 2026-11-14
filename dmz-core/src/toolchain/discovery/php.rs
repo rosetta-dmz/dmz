@@ -1,4 +1,6 @@
-use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
+use super::super::types::{
+    DiscoveredToolchain, ToolchainDiscoveryContext, ToolchainEcosystem, ToolchainProfile,
+};
 use super::super::ToolchainError;
 use super::{
     collect_files_recursive, emit_non_relocatable_notice, is_macos_usr_bin_stub,
@@ -19,6 +21,13 @@ impl ToolchainDiscoverer for PhpDiscoverer {
     }
 
     fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
+        self.discover_with_context(&ToolchainDiscoveryContext::default())
+    }
+
+    fn discover_with_context(
+        &self,
+        ctx: &ToolchainDiscoveryContext,
+    ) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         let candidates = collect_php_candidates();
         if candidates.is_empty() {
             return Ok(None);
@@ -38,11 +47,12 @@ impl ToolchainDiscoverer for PhpDiscoverer {
         info!(
             root = %redacted_root,
             version = %version,
+            profile = %ctx.profile,
             "Discovered host PHP toolchain"
         );
 
         let bin_files = collect_php_binaries(&php_bin);
-        let lib_files = collect_php_assets(&php_root);
+        let lib_files = collect_php_assets_for_profile(&php_root, ctx.profile);
 
         Ok(Some(DiscoveredToolchain {
             ecosystem: ToolchainEcosystem::Php,
@@ -141,7 +151,10 @@ fn collect_php_binaries(php_bin: &Path) -> Vec<(PathBuf, String)> {
     bin_files
 }
 
-fn collect_php_assets(php_root: &Path) -> Vec<(PathBuf, String)> {
+fn collect_php_assets_for_profile(
+    php_root: &Path,
+    profile: ToolchainProfile,
+) -> Vec<(PathBuf, String)> {
     let mut lib_files = Vec::new();
 
     for conf_sub in &["php.ini", "etc/php.ini", "etc/php"] {
@@ -156,6 +169,14 @@ fn collect_php_assets(php_root: &Path) -> Vec<(PathBuf, String)> {
     let lib_php = php_root.join("lib/php");
     if lib_php.is_dir() {
         collect_files_recursive(&lib_php, php_root, &mut lib_files, "");
+        if profile == ToolchainProfile::Minimal {
+            lib_files.retain(|(_, rel)| {
+                !rel.contains("/test/")
+                    && !rel.contains("/tests/")
+                    && !rel.contains("/doc/")
+                    && !rel.contains("/docs/")
+            });
+        }
     }
 
     lib_files

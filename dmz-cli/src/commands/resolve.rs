@@ -9,11 +9,16 @@ pub fn run_resolve(
     sidecar: Option<PathBuf>,
     output: PathBuf,
     target: Option<String>,
+    include_dev: bool,
 ) -> anyhow::Result<i32> {
     info!("Resolving workspace dependencies at {:?}", workspace);
     let ws_canon = std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
     let effective_output =
         super::resolve_workspace_relative_path(&ws_canon, &output, DEFAULT_LOCKFILE_PATH);
+    let options = dmz_core::resolver::ResolveOptions {
+        target_platform: target,
+        include_dev,
+    };
 
     if let Some(ref sc_path) = sidecar {
         let sc_canon = std::fs::canonicalize(sc_path).unwrap_or_else(|_| sc_path.clone());
@@ -35,7 +40,7 @@ pub fn run_resolve(
         }
 
         let prim_lock =
-            match ResolverEngine::resolve_workspace_with_target(&ws_canon, target.clone()) {
+            match ResolverEngine::resolve_workspace_with_options(&ws_canon, options.clone()) {
                 Ok(lock) => lock,
                 Err(e) => {
                     error!("Primary workspace dependency resolution failed: {}", e);
@@ -43,7 +48,8 @@ pub fn run_resolve(
                 }
             };
 
-        let sidecar_lock = match ResolverEngine::resolve_workspace_with_target(&sc_canon, target) {
+        let sidecar_lock = match ResolverEngine::resolve_workspace_with_options(&sc_canon, options)
+        {
             Ok(lock) => lock,
             Err(e) => {
                 error!("Sidecar workspace dependency resolution failed: {}", e);
@@ -132,7 +138,7 @@ pub fn run_resolve(
             effective_output
         );
     } else {
-        match ResolverEngine::resolve_workspace_with_target(&ws_canon, target) {
+        match ResolverEngine::resolve_workspace_with_options(&ws_canon, options) {
             Ok(lockfile) => {
                 if let Err(e) = lockfile.save(&effective_output) {
                     error!("Failed to save lockfile: {}", e);

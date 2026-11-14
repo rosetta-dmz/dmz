@@ -9,7 +9,6 @@ tracing.workspace = true
 tokio.workspace = true
 which.workspace = true
 libc.workspace = true
-windows-sys.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix.workspace = true

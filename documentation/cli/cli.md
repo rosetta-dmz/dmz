@@ -35,7 +35,10 @@ dmz resolve [OPTIONS]
 
 #### **Options**
 * `-w, --workspace <PATH>` — Path to project workspace root. *(Default: `.`)*
+* `--sidecar <PATH>` — Path to companion sidecar workspace root *(optional dual-repo mode)*.
 * `-o, --output <PATH>` — Destination path for generated lockfile. *(Default: `dmz.lock`)*
+* `-t, --target <TARGET>` — Target platform specification (e.g., `macos-arm64`, `linux-x86_64`). Prunes foreign platform dependencies and markers.
+* `--include-dev` — Include development dependencies (`devDependencies`, `dev-dependencies`, optional test/lint extras). By default only runtime and build dependencies are locked.
 * `-v, --verbose` — Enable verbose debug logging output.
 
 #### **Example**
@@ -86,7 +89,7 @@ dmz install [OPTIONS]
 | **Cargo (Rust)** | `.cargo/vendor/<pkg>-<version>/` | `.cargo/config.toml` (pointing to vendored source), `.cargo-checksum.json` |
 | **npm / Classic Yarn** | `node_modules/<pkg>/` | Automatically flattens nested `package/` directories to locate `package.json` |
 | **pnpm** | `node_modules/.pnpm/<pkg>@<ver>/` | Content-addressable virtual store directory and symlinked `node_modules/<pkg>` |
-| **Python (PyPI)** | `.dmz/venv/lib/python3.11/site-packages/` | Fully unpacked package files preserving `.dist-info` and metadata |
+| **Python (PyPI)** | `.dmz/venv/lib/<py_ver>/site-packages/` *(single copy)* | Unpacked once into `.dmz/venv` and exposed to `.venv/` via `dmz_store.pth` and `PYTHONPATH` shims (no duplicate site-packages copies) |
 | **Go** | `vendor/<pkg>/` | Unpacked module files and auto-maintained `vendor/modules.txt` |
 | **PHP Composer** | `vendor/<pkg>/` | Unpacked Composer vendor directory layout |
 | **Ruby Bundler** | `vendor/bundle/<pkg>/` | Unpacked gems with `.bundle/config` configuring frozen local execution |
@@ -165,7 +168,10 @@ dmz bundle [OPTIONS]
 * `-o, --output <PATH>` — Destination path for generated output archive. *(Default: `dist/workspace_closure.tar.zst`)*
 * `--mode <MODE>` — Export mode: `unified` (code + dependencies), `code-only`, or `deps-only`. *(Default: `unified`)*
 * `--zstd-level <LEVEL>` — Zstandard compression level from `1` to `22`. *(Default: `3`)*
+* `-t, --target <TARGET>` — Target platform specification (e.g., `macos-arm64`, `linux-x86_64`).
 * `--with-toolchain` — Automatically captures host compiler runtimes (Rust `cargo`/`rustc`, Node.js, Python, Go, PHP, Ruby) directly into the bundle for true zero-dependency target execution.
+* `--toolchain-profile <minimal|full>` — Compiler toolchain closure profile: `minimal` (default) strips IDE/dev tools (`rustdoc`, `rust-analyzer`, `cargo-clippy`), foreign targets, host global packages, and unused package managers; `full` packages the entire detected distribution.
+* `--include-dev` — Include development dependencies during resolution and toolchain detection. *(Default: `false`)*
 * `--with-git-history` — Archives a deterministic Git bundle v2 file (`workspace.bundle`) alongside the closure.
 * `--since <REF>` — Baseline commit, ref, or previous manifest/bundle for incremental delta export.
 * `--refresh-lock` — Force re-resolving dependency manifests even if `dmz.lock` already exists.
@@ -197,7 +203,10 @@ dmz airgap export [OPTIONS]
 * `-o, --output <PATH>` — Destination path for generated `.tar.zst` archive. *(Default: `dist/airgap_bundle.tar.zst`)*
 * `--mode <MODE>` — Export mode: `unified` (code + dependencies), `code-only`, or `deps-only`. *(Default: `unified`)*
 * `--zstd-level <LEVEL>` — Zstandard compression level from `1` to `22`. *(Default: `3`)*
+* `-t, --target <TARGET>` — Target platform specification (e.g., `macos-arm64`, `linux-x86_64`).
 * `--with-toolchain` — Package active compiler toolchains (cargo, rustc, node, go, python, php, ruby) into bundle.
+* `--toolchain-profile <minimal|full>` — Compiler toolchain closure profile (`minimal` by default, or `full`).
+* `--include-dev` — Include development dependencies during toolchain detection. *(Default: `false`)*
 * `--with-git-history` — Archive deterministic Git bundle alongside closure.
 * `--since <REF>` — Baseline commit, ref, or previous manifest/bundle for incremental delta export.
 * `-v, --verbose` — Enable verbose debug logging output.
@@ -220,6 +229,7 @@ dmz airgap export \
 Cryptographically validates the archive SHA-256 and internal `dmz.lock` closure signature, unpacks store packages into the target store, and extracts project source code into the specified workspace destination directory.
 
 When toolchains are bundled (`--with-toolchain`):
+- Enforces **Root Manifest Dominance**: validates declared workspace ecosystems (respecting `--include-dev`) and purges any unrequested `.dmz/toolchains/<ecosystem>/` directories or unreferenced store artifacts.
 - Extracted automatically to `<workspace>/.dmz/toolchains/<ecosystem>/` with executable (`0o755`) permissions.
 - Runs `xattr -cr` across `.dmz/toolchains` on macOS to eliminate Gatekeeper / quarantine restrictions.
 - Generates `.dmz/env.sh` (Unix/macOS) and `.dmz/env.bat` (Windows) activator scripts that prepend `.dmz/toolchains/*/bin` to `$PATH` and configure `CARGO_HOME`, `RUSTUP_HOME`, `GOROOT`, and `PYTHONHOME`.
@@ -232,7 +242,8 @@ dmz import [OPTIONS] --archive <ARCHIVE>
 #### **Options**
 * `-a, --archive <PATH>` — Path to the `.tar.zst` air-gap bundle. **[Required]**
 * `-s, --store <PATH>` — Target directory for the offline dependency store. *(Default: `.dmz/store`)*
-* `-w, --workspace <PATH>` — Destination directory for extracted workspace source code and manifests. *(Default: `workspace`)*
+* `-t, --to, --workspace <PATH>` — Destination directory for extracted workspace source code and manifests. *(Default: `workspace`)*
+* `--include-dev` — Include development dependencies during post-import toolchain validation. *(Default: `false`)*
 * `--skip-verify` — Skips closure hash verification *(NOT recommended for production environments)*.
 * `-v, --verbose` — Enable verbose debug logging output.
 

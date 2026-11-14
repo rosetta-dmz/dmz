@@ -50,6 +50,10 @@ pub enum Commands {
         /// Target platform specification (e.g., macos-arm64, linux-x86_64)
         #[arg(short, long)]
         target: Option<String>,
+
+        /// Include development dependencies (devDependencies, dev-dependencies, test/lint extras)
+        #[arg(long, default_value_t = false)]
+        include_dev: bool,
     },
 
     /// Fetch and cache locked dependencies into the secure store
@@ -195,6 +199,10 @@ pub enum Commands {
         /// Target platform specification (e.g., macos-arm64, linux-x86_64)
         #[arg(short, long)]
         target: Option<String>,
+
+        /// Include development dependencies (devDependencies, dev-dependencies, test/lint extras)
+        #[arg(long, default_value_t = false)]
+        include_dev: bool,
     },
 
     /// Inspect and manage multi-ecosystem workspace stacks (Rust, Node, Go, Python, etc.)
@@ -261,6 +269,14 @@ pub struct BundleArgs {
     /// Omit packaging compiler toolchains into the bundle
     #[arg(long, default_value_t = false, overrides_with = "with_toolchain")]
     pub no_toolchain: bool,
+
+    /// Include development dependencies during resolution and toolchain detection
+    #[arg(long, default_value_t = false)]
+    pub include_dev: bool,
+
+    /// Compiler toolchain packaging profile (minimal excludes dev/IDE binaries and foreign targets)
+    #[arg(long, value_enum, default_value_t = CliToolchainProfile::Minimal)]
+    pub toolchain_profile: CliToolchainProfile,
 }
 
 impl BundleArgs {
@@ -316,6 +332,14 @@ pub struct ExportArgs {
     /// Omit packaging compiler toolchains into the bundle
     #[arg(long, default_value_t = false, overrides_with = "with_toolchain")]
     pub no_toolchain: bool,
+
+    /// Include development dependencies during toolchain detection
+    #[arg(long, default_value_t = false)]
+    pub include_dev: bool,
+
+    /// Compiler toolchain packaging profile (minimal excludes dev/IDE binaries and foreign targets)
+    #[arg(long, value_enum, default_value_t = CliToolchainProfile::Minimal)]
+    pub toolchain_profile: CliToolchainProfile,
 }
 
 impl ExportArgs {
@@ -360,6 +384,10 @@ pub struct ImportArgs {
     /// Run verification without sandbox isolation (NOT recommended)
     #[arg(long, default_value_t = false)]
     pub no_sandbox: bool,
+
+    /// Include development dependencies during toolchain validation
+    #[arg(long, default_value_t = false)]
+    pub include_dev: bool,
 }
 
 /// Shared command arguments for workspace execution under supervisor orchestration
@@ -446,6 +474,24 @@ impl From<CliExportMode> for CoreExportMode {
             CliExportMode::Unified => CoreExportMode::Unified,
             CliExportMode::CodeOnly => CoreExportMode::CodeOnly,
             CliExportMode::DepsOnly => CoreExportMode::DepsOnly,
+        }
+    }
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CliToolchainProfile {
+    /// Minimal runtime/build toolchain closure (excludes dev tools, foreign targets, host global packages)
+    #[default]
+    Minimal,
+    /// Full discovered host toolchain distribution
+    Full,
+}
+
+impl From<CliToolchainProfile> for dmz_core::toolchain::ToolchainProfile {
+    fn from(profile: CliToolchainProfile) -> Self {
+        match profile {
+            CliToolchainProfile::Minimal => Self::Minimal,
+            CliToolchainProfile::Full => Self::Full,
         }
     }
 }

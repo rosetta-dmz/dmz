@@ -35,6 +35,7 @@ pub fn run_import(args: ImportArgs) -> anyhow::Result<i32> {
         target_store_dir: effective_store.clone(),
         target_workspace_dir: ws_canon.clone(),
         verify_closure_hash: !args.skip_verify,
+        include_dev: args.include_dev,
     };
 
     match AirGapImporter::import(&config) {

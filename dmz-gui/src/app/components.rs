@@ -436,9 +436,26 @@ pub(super) fn status_bar(ui: &mut egui::Ui, status_message: &str, is_busy: bool)
     ui.painter().galley(text_position, galley, text);
 }
 
+fn round_clamped_u8(v: f32) -> u8 {
+    let clamped = v.clamp(0.0, 255.0);
+    let mut lo = 0u8;
+    let mut hi = 255u8;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if f32::from(mid) + 0.5 < clamped {
+            lo = mid.saturating_add(1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
 fn lerp_color(a: egui::Color32, b: egui::Color32, amount: f32) -> egui::Color32 {
     let amount = amount.clamp(0.0, 1.0);
-    let mix = |from: u8, to: u8| (from as f32 + (to as f32 - from as f32) * amount).round() as u8;
+    let mix = |from: u8, to: u8| {
+        round_clamped_u8(f32::from(from) + (f32::from(to) - f32::from(from)) * amount)
+    };
     egui::Color32::from_rgba_unmultiplied(
         mix(a.r(), b.r()),
         mix(a.g(), b.g()),

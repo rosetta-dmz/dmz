@@ -1,4 +1,6 @@
-use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
+use super::super::types::{
+    DiscoveredToolchain, ToolchainDiscoveryContext, ToolchainEcosystem, ToolchainProfile,
+};
 use super::super::ToolchainError;
 use super::{
     collect_files_recursive, is_macos_usr_bin_stub, push_system_bin_candidates, push_unique_path,
@@ -20,6 +22,13 @@ impl ToolchainDiscoverer for CMakeDiscoverer {
     }
 
     fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
+        self.discover_with_context(&ToolchainDiscoveryContext::default())
+    }
+
+    fn discover_with_context(
+        &self,
+        ctx: &ToolchainDiscoveryContext,
+    ) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         let candidates = collect_cmake_candidates();
         if candidates.is_empty() {
             return Ok(None);
@@ -45,11 +54,12 @@ impl ToolchainDiscoverer for CMakeDiscoverer {
             cmake = %redacted_bin,
             root = %redacted_root,
             version = %version,
+            profile = %ctx.profile,
             "Discovered standalone CMake distribution"
         );
 
-        let bin_files = collect_cmake_binaries(bin_dir, &canonical_bin);
-        let lib_files = collect_cmake_modules(&root_dir);
+        let bin_files = collect_cmake_binaries_for_profile(bin_dir, &canonical_bin, ctx.profile);
+        let lib_files = collect_cmake_modules_for_profile(&root_dir, ctx.profile);
 
         Ok(Some(DiscoveredToolchain {
             ecosystem: ToolchainEcosystem::CMake,
@@ -132,9 +142,17 @@ fn probe_cmake_version(candidate: &Path) -> Option<String> {
     )
 }
 
-fn collect_cmake_binaries(bin_dir: &Path, canonical_bin: &Path) -> Vec<(PathBuf, String)> {
+fn collect_cmake_binaries_for_profile(
+    bin_dir: &Path,
+    canonical_bin: &Path,
+    profile: ToolchainProfile,
+) -> Vec<(PathBuf, String)> {
     let mut bin_files = Vec::new();
-    for name in &["cmake", "ctest", "cpack"] {
+    let names: &[&str] = match profile {
+        ToolchainProfile::Minimal => &["cmake"],
+        ToolchainProfile::Full => &["cmake", "ctest", "cpack"],
+    };
+    for name in names {
         let p = bin_dir.join(name);
         if p.is_file() {
             bin_files.push((p, format!("bin/{}", name)));
@@ -153,7 +171,10 @@ fn collect_cmake_binaries(bin_dir: &Path, canonical_bin: &Path) -> Vec<(PathBuf,
     bin_files
 }
 
-fn collect_cmake_modules(root_dir: &Path) -> Vec<(PathBuf, String)> {
+fn collect_cmake_modules_for_profile(
+    root_dir: &Path,
+    profile: ToolchainProfile,
+) -> Vec<(PathBuf, String)> {
     let mut lib_files = Vec::new();
     let share_dir = root_dir.join("share");
     if let Ok(entries) = fs::read_dir(&share_dir) {
@@ -161,7 +182,25 @@ fn collect_cmake_modules(root_dir: &Path) -> Vec<(PathBuf, String)> {
             let p = entry.path();
             let s = entry.file_name().to_string_lossy().into_owned();
             if p.is_dir() && s.starts_with("cmake") {
-                collect_files_recursive(&p, root_dir, &mut lib_files, "");
+                if profile == ToolchainProfile::Full {
+                    collect_files_recursive(&p, root_dir, &mut lib_files, "");
+                } else if let Ok(sub_entries) = fs::read_dir(&p) {
+                    for sub in sub_entries.flatten() {
+                        let sub_name = sub.file_name().to_string_lossy().into_owned();
+                        if sub_name == "Help" || sub_name == "doc" || sub_name == "man" {
+                            continue;
+                        }
+                        let sp = sub.path();
+                        if sp.is_dir() {
+                            collect_files_recursive(&sp, root_dir, &mut lib_files, "");
+                        } else if sp.is_file() {
+                            if let Ok(rel) = sp.strip_prefix(root_dir) {
+                                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                                lib_files.push((sp, rel_str));
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -198,9 +237,44 @@ mod tests {
         let prefix = resolve_prefix_root(&cmake_bin).unwrap();
         assert_eq!(prefix, fs::canonicalize(&contents).unwrap());
 
-        let libs = collect_cmake_modules(&prefix);
+        let libs = collect_cmake_modules_for_profile(&prefix, ToolchainProfile::Minimal);
         assert!(libs
             .iter()
             .any(|(_, rel)| rel == "share/cmake-3.30/Modules/FindZLIB.cmake"));
+    }
+
+    #[test]
+    fn test_cmake_minimal_profile_excludes_ctest_and_cpack(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let bin_dir = temp.path().join("bin");
+        fs::create_dir_all(&bin_dir)?;
+        let cmake_bin = bin_dir.join("cmake");
+        fs::write(&cmake_bin, "cmake")?;
+        fs::write(bin_dir.join("ctest"), "ctest")?;
+        fs::write(bin_dir.join("cpack"), "cpack")?;
+        fs::write(bin_dir.join("ccmake"), "ccmake")?;
+
+        let min_bins: Vec<String> =
+            collect_cmake_binaries_for_profile(&bin_dir, &cmake_bin, ToolchainProfile::Minimal)
+                .into_iter()
+                .map(|(_, r)| r)
+                .collect();
+        assert!(min_bins.contains(&"bin/cmake".to_string()));
+        assert!(!min_bins.contains(&"bin/ctest".to_string()));
+        assert!(!min_bins.contains(&"bin/cpack".to_string()));
+        assert!(!min_bins.contains(&"bin/ccmake".to_string()));
+
+        let full_bins: Vec<String> =
+            collect_cmake_binaries_for_profile(&bin_dir, &cmake_bin, ToolchainProfile::Full)
+                .into_iter()
+                .map(|(_, r)| r)
+                .collect();
+        assert!(full_bins.contains(&"bin/cmake".to_string()));
+        assert!(full_bins.contains(&"bin/ctest".to_string()));
+        assert!(full_bins.contains(&"bin/cpack".to_string()));
+        assert!(!full_bins.contains(&"bin/ccmake".to_string()));
+
+        Ok(())
     }
 }

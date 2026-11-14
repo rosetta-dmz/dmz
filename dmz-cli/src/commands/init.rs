@@ -5,7 +5,11 @@ use std::path::PathBuf;
 use tracing::{error, info};
 
 /// Initialize a project workspace for DMZ capture
-pub fn run_init(workspace: PathBuf, target: Option<String>) -> anyhow::Result<i32> {
+pub fn run_init(
+    workspace: PathBuf,
+    target: Option<String>,
+    include_dev: bool,
+) -> anyhow::Result<i32> {
     info!("Initializing project workspace at {:?}", workspace);
     let ws_canon = std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
     let registry = EcosystemRegistry::new();
@@ -30,7 +34,11 @@ pub fn run_init(workspace: PathBuf, target: Option<String>) -> anyhow::Result<i3
 
     let lockfile_path = ws_canon.join(DEFAULT_LOCKFILE_PATH);
     info!("Generating initial closure lock at {:?}", lockfile_path);
-    match ResolverEngine::resolve_workspace_with_target(&ws_canon, target) {
+    let options = dmz_core::resolver::ResolveOptions {
+        target_platform: target,
+        include_dev,
+    };
+    match ResolverEngine::resolve_workspace_with_options(&ws_canon, options) {
         Ok(lockfile) => {
             if let Err(e) = lockfile.save(&lockfile_path) {
                 error!("Failed to save lockfile: {}", e);

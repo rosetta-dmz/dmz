@@ -38,7 +38,8 @@ mod tests {
         assert!(content.contains("packageManager: pnpm"));
         assert!(content.contains("virtualStoreDir: .pnpm"));
 
-        // Enforce that NpmMapper hydration materializes both .modules.yaml and CLI shims (e.g. tauri)
+        // Enforce that NpmMapper hydration skips dead shims when the package isn't installed,
+        // and materializes both .modules.yaml and CLI shims once node_modules/<pkg> exists.
         let temp2 = tempdir().unwrap();
         let ws2 = temp2.path();
         fs::write(
@@ -48,6 +49,13 @@ mod tests {
         .unwrap();
         NpmMapper::hydrate_workspace_bin_shims(ws2);
         assert!(ws2.join("node_modules/.modules.yaml").is_file());
+        assert!(
+            !ws2.join("node_modules/.bin/tauri").exists(),
+            "Should not create dead shim for unbundled devDependency"
+        );
+
+        fs::create_dir_all(ws2.join("node_modules/@tauri-apps/cli")).unwrap();
+        NpmMapper::hydrate_workspace_bin_shims(ws2);
         assert!(ws2.join("node_modules/.bin/tauri").is_file());
     }
 

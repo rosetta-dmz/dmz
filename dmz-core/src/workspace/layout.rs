@@ -131,6 +131,67 @@ pub fn resolve_member_layouts(
     layouts
 }
 
+/// Canonical directory/file skip predicate shared by archive exporters and source packagers.
+/// Excludes VCS metadata, DMZ internals, build caches, language vendor directories, and `.cargo/vendor`.
+pub fn should_skip_workspace_artifact_dir(
+    path: &Path,
+    name: &str,
+    output_path: Option<&Path>,
+) -> bool {
+    if matches!(
+        name,
+        ".git"
+            | ".dmz"
+            | ".dmz_cache"
+            | "target"
+            | "node_modules"
+            | "dist"
+            | ".venv"
+            | "venv"
+            | "__pycache__"
+            | ".pytest_cache"
+            | ".mypy_cache"
+            | ".ruff_cache"
+            | ".bundle"
+            | ".m2"
+            | ".pnpm-store"
+            | ".npm"
+            | ".yarn"
+            | "vendor"
+    ) {
+        return true;
+    }
+
+    if let Some(out) = output_path {
+        if path == out {
+            return true;
+        }
+        if let (Ok(canon_path), Ok(canon_out)) = (fs::canonicalize(path), fs::canonicalize(out)) {
+            if canon_path == canon_out {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Returns true when a workspace-relative path traverses any ignored build/artifact directory.
+pub fn is_ignored_workspace_rel_path(rel_path: &Path) -> bool {
+    let mut prev_was_cargo = false;
+    for comp in rel_path.components() {
+        let name = comp.as_os_str().to_string_lossy();
+        if should_skip_workspace_artifact_dir(rel_path, &name, None) {
+            return true;
+        }
+        if prev_was_cargo && name == "vendor" {
+            return true;
+        }
+        prev_was_cargo = name == ".cargo";
+    }
+    false
+}
+
 impl WorkspaceMember {
     pub fn canonical_virtual_path(&self) -> PathBuf {
         canonical_virtual_path(self)

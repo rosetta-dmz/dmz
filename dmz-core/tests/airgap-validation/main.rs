@@ -6,4 +6,5 @@ mod cmake_toolchain;
 mod common;
 mod compilation_proof;
 mod integrity_and_rollback;
+mod minimal_closure_pruning;
 mod stripped_path_verification;

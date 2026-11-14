@@ -29,10 +29,11 @@ pub fn run_export(args: ExportArgs) -> anyhow::Result<i32> {
         args.output
     };
 
-    let multi_workspace = dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile(
-        &ws_canon,
-        &effective_lockfile,
-    );
+    let multi_workspace =
+        dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile_scoped(
+            &ws_canon,
+            &effective_lockfile,
+        );
 
     let config = ExportConfig {
         workspace_path: ws_canon.clone(),
@@ -45,6 +46,8 @@ pub fn run_export(args: ExportArgs) -> anyhow::Result<i32> {
         with_git_history: args.with_git_history,
         since: args.since,
         with_toolchain,
+        include_dev: args.include_dev,
+        toolchain_profile: args.toolchain_profile.into(),
         multi_workspace,
     };
 

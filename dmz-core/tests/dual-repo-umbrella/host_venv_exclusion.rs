@@ -116,6 +116,7 @@ fn test_host_venv_excluded_and_target_venv_and_vscode_settings_materialized_offl
         since: None,
         with_toolchain: false,
         multi_workspace: Some(manifest),
+        ..Default::default()
     };
     AirGapExporter::export(&export_config).expect("Export failed");
 
@@ -125,6 +126,7 @@ fn test_host_venv_excluded_and_target_venv_and_vscode_settings_materialized_offl
         target_store_dir: target_dir.join(".dmz/store"),
         target_workspace_dir: target_dir.clone(),
         verify_closure_hash: true,
+        ..Default::default()
     };
     AirGapImporter::import(&import_config).expect("Import failed");
 
@@ -143,15 +145,46 @@ fn test_host_venv_excluded_and_target_venv_and_vscode_settings_materialized_offl
             .is_file(),
         "Fresh .venv/pyvenv.cfg must be generated on import"
     );
-    let pkg_unpacked = target_dir
-        .join("workspaces/py-service/.venv/lib/python3/site-packages/dummy_pkg/__init__.py")
-        .is_file()
-        || target_dir
-            .join("workspaces/py-service/.venv/Lib/site-packages/dummy_pkg/__init__.py")
+    let py_service_dir = target_dir.join("workspaces/py-service");
+    let single_copy_unpacked = fs::read_dir(py_service_dir.join(".dmz/venv/lib"))
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            entry
+                .path()
+                .join("site-packages/dummy_pkg/__init__.py")
+                .is_file()
+        });
+    assert!(
+        single_copy_unpacked,
+        "Bundled wheel must be unpacked offline into single-copy .dmz/venv site-packages"
+    );
+
+    let has_pth = fs::read_dir(py_service_dir.join(".venv/lib"))
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| entry.path().join("site-packages/dmz_store.pth").is_file())
+        || py_service_dir
+            .join(".venv/Lib/site-packages/dmz_store.pth")
             .is_file();
     assert!(
-        pkg_unpacked,
-        "Bundled wheel must be unpacked offline into .venv site-packages"
+        has_pth,
+        ".venv site-packages must link to .dmz/venv via dmz_store.pth"
+    );
+
+    let has_duplicate_copy = fs::read_dir(py_service_dir.join(".venv/lib"))
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| entry.path().join("site-packages/dummy_pkg").exists());
+    assert!(
+        !has_duplicate_copy,
+        "Single-copy .venv layout must not duplicate unpacked packages under .venv/lib/"
     );
 
     // 3. Python member .vscode/settings.json has ${workspaceFolder}/.venv/bin/python or Windows equivalent
@@ -264,6 +297,7 @@ fn test_locked_pypi_without_host_venv_never_emits_dangling_interpreter_path() {
         since: None,
         with_toolchain: false,
         multi_workspace: Some(manifest),
+        ..Default::default()
     })
     .expect("Export failed");
 
@@ -299,6 +333,7 @@ fn test_locked_pypi_without_host_venv_never_emits_dangling_interpreter_path() {
         target_store_dir: target_dir.join(".dmz/store"),
         target_workspace_dir: target_dir.clone(),
         verify_closure_hash: true,
+        ..Default::default()
     })
     .expect("Import failed");
 

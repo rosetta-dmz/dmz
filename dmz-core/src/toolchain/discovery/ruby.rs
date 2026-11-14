@@ -1,4 +1,6 @@
-use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
+use super::super::types::{
+    DiscoveredToolchain, ToolchainDiscoveryContext, ToolchainEcosystem, ToolchainProfile,
+};
 use super::super::ToolchainError;
 use super::{
     collect_files_recursive, emit_non_relocatable_notice, is_macos_usr_bin_stub,
@@ -42,6 +44,13 @@ impl ToolchainDiscoverer for RubyDiscoverer {
     }
 
     fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
+        self.discover_with_context(&ToolchainDiscoveryContext::default())
+    }
+
+    fn discover_with_context(
+        &self,
+        ctx: &ToolchainDiscoveryContext,
+    ) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
         let candidates = collect_ruby_candidates();
         if candidates.is_empty() {
             return Ok(None);
@@ -61,11 +70,12 @@ impl ToolchainDiscoverer for RubyDiscoverer {
         info!(
             root = %redacted_root,
             version = %version,
+            profile = %ctx.profile,
             "Discovered host Ruby toolchain"
         );
 
         let bin_files = collect_ruby_binaries(&ruby_bin);
-        let lib_files = collect_ruby_libs(&ruby_root);
+        let lib_files = collect_ruby_libs_for_profile(&ruby_root, ctx.profile);
 
         Ok(Some(DiscoveredToolchain {
             ecosystem: ToolchainEcosystem::Ruby,
@@ -167,12 +177,33 @@ fn collect_ruby_binaries(ruby_bin: &Path) -> Vec<(PathBuf, String)> {
     bin_files
 }
 
-fn collect_ruby_libs(ruby_root: &Path) -> Vec<(PathBuf, String)> {
+fn collect_ruby_libs_for_profile(
+    ruby_root: &Path,
+    profile: ToolchainProfile,
+) -> Vec<(PathBuf, String)> {
     let mut lib_files = Vec::new();
 
     let lib_ruby = ruby_root.join("lib/ruby");
     if lib_ruby.is_dir() {
-        collect_files_recursive(&lib_ruby, ruby_root, &mut lib_files, "");
+        if profile == ToolchainProfile::Full {
+            collect_files_recursive(&lib_ruby, ruby_root, &mut lib_files, "");
+        } else if let Ok(entries) = fs::read_dir(&lib_ruby) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name == "gems" || name == "site_ruby" {
+                    continue;
+                }
+                if p.is_dir() {
+                    collect_files_recursive(&p, ruby_root, &mut lib_files, "");
+                } else if p.is_file() {
+                    if let Ok(rel) = p.strip_prefix(ruby_root) {
+                        let rel_str = rel.to_string_lossy().replace('\\', "/");
+                        lib_files.push((p, rel_str));
+                    }
+                }
+            }
+        }
     }
 
     let lib_dir = ruby_root.join("lib");

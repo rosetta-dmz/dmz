@@ -5,7 +5,6 @@ use super::packaging::{
     resolve_deterministic_epoch,
 };
 use super::types::{AirGapManifest, DeltaBaseInfo, ExportConfig, ExportError, ExportMode};
-use crate::ecosystem::EcosystemRegistry;
 use crate::resolver::lockfile::DmzLockfile;
 use crate::vcs::{GitProvider, VcsProvenance};
 use crate::workspace::WorkspaceProjectConfig;
@@ -157,24 +156,6 @@ impl AirGapExporter {
             }
         }
 
-        // Automatically discover active workspace ecosystems & gather generalized caches
-        let registry = EcosystemRegistry::new();
-
-        let detected_stacks = registry
-            .process_workspace(&workspace_root)
-            .map_err(|e| ExportError::ArchiveError(format!("Ecosystem discovery failed: {}", e)))?;
-
-        info!(
-            stacks = ?detected_stacks,
-            "Discovered active workspace ecosystems"
-        );
-
-        let cache_paths = registry.gather_all_caches(&workspace_root);
-        info!(
-            caches = ?cache_paths,
-            "Gathered generalized ecosystem cache paths for archiving"
-        );
-
         // Verify dmz.lock integrity before exporting
         let mut lockfile = DmzLockfile::load_and_verify(&effective_lockfile)
             .map_err(|e| ExportError::LockfileError(e.to_string()))?;
@@ -218,7 +199,7 @@ impl AirGapExporter {
             .map_err(|e| ExportError::ArchiveError(format!("Failed to initialize zstd: {}", e)))?;
 
         let workers = std::thread::available_parallelism()
-            .map(|n| n.get() as u32)
+            .map(|n| u32::try_from(n.get()).unwrap_or(16))
             .unwrap_or(4)
             .clamp(1, 16);
         let _ = zstd_encoder.multithread(workers);
@@ -236,6 +217,7 @@ impl AirGapExporter {
         // Append store items (if mode is Unified or DepsOnly)
         let mut packed_count = 0;
         if config.mode == ExportMode::Unified || config.mode == ExportMode::DepsOnly {
+            let mut packed_store_rel_paths: HashSet<PathBuf> = HashSet::new();
             for pkg_info in lockfile.packages.values() {
                 // Skip local path dependencies/workspace members since they are in the workspace source
                 if pkg_info.is_local_path() {
@@ -243,41 +225,73 @@ impl AirGapExporter {
                 }
 
                 let safe_pkg_name = pkg_info.name.replace('/', "__");
-
-                let pkg_store_path = effective_store.join(&safe_pkg_name);
-                if pkg_store_path.exists() {
-                    let archive_dest = Path::new("store").join(&safe_pkg_name);
-                    if pkg_store_path.is_dir() {
-                        append_dir_all(
-                            &mut tar_builder,
-                            &pkg_store_path,
-                            &archive_dest,
-                            false,
-                            deterministic_epoch,
-                        )?;
-                    } else {
-                        let normalized_dest = archive_dest.to_string_lossy().replace('\\', "/");
-                        append_file_normalized(
-                            &mut tar_builder,
-                            &pkg_store_path,
-                            &normalized_dest,
-                            deterministic_epoch,
-                        )?;
+                let resolved_artifact = match crate::install::locate_locked_store_artifact(
+                    &effective_store,
+                    pkg_info,
+                ) {
+                    Ok(path) => path,
+                    Err(crate::install::InstallError::ArtifactMissing { path, .. }) => {
+                        let flat_fallback = effective_store.join(&safe_pkg_name);
+                        if flat_fallback.is_file() {
+                            flat_fallback
+                        } else {
+                            return Err(ExportError::ArchiveError(format!(
+                                    "Missing store artifact for locked package '{}@{}' at {:?}. Run 'dmz fetch' before exporting.",
+                                    pkg_info.name, pkg_info.version, path
+                                )));
+                        }
                     }
-                    packed_count += 1;
-                } else {
-                    return Err(ExportError::ArchiveError(format!(
-                        "Missing store artifact for locked package '{}@{}' at {:?}. Run 'dmz fetch' before exporting.",
-                        pkg_info.name, pkg_info.version, pkg_store_path
-                    )));
+                    Err(e) => {
+                        return Err(ExportError::ArchiveError(e.to_string()));
+                    }
+                };
+
+                if pkg_info.sha256.len() == 64
+                    && pkg_info.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+                {
+                    let computed_sha = hash_file_sha256(&resolved_artifact)
+                        .map_err(|e| ExportError::IoError(e.to_string()))?;
+                    if computed_sha != pkg_info.sha256 {
+                        return Err(ExportError::ArchiveError(format!(
+                            "Store artifact checksum mismatch for '{}@{}': expected {}, got {}",
+                            pkg_info.name, pkg_info.version, pkg_info.sha256, computed_sha
+                        )));
+                    }
                 }
+
+                let rel_in_store = resolved_artifact
+                    .strip_prefix(&effective_store)
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|_| {
+                        let fname = resolved_artifact
+                            .file_name()
+                            .map(|f| f.to_os_string())
+                            .unwrap_or_else(|| {
+                                format!("{}-{}.archive", safe_pkg_name, pkg_info.version).into()
+                            });
+                        PathBuf::from(&safe_pkg_name).join(fname)
+                    });
+
+                if !packed_store_rel_paths.insert(rel_in_store.clone()) {
+                    continue;
+                }
+
+                let archive_dest = Path::new("store").join(&rel_in_store);
+                let normalized_dest = archive_dest.to_string_lossy().replace('\\', "/");
+                append_file_normalized(
+                    &mut tar_builder,
+                    &resolved_artifact,
+                    &normalized_dest,
+                    deterministic_epoch,
+                )?;
+                packed_count += 1;
             }
         }
 
         // Detect Multi-Workspace Configuration
         let (ws_project_opt, manifest_path_opt) = match config.multi_workspace.clone() {
             Some(cfg) => (Some(cfg), None),
-            None => WorkspaceProjectConfig::discover_workspace_manifest(&workspace_root)
+            None => WorkspaceProjectConfig::discover_workspace_manifest_scoped(&workspace_root)
                 .map(|(cfg, p)| (Some(cfg), Some(p)))
                 .unwrap_or((None, None)),
         };
@@ -379,11 +393,16 @@ impl AirGapExporter {
         let mut toolchain_manifest_entries = Vec::new();
         if config.with_toolchain {
             info!("Initiating host toolchain discovery and packaging");
-            match crate::toolchain::ToolchainPackager::package_toolchains_with_epoch(
+            match crate::toolchain::ToolchainPackager::package_toolchains_with_options(
                 &workspace_root,
                 Some(&lockfile),
                 &mut tar_builder,
                 deterministic_epoch,
+                crate::toolchain::ToolchainDetectOptions {
+                    include_dev: config.include_dev,
+                },
+                config.toolchain_profile,
+                target_platform.as_deref(),
             ) {
                 Ok(entries) => {
                     info!(

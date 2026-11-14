@@ -187,16 +187,27 @@ impl NpmMapper {
             Err(_) => return,
         };
 
+        let nm_dir = bin_dir.parent().unwrap_or(bin_dir);
+        let is_pkg_installed = |pkg_name: &str| {
+            let mut p = nm_dir.to_path_buf();
+            for seg in pkg_name.split('/') {
+                p.push(seg);
+            }
+            p.exists()
+        };
+
         let mut declared_deps = std::collections::HashSet::new();
         for dep_key in &["dependencies", "devDependencies", "optionalDependencies"] {
             if let Some(obj) = json.get(*dep_key).and_then(|d| d.as_object()) {
                 for k in obj.keys() {
-                    declared_deps.insert(k.clone());
+                    if is_pkg_installed(k) {
+                        declared_deps.insert(k.clone());
+                    }
                 }
             }
         }
 
-        // Canonical mapping for well-known and dual-stack CLI packages
+        // Canonical mapping for well-known and dual-stack CLI packages (only when actually installed)
         for dep in &declared_deps {
             if dep == "@tauri-apps/cli" || dep == "tauri" {
                 Self::write_cmd_shim_triplet(
