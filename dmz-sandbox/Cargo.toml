@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 dmz-core.workspace = true
+serde.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 which.workspace = true
@@ -18,3 +19,6 @@ windows-sys.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

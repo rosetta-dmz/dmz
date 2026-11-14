@@ -127,6 +127,10 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         allow_network: bool,
 
+        /// Require kernel-enforced isolation (fail closed if strict isolation is unsupported)
+        #[arg(long, default_value_t = false)]
+        strict_kernel: bool,
+
         /// Enable automated diagnostic error categorization
         #[arg(long, default_value_t = false)]
         diagnose: bool,

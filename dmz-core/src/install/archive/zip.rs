@@ -105,7 +105,7 @@ fn extract_zip_symlink<R: Read>(
                 enclosed, e
             ))
         })?;
-    if target_buf.len() > MAX_SYMLINK_TARGET_BYTES as usize {
+    if u64::try_from(target_buf.len()).unwrap_or(u64::MAX) > MAX_SYMLINK_TARGET_BYTES {
         return Err(InstallError::MapperError(format!(
             "Zip symlink target exceeds maximum length: {:?}",
             enclosed

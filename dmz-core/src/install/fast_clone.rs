@@ -50,6 +50,7 @@ impl FastClone {
                 // at the destination path.
                 let ret = unsafe { libc::clonefile(s.as_ptr(), d.as_ptr(), libc::FSOPT_NOFOLLOW) };
                 if ret == 0 {
+                    crate::diagnostics::CoreMetrics::record_cow_clone();
                     return Ok(());
                 }
             }
@@ -74,6 +75,7 @@ impl FastClone {
                     };
 
                     if ret == 0 {
+                        crate::diagnostics::CoreMetrics::record_cow_clone();
                         return Ok(());
                     }
 
@@ -111,11 +113,14 @@ impl FastClone {
                     }
                 }
             }
+            crate::diagnostics::CoreMetrics::record_hardlink_clone();
             return Ok(());
         }
 
         // Fallback 2: Standard copy
-        fs::copy(src, dst).map(|_| ())
+        fs::copy(src, dst).map(|_| {
+            crate::diagnostics::CoreMetrics::record_copy_fallback();
+        })
     }
 
     /// Recursively fast-clones an entire directory tree using `clone_file` for each file.

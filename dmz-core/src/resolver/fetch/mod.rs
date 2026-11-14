@@ -472,15 +472,21 @@ mod tests {
 
     #[test]
     fn test_fetch_dependencies_cached_artifact_fast_path() {
+        use sha2::{Digest, Sha256};
+
         let temp = tempdir().unwrap();
         let lockfile_path = temp.path().join("dmz.lock");
         let store_path = temp.path().join("store");
+
+        let payload = b"dummy cached content";
+        let expected_sha256 =
+            crate::archive::exporter::hashing::format_sha256_hex(&Sha256::digest(payload));
 
         let pkg = LockedPackage {
             name: "cached-pkg".to_string(),
             version: "1.0.0".to_string(),
             ecosystem: Ecosystem::PyPI,
-            sha256: "precomputed_hash_12345".to_string(),
+            sha256: expected_sha256,
             source_url: None,
             dependencies: Vec::new(),
             member_id: None,
@@ -492,7 +498,7 @@ mod tests {
         let pkg_dir = store_path.join("cached-pkg");
         std::fs::create_dir_all(&pkg_dir).unwrap();
         let artifact_path = pkg_dir.join("cached-pkg-1.0.0.archive");
-        std::fs::write(&artifact_path, b"dummy cached content").unwrap();
+        std::fs::write(&artifact_path, payload).unwrap();
         let meta_path = pkg_dir.join("metadata.json");
         std::fs::write(&meta_path, serde_json::to_string_pretty(&pkg).unwrap()).unwrap();
 

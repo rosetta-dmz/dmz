@@ -178,6 +178,7 @@ async fn test_ipc_server_live_dispatch_and_shutdown() {
             scratchpad_bytes: 2 * 1024 * 1024,
             command: None,
             args: None,
+            isolation_mode: dmz_sandbox::platform::SandboxIsolationMode::BestEffort,
         })
         .await
         .expect("StartAgent failed");
@@ -223,6 +224,7 @@ async fn test_ipc_server_live_dispatch_and_shutdown() {
             command: echo_cmd,
             args: echo_args,
             allow_network: false,
+            isolation_mode: dmz_sandbox::platform::SandboxIsolationMode::BestEffort,
         })
         .await
         .expect("RunSandbox failed");
@@ -277,5 +279,159 @@ async fn test_ipc_server_live_dispatch_and_shutdown() {
     assert!(
         !socket_path.exists(),
         "Unix domain socket file must be unlinked from filesystem after server shutdown"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn test_live_seatbelt_confined_connect_tunnel_and_bypass_eperm() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
+
+    // /usr/bin/perl is a direct Mach-O binary on macOS (unlike /usr/bin/python3, which is an
+    // xcselect shim reading /var/select/developer_dir).
+    let perl = "/usr/bin/perl";
+    assert!(
+        std::path::Path::new(perl).exists(),
+        "/usr/bin/perl must exist on macOS to run Seatbelt E2E network probe"
+    );
+
+    // Local TCP echo/handshake server acting as the upstream destination
+    let upstream = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream listener");
+    let upstream_port = upstream.local_addr().expect("upstream addr").port();
+
+    let (tx_proof, rx_proof) = tokio::sync::oneshot::channel::<String>();
+    let upstream_task = tokio::spawn(async move {
+        if let Ok((stream, _)) = upstream.accept().await {
+            let (reader, mut writer) = stream.into_split();
+            let mut buf_reader = BufReader::new(reader);
+            let mut line = String::new();
+            let _ = buf_reader.read_line(&mut line).await;
+            let _ = writer.write_all(b"UPSTREAM_ACK\n").await;
+            let _ = writer.shutdown().await;
+            let _ = tx_proof.send(line);
+        }
+    });
+
+    // Perl probe running INSIDE the Seatbelt-confined agent:
+    // 1. Verifies raw direct TCP to upstream_port is blocked by Seatbelt with EPERM.
+    // 2. Dials HTTP_PROXY (127.0.0.1:<proxy_port>), issues CONNECT 127.0.0.1:<upstream_port>,
+    //    asserts 200 Connection Established, exchanges payload with upstream.
+    let probe_script = format!(
+        concat!(
+            "use strict; use warnings; use Errno qw(EPERM); use IO::Socket::INET;\n",
+            "my $upstream_port = {upstream_port};\n",
+            "my $direct = IO::Socket::INET->new(PeerAddr => '127.0.0.1', PeerPort => $upstream_port, Proto => 'tcp', Timeout => 2);\n",
+            "if ($direct) {{ close($direct); die \"ERROR: direct connect bypassed Seatbelt\\n\"; }}\n",
+            "die \"ERROR: expected EPERM, got errno=\" . (0 + $!) . \" ($!)\\n\" unless $! == EPERM;\n",
+            "my $proxy_env = $ENV{{HTTP_PROXY}} or die \"ERROR: missing HTTP_PROXY\\n\";\n",
+            "$proxy_env =~ m{{^http://([^:]+):(\\d+)}} or die \"ERROR: bad HTTP_PROXY=$proxy_env\\n\";\n",
+            "my ($phost, $pport) = ($1, $2);\n",
+            "my $sock = IO::Socket::INET->new(PeerAddr => $phost, PeerPort => $pport, Proto => 'tcp', Timeout => 5)\n",
+            "    or die \"ERROR: failed dialing proxy $phost:$pport: $!\\n\";\n",
+            "$sock->autoflush(1);\n",
+            "print $sock \"CONNECT 127.0.0.1:$upstream_port HTTP/1.1\\r\\nHost: 127.0.0.1:$upstream_port\\r\\n\\r\\n\";\n",
+            "my $headers = '';\n",
+            "while ($headers !~ /\\r\\n\\r\\n/) {{\n",
+            "    my $buf = '';\n",
+            "    my $n = sysread($sock, $buf, 4096);\n",
+            "    die \"ERROR: EOF reading CONNECT headers\\n\" unless defined($n) && $n > 0;\n",
+            "    $headers .= $buf;\n",
+            "}}\n",
+            "die \"ERROR: CONNECT rejected: $headers\\n\" unless $headers =~ m{{^HTTP/1\\.[01] 200}};\n",
+            "syswrite($sock, \"SEATBELT_EPERM_OK\\n\");\n",
+            "my $ack = '';\n",
+            "sysread($sock, $ack, 1024);\n",
+            "close($sock);\n",
+            "die \"ERROR: unexpected upstream ack: $ack\\n\" unless $ack eq \"UPSTREAM_ACK\\n\";\n",
+        ),
+        upstream_port = upstream_port,
+    );
+
+    let runner = AgentRunner::new();
+    let agent_id = "seatbelt-live-e2e".to_string();
+    let mut guard = AgentTestGuard::new(&runner, agent_id.clone());
+
+    runner
+        .spawn_agent_with_mode(
+            AgentConfig {
+                agent_id: agent_id.clone(),
+                binary_or_script: perl.to_string(),
+                args: vec!["-e".to_string(), probe_script],
+                envs: HashMap::new(),
+                allowed_domains: vec!["127.0.0.1".to_string()],
+                scratchpad_bytes: 4 * 1024 * 1024,
+            },
+            dmz_sandbox::platform::SandboxIsolationMode::StrictKernel,
+        )
+        .await
+        .expect("spawn_agent_with_mode(StrictKernel) must succeed on macOS Seatbelt");
+
+    // Wait for upstream proof to arrive via the Seatbelt-confined CONNECT tunnel
+    let proof = tokio::time::timeout(Duration::from_secs(10), rx_proof)
+        .await
+        .expect("timed out waiting for Seatbelt CONNECT tunnel traffic")
+        .expect("upstream channel closed without receiving tunneled payload");
+    assert_eq!(proof, "SEATBELT_EPERM_OK\n");
+
+    let _ = upstream_task.await;
+
+    // Wait briefly for the watcher to record natural exit cleanup
+    for _ in 0..40 {
+        if runner.list_active_agents().await.is_empty() {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    guard.disarm();
+    assert!(
+        runner.list_active_agents().await.is_empty(),
+        "Confined Seatbelt agent should exit cleanly after proof exchange"
+    );
+
+    // Also prove empty allowed_domains (proxy_addr: None) blocks all outbound connects with EPERM
+    let offline_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind offline listener");
+    let offline_port = offline_listener.local_addr().expect("offline addr").port();
+
+    let tmp_ws = tempfile::tempdir().expect("temp workspace");
+    let tmp_store = tempfile::tempdir().expect("temp store");
+    let offline_script = format!(
+        concat!(
+            "use strict; use warnings; use Errno qw(EPERM); use IO::Socket::INET;\n",
+            "my $s = IO::Socket::INET->new(PeerAddr => '127.0.0.1', PeerPort => {port}, Proto => 'tcp', Timeout => 2);\n",
+            "exit(2) if $s;\n",
+            "exit($! == EPERM ? 0 : 3);\n",
+        ),
+        port = offline_port,
+    );
+    let (mut cmd, posture) = dmz_sandbox::platform::prepare_agent_command(
+        &dmz_sandbox::platform::SandboxConfig {
+            workspace_path: tmp_ws.path().to_path_buf(),
+            closure_path: tmp_store.path().to_path_buf(),
+            command: perl.to_string(),
+            args: vec!["-e".to_string(), offline_script],
+            envs: Vec::new(),
+            allow_network: false,
+            ipc_socket_path: None,
+        },
+        &dmz_sandbox::platform::SandboxPolicyOptions {
+            proxy_addr: None,
+            writable_paths: Vec::new(),
+            isolation_mode: dmz_sandbox::platform::SandboxIsolationMode::StrictKernel,
+        },
+    )
+    .expect("prepare_agent_command(no_network) must succeed");
+    assert_eq!(posture, "kernel-seatbelt-no-network");
+
+    let status = cmd
+        .status()
+        .expect("execute Seatbelt no_network perl probe");
+    assert!(
+        status.success(),
+        "no_network Seatbelt profile must deny outbound TCP with EPERM (status={status})"
     );
 }

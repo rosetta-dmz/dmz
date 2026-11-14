@@ -1,4 +1,5 @@
 use crate::{AgentRunner, ServiceRunner, SidecarOrchestrator};
+use dmz_sandbox::platform::SandboxIsolationMode;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -123,6 +124,8 @@ pub enum IpcRequest {
         command: Option<String>,
         #[serde(default)]
         args: Option<Vec<String>>,
+        #[serde(default)]
+        isolation_mode: SandboxIsolationMode,
     },
     StopAgent {
         agent_id: String,
@@ -132,6 +135,8 @@ pub enum IpcRequest {
         command: String,
         args: Vec<String>,
         allow_network: bool,
+        #[serde(default)]
+        isolation_mode: SandboxIsolationMode,
     },
     GetSidecarStatus,
     StartSidecarPair {

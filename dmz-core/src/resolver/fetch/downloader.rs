@@ -87,12 +87,21 @@ pub fn fetch_single_package(
 
     let artifact_filename = format!("{}-{}.archive", safe_pkg_name, resolved.concrete_version);
     let artifact_path = pkg_dir.join(&artifact_filename);
-    let tmp_path = pkg_dir.join(format!("{}.download.tmp", artifact_filename));
+    let temp_guard = tempfile::Builder::new()
+        .prefix(&format!(".{}.download.", artifact_filename))
+        .tempfile_in(&pkg_dir)
+        .map_err(|e| {
+            ResolverError::Io(format!(
+                "Failed to allocate unique temporary download file in {:?}: {}",
+                pkg_dir, e
+            ))
+        })?
+        .into_temp_path();
 
     let computed_hash = stream_download_with_retry(
         client,
         &resolved.download_url,
-        &tmp_path,
+        &temp_guard,
         &artifact_path,
         &pkg.name,
     )?;
@@ -106,13 +115,27 @@ pub fn fetch_single_package(
     }
 
     let meta_path = pkg_dir.join("metadata.json");
-    let meta_data = serde_json::to_string_pretty(&updated_pkg).unwrap_or_default();
+    let meta_data = serde_json::to_string_pretty(&updated_pkg).map_err(|e| {
+        ResolverError::Io(format!(
+            "Failed to serialize metadata for {}: {}",
+            updated_pkg.name, e
+        ))
+    })?;
+    crate::install::fast_clone::FastClone::prepare_destination(&meta_path).map_err(|e| {
+        ResolverError::Io(format!(
+            "Failed to prepare metadata path {:?}: {}",
+            meta_path, e
+        ))
+    })?;
     crate::workspace::atomic_write_file(&meta_path, meta_data).map_err(|e| {
         ResolverError::Io(format!(
             "Failed to write package metadata to {:?}: {}",
             meta_path, e
         ))
     })?;
+
+    crate::resolver::fetch::cache::mark_store_file_readonly(&artifact_path);
+    crate::resolver::fetch::cache::mark_store_file_readonly(&meta_path);
 
     info!(
         name = %updated_pkg.name,

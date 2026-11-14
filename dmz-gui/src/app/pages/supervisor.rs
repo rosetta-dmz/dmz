@@ -11,6 +11,8 @@ pub(super) struct SupervisorTelemetry {
     pub(super) sidecar_state: SidecarLifecycleState,
     pub(super) last_error: Option<String>,
     pub(super) sidecar_socket: Option<String>,
+    pub(super) core_metrics: dmz_core::diagnostics::CoreMetricsSnapshot,
+    pub(super) agent_postures: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -29,9 +31,12 @@ pub(super) struct SupervisorState {
     pub(super) readiness_timeout_ms: u64,
     pub(super) drain_timeout_ms: u64,
     pub(super) orchestrator: Arc<dmz_supervisor::SidecarOrchestrator>,
+    pub(super) agent_runner: dmz_supervisor::AgentRunner,
     pub(super) tokio_rt: Option<Arc<Runtime>>,
     pub(super) ipc_server: Option<Arc<dmz_supervisor::IpcServer>>,
     pub(super) last_error: Option<String>,
+    pub(super) core_metrics: dmz_core::diagnostics::CoreMetricsSnapshot,
+    pub(super) agent_postures: std::collections::BTreeMap<String, String>,
     pub(super) telemetry_rx: std::sync::mpsc::Receiver<SupervisorTelemetry>,
     pub(super) _polling_guard: Arc<PollingGuard>,
     pub(super) cached_workspace: String,
@@ -53,6 +58,7 @@ impl Default for SupervisorState {
             .ok()
             .map(Arc::new);
         let orchestrator = Arc::new(dmz_supervisor::SidecarOrchestrator::new());
+        let agent_runner = dmz_supervisor::AgentRunner::new();
         let (tx, rx) = std::sync::mpsc::channel();
         let is_running = Arc::new(AtomicBool::new(true));
         let is_running_clone = is_running.clone();
@@ -60,6 +66,7 @@ impl Default for SupervisorState {
 
         if let Some(ref runtime) = rt {
             let orch = orchestrator.clone();
+            let runner_bg = agent_runner.clone();
             runtime.spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_millis(150));
                 while is_running_clone.load(Ordering::Relaxed) {
@@ -70,11 +77,20 @@ impl Default for SupervisorState {
                         .current_socket_path()
                         .await
                         .map(|p| p.display().to_string());
+                    let core_metrics = dmz_core::diagnostics::CoreMetrics::snapshot();
+                    let agent_postures = runner_bg
+                        .list_active_agent_postures()
+                        .await
+                        .into_iter()
+                        .map(|(id, posture)| (id, posture.to_string()))
+                        .collect();
                     if tx
                         .send(SupervisorTelemetry {
                             sidecar_state: current,
                             last_error: err,
                             sidecar_socket: sock,
+                            core_metrics,
+                            agent_postures,
                         })
                         .is_err()
                     {
@@ -91,9 +107,12 @@ impl Default for SupervisorState {
             readiness_timeout_ms: 10000,
             drain_timeout_ms: 2000,
             orchestrator,
+            agent_runner,
             tokio_rt: rt,
             ipc_server: None,
             last_error: None,
+            core_metrics: dmz_core::diagnostics::CoreMetrics::snapshot(),
+            agent_postures: std::collections::BTreeMap::new(),
             telemetry_rx: rx,
             _polling_guard: guard,
             cached_workspace: String::new(),
@@ -117,6 +136,8 @@ pub(super) fn show(
         if let Some(sock) = telem.sidecar_socket {
             state.sidecar_socket = sock;
         }
+        state.core_metrics = telem.core_metrics;
+        state.agent_postures = telem.agent_postures;
     }
 
     // Cache workspace manifest discovery to eliminate 120x/sec per-frame disk I/O thrashing
@@ -224,7 +245,7 @@ pub(super) fn show(
             if components::action_button(ui, "Start Session", true).clicked() {
                 let server = Arc::new(dmz_supervisor::IpcServer::with_managers(
                     IpcServerConfig::default(),
-                    dmz_supervisor::AgentRunner::new(),
+                    state.agent_runner.clone(),
                     (*state.orchestrator).clone(),
                 ));
                 state.ipc_server = Some(server.clone());
@@ -553,6 +574,88 @@ pub(super) fn show(
             ui.label("No dmz-workspace.toml discovered in the selected workspace root.");
         }
     });
+
+    ui.add_space(16.0);
+    components::section(ui, |ui| {
+        components::section_header(ui, "Store, Fetch & Isolation Telemetry");
+        let metrics = state.core_metrics;
+        let muted = ui.visuals().widgets.noninteractive.fg_stroke.color;
+
+        egui::Grid::new("supervisor_core_metrics_grid")
+            .num_columns(4)
+            .spacing([24.0, 6.0])
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new("Cache Hits").color(muted).size(12.0));
+                ui.label(egui::RichText::new("Cache Misses").color(muted).size(12.0));
+                ui.label(
+                    egui::RichText::new("Cache Corruptions")
+                        .color(muted)
+                        .size(12.0),
+                );
+                ui.label(egui::RichText::new("Fetch Retries").color(muted).size(12.0));
+                ui.end_row();
+
+                ui.label(metrics.cache_hits.to_string());
+                ui.label(metrics.cache_misses.to_string());
+                if metrics.cache_corruptions > 0 {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 179, 0),
+                        metrics.cache_corruptions.to_string(),
+                    );
+                } else {
+                    ui.label("0");
+                }
+                ui.label(metrics.fetch_retries.to_string());
+                ui.end_row();
+
+                ui.label(egui::RichText::new("CoW Clones").color(muted).size(12.0));
+                ui.label(
+                    egui::RichText::new("Hardlink Clones")
+                        .color(muted)
+                        .size(12.0),
+                );
+                ui.label(
+                    egui::RichText::new("Copy Fallbacks")
+                        .color(muted)
+                        .size(12.0),
+                );
+                ui.label("");
+                ui.end_row();
+
+                ui.label(metrics.cow_clones.to_string());
+                ui.label(metrics.hardlink_clones.to_string());
+                ui.label(metrics.copy_fallbacks.to_string());
+                ui.label("");
+                ui.end_row();
+            });
+
+        ui.add_space(12.0);
+        ui.label(egui::RichText::new("Active Agent Isolation Postures").strong());
+        ui.add_space(4.0);
+        if state.agent_postures.is_empty() {
+            ui.colored_label(muted, "No active confined agents");
+        } else {
+            egui::Grid::new("supervisor_agent_postures_grid")
+                .num_columns(2)
+                .spacing([16.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("Agent ID").strong());
+                    ui.label(egui::RichText::new("Isolation Posture").strong());
+                    ui.end_row();
+
+                    for (agent_id, posture) in &state.agent_postures {
+                        ui.monospace(agent_id);
+                        let color = if posture.starts_with("kernel-") {
+                            egui::Color32::from_rgb(0, 230, 118)
+                        } else {
+                            egui::Color32::from_rgb(255, 179, 0)
+                        };
+                        ui.colored_label(color, posture);
+                        ui.end_row();
+                    }
+                });
+        }
+    });
 }
 
 #[cfg(test)]
@@ -569,11 +672,28 @@ mod tests {
 
         assert_eq!(state.sidecar_state, SidecarLifecycleState::Idle);
 
+        let mut postures = std::collections::BTreeMap::new();
+        postures.insert(
+            "agent-telemetry-01".to_string(),
+            "kernel-seatbelt-loopback-proxy".to_string(),
+        );
+        let sample_metrics = dmz_core::diagnostics::CoreMetricsSnapshot {
+            cache_hits: 5,
+            cache_misses: 1,
+            cache_corruptions: 0,
+            fetch_retries: 2,
+            cow_clones: 4,
+            hardlink_clones: 1,
+            copy_fallbacks: 0,
+        };
+
         // Send a telemetry update without blocking
         tx.send(SupervisorTelemetry {
             sidecar_state: SidecarLifecycleState::Running,
             last_error: Some("test error".to_string()),
             sidecar_socket: Some("/tmp/test.sock".to_string()),
+            core_metrics: sample_metrics,
+            agent_postures: postures,
         })
         .expect("telemetry sends successfully");
 
@@ -590,6 +710,14 @@ mod tests {
         assert_eq!(state.sidecar_state, SidecarLifecycleState::Running);
         assert_eq!(state.last_error.as_deref(), Some("test error"));
         assert_eq!(state.sidecar_socket, "/tmp/test.sock");
+        assert_eq!(state.core_metrics, sample_metrics);
+        assert_eq!(
+            state
+                .agent_postures
+                .get("agent-telemetry-01")
+                .map(String::as_str),
+            Some("kernel-seatbelt-loopback-proxy")
+        );
     }
 
     #[test]

@@ -5,7 +5,9 @@ use std::thread;
 
 use super::super::components;
 use dmz_core::diagnostics::DiagnosticError;
-use dmz_sandbox::platform::{run_sandboxed, SandboxConfig};
+use dmz_sandbox::platform::{
+    run_sandboxed_with_options, SandboxConfig, SandboxIsolationMode, SandboxPolicyOptions,
+};
 
 pub(super) struct SandboxTaskOutcome {
     output_line: String,
@@ -16,6 +18,7 @@ pub(super) struct SandboxState {
     closure_path: String,
     pub(super) sandboxed: bool,
     pub(super) allow_network: bool,
+    pub(super) strict_kernel: bool,
     pub(super) diagnose: bool,
     command: String,
     console_output: String,
@@ -29,6 +32,7 @@ impl Default for SandboxState {
             closure_path: String::from(".dmz/store"),
             sandboxed: true,
             allow_network: false,
+            strict_kernel: false,
             diagnose: true,
             command: String::from("cargo check --offline"),
             console_output: String::from(
@@ -146,6 +150,21 @@ pub(super) fn show(
                 );
             });
         });
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            components::toggle(ui, &mut state.strict_kernel);
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Strict Kernel Isolation Mode").strong());
+                ui.label(
+                    egui::RichText::new(
+                        "Fails closed unless OS kernel confinement (Seatbelt / CLONE_NEWNET) enforces network policy",
+                    )
+                    .color(ui.visuals().widgets.noninteractive.fg_stroke.color)
+                    .size(12.0),
+                );
+            });
+        });
     });
 
     ui.add_space(16.0);
@@ -179,15 +198,17 @@ pub(super) fn show(
 
                     let sandboxed = state.sandboxed;
                     let allow_network = state.allow_network;
+                    let strict_kernel = state.strict_kernel;
                     let diagnose = state.diagnose;
                     let command = state.command.clone();
 
                     state.console_output.push_str(&format!(
-                        "\n>>> [{}] Executing: {} (sandboxed: {}, network: {})\n",
+                        "\n>>> [{}] Executing: {} (sandboxed: {}, network: {}, strict_kernel: {})\n",
                         chrono_timestamp(),
                         command,
                         sandboxed,
-                        allow_network
+                        allow_network,
+                        strict_kernel
                     ));
 
                     let mut envs =
@@ -234,7 +255,17 @@ pub(super) fn show(
                                 ipc_socket_path: None,
                             };
 
-                            let outcome = match run_sandboxed(&config) {
+                            let isolation_mode = if strict_kernel {
+                                SandboxIsolationMode::StrictKernel
+                            } else {
+                                SandboxIsolationMode::BestEffort
+                            };
+                            let options = SandboxPolicyOptions {
+                                isolation_mode,
+                                ..SandboxPolicyOptions::default()
+                            };
+
+                            let outcome = match run_sandboxed_with_options(&config, &options) {
                                 Ok(status) => {
                                     let elapsed = start_time.elapsed();
                                     let code = status.code().unwrap_or(-1);
@@ -444,14 +475,14 @@ pub(super) fn detect_dmz_cli() -> DmzCliInvocation {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(target_os = "macos")]
 pub(super) fn escape_applescript_string(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace(['\r', '\n'], "")
 }
 
-#[allow(dead_code)]
+#[cfg(any(target_os = "linux", test))]
 pub(super) fn escape_posix_single_quotes(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
@@ -637,6 +668,7 @@ mod tests {
     fn test_sandbox_state_cancellation_latch() {
         let mut state = SandboxState::default();
         assert!(!state.is_busy());
+        assert!(!state.strict_kernel);
 
         let latch = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         state.cancel_handle = Some(latch.clone());

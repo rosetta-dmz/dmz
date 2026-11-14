@@ -98,6 +98,7 @@ mod tests {
                 scratchpad_bytes: 2048,
                 command: Some("cargo".to_string()),
                 args: Some(vec!["test".to_string()]),
+                isolation_mode: dmz_sandbox::platform::SandboxIsolationMode::StrictKernel,
             },
             IpcRequest::StopAgent {
                 agent_id: "agent-x".to_string(),
@@ -107,6 +108,7 @@ mod tests {
                 command: "echo".to_string(),
                 args: vec!["hello".to_string()],
                 allow_network: false,
+                isolation_mode: dmz_sandbox::platform::SandboxIsolationMode::BestEffort,
             },
             IpcRequest::GetSidecarStatus,
             IpcRequest::StartSidecarPair {

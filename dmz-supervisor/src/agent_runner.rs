@@ -1,4 +1,9 @@
-use dmz_sandbox::agent::AgentSandbox;
+use dmz_sandbox::agent::{AgentSandbox, LoopbackAllowlistProxy};
+#[cfg(target_os = "windows")]
+use dmz_sandbox::platform::windows::WindowsJobGuard;
+use dmz_sandbox::platform::{
+    prepare_agent_command, SandboxConfig, SandboxIsolationMode, SandboxPolicyOptions,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -49,6 +54,10 @@ pub enum AgentState {
 pub struct ActiveAgent {
     pub config: AgentConfig,
     pub sandbox: AgentSandbox,
+    pub isolation_posture: &'static str,
+    _proxy: Option<LoopbackAllowlistProxy>,
+    #[cfg(target_os = "windows")]
+    _job_guard: Option<WindowsJobGuard>,
     kill_tx: Option<oneshot::Sender<oneshot::Sender<()>>>,
     #[cfg(unix)]
     pgid: Option<i32>,
@@ -116,8 +125,18 @@ impl AgentRunner {
         }
     }
 
-    /// Spawn new AI agent wrapped in an isolated dmz-sandbox environment
+    /// Spawn new AI agent wrapped in an isolated dmz-sandbox environment (`BestEffort` mode).
     pub async fn spawn_agent(&self, config: AgentConfig) -> Result<(), AgentRunnerError> {
+        self.spawn_agent_with_mode(config, SandboxIsolationMode::BestEffort)
+            .await
+    }
+
+    /// Spawn new AI agent wrapped in an isolated dmz-sandbox environment with explicit [`SandboxIsolationMode`].
+    pub async fn spawn_agent_with_mode(
+        &self,
+        config: AgentConfig,
+        isolation_mode: SandboxIsolationMode,
+    ) -> Result<(), AgentRunnerError> {
         let agent_id = config.agent_id.clone();
 
         // Step 1: Atomically check and reserve the agent_id under write lock
@@ -140,63 +159,134 @@ impl AgentRunner {
             committed: false,
         };
 
-        info!(agent = %agent_id, domains = ?config.allowed_domains, "Initializing AI agent sandbox");
+        info!(
+            agent = %agent_id,
+            domains = ?config.allowed_domains,
+            isolation_mode = ?isolation_mode,
+            "Initializing AI agent sandbox"
+        );
 
-        // Step 2: Create native AgentSandbox (allocates EphemeralFs + DomainWhitelist proxy)
-        // Executed outside the active_agents lock to eliminate thread pool starvation
-        let sandbox = AgentSandbox::new(
-            &agent_id,
-            config.scratchpad_bytes,
-            config.allowed_domains.clone(),
-        )
+        // Step 2: Create native AgentSandbox off the async reactor thread
+        let id_for_sb = agent_id.clone();
+        let scratchpad_bytes = config.scratchpad_bytes;
+        let allowed_domains = config.allowed_domains.clone();
+        let sandbox = tokio::task::spawn_blocking(move || {
+            AgentSandbox::new(&id_for_sb, scratchpad_bytes, allowed_domains)
+        })
+        .await
+        .map_err(|e| AgentRunnerError::SandboxAllocation(format!("Sandbox join error: {}", e)))?
         .map_err(|e| AgentRunnerError::SandboxAllocation(e.to_string()))?;
 
         let scratchpad_dir = sandbox.scratchpad_path().to_path_buf();
 
-        // Step 3: Prepare command with defense-in-depth environment sanitization
-        let mut cmd = Command::new(&config.binary_or_script);
-        cmd.args(&config.args).env_clear(); // Defense-in-depth: scrub supervisor host secrets/tokens
+        // Step 3: Determine network posture and start LoopbackAllowlistProxy when domain-restricted
+        let allow_all_network = config.allowed_domains.iter().any(|d| d.trim() == "*");
+        let no_network = config.allowed_domains.is_empty();
+        let use_proxy = !allow_all_network && !no_network;
 
-        // Preserve benign host system execution paths
+        let proxy = if use_proxy {
+            Some(
+                LoopbackAllowlistProxy::start(sandbox.network_policy.clone())
+                    .await
+                    .map_err(|e| {
+                        AgentRunnerError::Platform(format!(
+                            "Failed to bind agent allowlist proxy: {}",
+                            e
+                        ))
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        // Step 4: Build sanitized environment variables and kernel-confined Command via dmz-sandbox
+        let mut envs: Vec<(String, String)> = Vec::new();
         if let Ok(path) = std::env::var("PATH") {
-            cmd.env("PATH", path);
+            envs.push(("PATH".into(), path));
         }
         #[cfg(target_os = "windows")]
         {
             if let Ok(sysroot) = std::env::var("SYSTEMROOT") {
-                cmd.env("SYSTEMROOT", sysroot);
+                envs.push(("SYSTEMROOT".into(), sysroot));
             }
             if let Ok(comspec) = std::env::var("COMSPEC") {
-                cmd.env("COMSPEC", comspec);
+                envs.push(("COMSPEC".into(), comspec));
             }
         }
-        if let Ok(tmp) = std::env::var("TMPDIR") {
-            cmd.env("TMPDIR", tmp);
+        envs.push((
+            "TMPDIR".into(),
+            scratchpad_dir.to_string_lossy().into_owned(),
+        ));
+        envs.push(("TEMP".into(), scratchpad_dir.to_string_lossy().into_owned()));
+        envs.push(("TMP".into(), scratchpad_dir.to_string_lossy().into_owned()));
+
+        for (k, v) in &config.envs {
+            envs.push((k.clone(), v.clone()));
+        }
+        envs.push(("DMZ_AGENT_ID".into(), agent_id.clone()));
+        envs.push((
+            "DMZ_AGENT_SCRATCHPAD".into(),
+            scratchpad_dir.to_string_lossy().into_owned(),
+        ));
+
+        if no_network {
+            envs.push(("CARGO_NET_OFFLINE".into(), "true".into()));
+            envs.push(("PIP_NO_INDEX".into(), "1".into()));
+            envs.push(("npm_config_offline".into(), "true".into()));
+            envs.push(("GOPROXY".into(), "off".into()));
+        } else if let Some(ref active_proxy) = proxy {
+            let proxy_url = active_proxy.proxy_url();
+            envs.push(("HTTP_PROXY".into(), proxy_url.clone()));
+            envs.push(("HTTPS_PROXY".into(), proxy_url.clone()));
+            envs.push(("ALL_PROXY".into(), proxy_url.clone()));
+            envs.push(("http_proxy".into(), proxy_url.clone()));
+            envs.push(("https_proxy".into(), proxy_url.clone()));
+            envs.push(("all_proxy".into(), proxy_url));
+            envs.push(("NO_PROXY".into(), "localhost,127.0.0.1".into()));
+            envs.push(("no_proxy".into(), "localhost,127.0.0.1".into()));
         }
 
-        // Inject agent environment variables and scratchpad paths
-        cmd.envs(&config.envs)
-            .env("DMZ_AGENT_ID", &agent_id)
-            .env("DMZ_AGENT_SCRATCHPAD", &scratchpad_dir)
-            .current_dir(&scratchpad_dir)
-            .stdin(std::process::Stdio::null())
-            .kill_on_drop(false); // Retain lifecycle under supervisor monitor
+        let sandbox_cfg = SandboxConfig {
+            workspace_path: scratchpad_dir.clone(),
+            closure_path: scratchpad_dir.clone(),
+            command: config.binary_or_script.clone(),
+            args: config.args.clone(),
+            envs,
+            allow_network: allow_all_network,
+            ipc_socket_path: None,
+        };
+        let policy_opts = SandboxPolicyOptions {
+            isolation_mode,
+            proxy_addr: proxy.as_ref().map(LoopbackAllowlistProxy::local_addr),
+            writable_paths: vec![scratchpad_dir.clone()],
+        };
 
-        // Enforce network isolation: toolchain offline flags
-        let allow_all_network = config.allowed_domains.iter().any(|d| d.trim() == "*");
-        if !allow_all_network {
-            cmd.env("CARGO_NET_OFFLINE", "true")
-                .env("PIP_NO_INDEX", "1")
-                .env("npm_config_offline", "true")
-                .env("GOPROXY", "off");
-        }
+        let (std_cmd, isolation_posture) = prepare_agent_command(&sandbox_cfg, &policy_opts)
+            .map_err(|e| AgentRunnerError::Platform(e.to_string()))?;
 
-        #[cfg(unix)]
-        cmd.process_group(0);
+        let mut cmd = Command::from(std_cmd);
+        cmd.stdin(std::process::Stdio::null()).kill_on_drop(false); // Retain lifecycle under supervisor monitor
 
-        info!(agent = %agent_id, scratchpad = ?scratchpad_dir, "Launching agent process tree");
+        #[cfg(target_os = "windows")]
+        let job_guard = WindowsJobGuard::create_kill_on_close()
+            .map_err(|e| AgentRunnerError::Platform(e.to_string()))?;
+
+        info!(
+            agent = %agent_id,
+            scratchpad = ?scratchpad_dir,
+            posture = %isolation_posture,
+            "Launching sandboxed agent process tree"
+        );
 
         let mut child = cmd.spawn().map_err(AgentRunnerError::ProcessSpawn)?;
+
+        #[cfg(target_os = "windows")]
+        if let Some(raw_handle) = child.raw_handle() {
+            if let Err(err) = job_guard.assign_raw_handle(raw_handle as _) {
+                let _ = child.kill().await;
+                return Err(AgentRunnerError::Platform(err.to_string()));
+            }
+        }
 
         // Validate positive PGID safely without unchecked narrowing cast
         #[cfg(unix)]
@@ -211,6 +301,10 @@ impl AgentRunner {
         let active_agent = ActiveAgent {
             config: config.clone(),
             sandbox,
+            isolation_posture,
+            _proxy: proxy,
+            #[cfg(target_os = "windows")]
+            _job_guard: Some(job_guard),
             kill_tx: Some(kill_tx),
             #[cfg(unix)]
             pgid,
@@ -329,6 +423,21 @@ impl AgentRunner {
         agents.keys().cloned().collect()
     }
 
+    /// Query active agent isolation postures for telemetry reporting.
+    pub async fn list_active_agent_postures(&self) -> HashMap<String, &'static str> {
+        let agents = self.active_agents.read().await;
+        agents
+            .iter()
+            .map(|(id, state)| {
+                let posture = match state {
+                    AgentState::Starting => "starting",
+                    AgentState::Running(agent) => agent.isolation_posture,
+                };
+                (id.clone(), posture)
+            })
+            .collect()
+    }
+
     /// Query the volatile scratchpad path for an active agent (Law of Demeter §2.7)
     pub async fn get_scratchpad_path(&self, agent_id: &str) -> Option<PathBuf> {
         let agents = self.active_agents.read().await;
@@ -433,5 +542,74 @@ mod tests {
         // Valid positive PIDs > 1 must pass
         assert_eq!(validate_pgid(2), Some(2));
         assert_eq!(validate_pgid(12345), Some(12345));
+    }
+
+    #[tokio::test]
+    async fn test_agent_posture_reporting_for_no_network_and_proxy() {
+        let runner = AgentRunner::new();
+        let (binary, args) = if cfg!(windows) {
+            (
+                "cmd.exe".to_string(),
+                vec!["/C".to_string(), "ping 127.0.0.1 -n 5".to_string()],
+            )
+        } else {
+            ("/bin/sleep".to_string(), vec!["5".to_string()])
+        };
+
+        let no_net_cfg = AgentConfig {
+            agent_id: "posture-no-net".to_string(),
+            binary_or_script: binary.clone(),
+            args: args.clone(),
+            envs: HashMap::new(),
+            allowed_domains: Vec::new(),
+            scratchpad_bytes: 1024 * 1024,
+        };
+        let proxy_cfg = AgentConfig {
+            agent_id: "posture-proxy".to_string(),
+            binary_or_script: binary,
+            args,
+            envs: HashMap::new(),
+            allowed_domains: vec!["example.com".to_string()],
+            scratchpad_bytes: 1024 * 1024,
+        };
+
+        let mode = if cfg!(windows) {
+            SandboxIsolationMode::BestEffort
+        } else {
+            SandboxIsolationMode::StrictKernel
+        };
+
+        runner
+            .spawn_agent_with_mode(no_net_cfg, mode)
+            .await
+            .expect("spawn no-network agent");
+        runner
+            .spawn_agent_with_mode(proxy_cfg, mode)
+            .await
+            .expect("spawn proxy agent");
+
+        let postures = runner.list_active_agent_postures().await;
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                postures.get("posture-no-net").copied(),
+                Some("kernel-seatbelt-no-network")
+            );
+            assert_eq!(
+                postures.get("posture-proxy").copied(),
+                Some("kernel-seatbelt-loopback-proxy")
+            );
+        } else if cfg!(target_os = "linux") {
+            assert_eq!(
+                postures.get("posture-no-net").copied(),
+                Some("kernel-netns-no-network")
+            );
+            assert_eq!(
+                postures.get("posture-proxy").copied(),
+                Some("kernel-netns-loopback-proxy")
+            );
+        }
+
+        let _ = runner.terminate_agent("posture-no-net").await;
+        let _ = runner.terminate_agent("posture-proxy").await;
     }
 }

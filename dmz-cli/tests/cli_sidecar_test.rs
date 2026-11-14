@@ -78,7 +78,7 @@ fn test_cli_sidecar_flag_parsing() {
         _ => panic!("Expected Commands::Shell"),
     }
 
-    // Sandbox with --sidecar
+    // Sandbox with --sidecar and --strict-kernel
     let args = vec![
         "dmz",
         "sandbox",
@@ -87,6 +87,7 @@ fn test_cli_sidecar_flag_parsing() {
         "--sidecar",
         "./my-sidecar",
         "--allow-network",
+        "--strict-kernel",
     ];
     let parsed = Cli::try_parse_from(args).expect("Failed to parse sandbox command");
     match parsed.command {
@@ -94,11 +95,13 @@ fn test_cli_sidecar_flag_parsing() {
             workspace,
             sidecar,
             allow_network,
+            strict_kernel,
             ..
         } => {
             assert_eq!(workspace, PathBuf::from("./my-app"));
             assert_eq!(sidecar, Some(PathBuf::from("./my-sidecar")));
             assert!(allow_network);
+            assert!(strict_kernel);
         }
         _ => panic!("Expected Commands::Sandbox"),
     }

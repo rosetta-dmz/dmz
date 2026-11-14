@@ -352,6 +352,72 @@ impl DiagnosticError {
     }
 }
 
+/// Lock-free atomic telemetry counters for core store, fetch, and clone operations.
+pub struct CoreMetrics;
+
+static CACHE_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CACHE_MISSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CACHE_CORRUPTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FETCH_RETRIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static COW_CLONES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static HARDLINK_CLONES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static COPY_FALLBACKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Serializable point-in-time snapshot of [`CoreMetrics`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoreMetricsSnapshot {
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub cache_corruptions: u64,
+    pub fetch_retries: u64,
+    pub cow_clones: u64,
+    pub hardlink_clones: u64,
+    pub copy_fallbacks: u64,
+}
+
+impl CoreMetrics {
+    pub fn record_cache_hit() {
+        CACHE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn record_cache_miss() {
+        CACHE_MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn record_cache_corruption() {
+        CACHE_CORRUPTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn record_fetch_retry() {
+        FETCH_RETRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn record_cow_clone() {
+        COW_CLONES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn record_hardlink_clone() {
+        HARDLINK_CLONES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn record_copy_fallback() {
+        COPY_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn snapshot() -> CoreMetricsSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        CoreMetricsSnapshot {
+            cache_hits: CACHE_HITS.load(Relaxed),
+            cache_misses: CACHE_MISSES.load(Relaxed),
+            cache_corruptions: CACHE_CORRUPTIONS.load(Relaxed),
+            fetch_retries: FETCH_RETRIES.load(Relaxed),
+            cow_clones: COW_CLONES.load(Relaxed),
+            hardlink_clones: HARDLINK_CLONES.load(Relaxed),
+            copy_fallbacks: COPY_FALLBACKS.load(Relaxed),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,5 +613,31 @@ mod tests {
         };
         let ws_diag = DiagnosticError::classify(&ws_err);
         assert_eq!(ws_diag.category, ErrorCategory::UserCodeFault);
+    }
+
+    #[test]
+    fn test_core_metrics_counters_and_snapshot_roundtrip() {
+        let before = CoreMetrics::snapshot();
+        CoreMetrics::record_cache_hit();
+        CoreMetrics::record_cache_miss();
+        CoreMetrics::record_cache_corruption();
+        CoreMetrics::record_fetch_retry();
+        CoreMetrics::record_cow_clone();
+        CoreMetrics::record_hardlink_clone();
+        CoreMetrics::record_copy_fallback();
+        let after = CoreMetrics::snapshot();
+
+        assert!(after.cache_hits > before.cache_hits);
+        assert!(after.cache_misses > before.cache_misses);
+        assert!(after.cache_corruptions > before.cache_corruptions);
+        assert!(after.fetch_retries > before.fetch_retries);
+        assert!(after.cow_clones > before.cow_clones);
+        assert!(after.hardlink_clones > before.hardlink_clones);
+        assert!(after.copy_fallbacks > before.copy_fallbacks);
+
+        let serialized = serde_json::to_string(&after).expect("serialize CoreMetricsSnapshot");
+        let roundtrip: CoreMetricsSnapshot =
+            serde_json::from_str(&serialized).expect("deserialize CoreMetricsSnapshot");
+        assert_eq!(after, roundtrip);
     }
 }

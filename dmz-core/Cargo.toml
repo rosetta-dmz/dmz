@@ -24,3 +24,6 @@ which.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
 dmz-sandbox.workspace = true
+
+[lints]
+workspace = true

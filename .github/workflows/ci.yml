@@ -72,8 +72,11 @@ jobs:
       - name: Check Formatting
         run: cargo fmt --all -- --check
 
-      - name: Run Clippy Linter
-        run: cargo clippy --all-targets -- -D warnings
+      - name: Run Clippy Linter (Workspace Targets)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run Strict Clippy Gate (Production Targets)
+        run: cargo clippy --workspace --lib --bins -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::undocumented_unsafe_blocks -D clippy::indexing_slicing -D clippy::cast_possible_truncation -D clippy::cast_sign_loss -D clippy::fallible_impl_from
 
   test:
     name: Test Workspace (${{ matrix.os }})

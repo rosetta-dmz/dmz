@@ -1,10 +1,35 @@
-use crate::platform::{PlatformError, SandboxConfig};
+use crate::platform::{PlatformError, SandboxConfig, SandboxPolicyOptions};
 use std::fs;
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitStatus, Stdio};
 
 pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError> {
+    run_sandboxed_with_options(config, &SandboxPolicyOptions::default())
+}
+
+pub fn run_sandboxed_with_options(
+    config: &SandboxConfig,
+    options: &SandboxPolicyOptions,
+) -> Result<ExitStatus, PlatformError> {
+    let mut cmd = build_command(config, options)?;
+    cmd.stdin(Stdio::inherit());
+    cmd.stdout(Stdio::inherit());
+    cmd.stderr(Stdio::inherit());
+
+    let status = cmd.status().map_err(|err| {
+        PlatformError::SeatbeltError(format!("Failed to execute sandbox-exec: {}", err))
+    })?;
+
+    Ok(status)
+}
+
+/// Builds a Seatbelt-confined `Command` without spawning it, enabling both synchronous
+/// CLI runs and asynchronous supervisor-managed agent supervision.
+pub fn build_command(
+    config: &SandboxConfig,
+    options: &SandboxPolicyOptions,
+) -> Result<Command, PlatformError> {
     // Validate IPC socket path length on macOS (POSIX sockaddr_un.sun_path strictly 104 bytes)
     if let Some(ref sock_path) = config.ipc_socket_path {
         let path_len = sock_path.as_os_str().as_encoded_bytes().len();
@@ -36,7 +61,7 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
         ))
     })?;
 
-    let profile_str = generate_seatbelt_profile(config);
+    let profile_str = generate_seatbelt_profile_with_options(config, options);
 
     let mut cmd = Command::new("sandbox-exec");
     cmd.arg("-p").arg(profile_str);
@@ -44,18 +69,11 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     cmd.args(&config.args);
     cmd.envs(config.envs.iter().map(|(k, v)| (k, v)));
     cmd.current_dir(&config.workspace_path);
-    cmd.stdin(Stdio::inherit());
-    cmd.stdout(Stdio::inherit());
-    cmd.stderr(Stdio::inherit());
 
     // Assign dedicated process group to prevent orphaned zombie processes upon termination
     cmd.process_group(0);
 
-    let status = cmd.status().map_err(|err| {
-        PlatformError::SeatbeltError(format!("Failed to execute sandbox-exec: {}", err))
-    })?;
-
-    Ok(status)
+    Ok(cmd)
 }
 
 /// Escapes backslashes, double quotes, and control/null characters in file paths for safe interpolation into Scheme Seatbelt profiles
@@ -67,6 +85,13 @@ pub fn escape_seatbelt_path(path: &std::path::Path) -> String {
 }
 
 pub fn generate_seatbelt_profile(config: &SandboxConfig) -> String {
+    generate_seatbelt_profile_with_options(config, &SandboxPolicyOptions::default())
+}
+
+pub fn generate_seatbelt_profile_with_options(
+    config: &SandboxConfig,
+    options: &SandboxPolicyOptions,
+) -> String {
     let canonical_workspace =
         fs::canonicalize(&config.workspace_path).unwrap_or_else(|_| config.workspace_path.clone());
     let workspace = escape_seatbelt_path(&canonical_workspace);
@@ -81,6 +106,11 @@ pub fn generate_seatbelt_profile(config: &SandboxConfig) -> String {
 
     let network_rule = if config.allow_network {
         "(allow network*)".to_string()
+    } else if let Some(proxy_addr) = options.proxy_addr {
+        format!(
+            "(deny network*)\n(allow network* (to unix-socket))\n(allow network-bind (to unix-socket))\n(allow network-outbound (to unix-socket))\n(allow network-outbound (remote ip \"localhost:{}\"))",
+            proxy_addr.port()
+        )
     } else {
         "(deny network*)\n(allow network* (to unix-socket))\n(allow network-bind (to unix-socket))\n(allow network-outbound (to unix-socket))".to_string()
     };
@@ -176,6 +206,25 @@ pub fn generate_seatbelt_profile(config: &SandboxConfig) -> String {
             String::new()
         };
 
+    let mut extra_writable_rules = String::new();
+    for path in &options.writable_paths {
+        let canon = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+        let escaped = escape_seatbelt_path(&canon);
+        extra_writable_rules.push_str(&format!(
+            "(allow file-read* file-write* (subpath \"{}\"))\n",
+            escaped
+        ));
+    }
+
+    let cmd_path = std::path::Path::new(&config.command);
+    if cmd_path.is_absolute() && cmd_path.exists() {
+        let canon_cmd = fs::canonicalize(cmd_path).unwrap_or_else(|_| cmd_path.to_path_buf());
+        extra_writable_rules.push_str(&format!(
+            "(allow file-read* (literal \"{}\"))\n",
+            escape_seatbelt_path(&canon_cmd)
+        ));
+    }
+
     format!(
         r#"
 (version 1)
@@ -211,14 +260,15 @@ pub fn generate_seatbelt_profile(config: &SandboxConfig) -> String {
     (subpath "{}"))
 
 (allow file-read* file-write* (subpath "{}"))
-{}{}
+{}{}{}
 "#,
         network_rule,
         user_toolchain_rules,
         private_tmp_escaped,
         workspace,
         closure_rule,
-        ipc_socket_rules
+        ipc_socket_rules,
+        extra_writable_rules
     )
 }
 
@@ -283,5 +333,20 @@ mod tests {
                 other
             ),
         }
+    }
+
+    #[test]
+    fn test_seatbelt_profile_proxy_port_and_writable_paths() {
+        let config = SandboxConfig::new("/tmp", "/nix/store", "/bin/sh");
+        let options = SandboxPolicyOptions {
+            isolation_mode: crate::platform::SandboxIsolationMode::StrictKernel,
+            proxy_addr: Some("127.0.0.1:41234".parse().unwrap()),
+            writable_paths: vec![PathBuf::from("/tmp/dmz_scratch")],
+        };
+
+        let profile = generate_seatbelt_profile_with_options(&config, &options);
+        assert!(profile.contains("(deny network*)"));
+        assert!(profile.contains("(allow network-outbound (remote ip \"localhost:41234\"))"));
+        assert!(profile.contains("dmz_scratch"));
     }
 }

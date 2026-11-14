@@ -1,7 +1,9 @@
 use super::types::{DispatchContext, IpcRequest, IpcResponse};
 use crate::{AgentConfig, SidecarPairConfig};
 use dmz_core::workspace::WorkspaceProjectConfig;
-use dmz_sandbox::platform::{run_sandboxed, SandboxConfig};
+use dmz_sandbox::platform::{
+    run_sandboxed_with_options, SandboxConfig, SandboxIsolationMode, SandboxPolicyOptions,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -14,7 +16,9 @@ pub async fn dispatch_request(req: IpcRequest, ctx: &DispatchContext) -> IpcResp
 
         IpcRequest::GetStatus => {
             let active_agents = ctx.agent_runner.list_active_agents().await;
+            let agent_postures = ctx.agent_runner.list_active_agent_postures().await;
             let sidecar_state = ctx.orchestrator.current_state().await;
+            let core_metrics = dmz_core::diagnostics::CoreMetrics::snapshot();
             let service_statuses = if let Some(ref sr) = ctx.service_runner {
                 Some(sr.get_status_all().await)
             } else {
@@ -25,8 +29,10 @@ pub async fn dispatch_request(req: IpcRequest, ctx: &DispatchContext) -> IpcResp
                 "uptime_seconds": ctx.started_at.elapsed().as_secs(),
                 "active_agents": active_agents.len(),
                 "active_agent_ids": active_agents,
+                "agent_isolation_postures": agent_postures,
                 "sidecar_state": format!("{:?}", sidecar_state),
                 "service_statuses": service_statuses,
+                "core_metrics": core_metrics,
             });
             IpcResponse::ok_with_data("Supervisor active", status_data)
         }
@@ -37,8 +43,14 @@ pub async fn dispatch_request(req: IpcRequest, ctx: &DispatchContext) -> IpcResp
             scratchpad_bytes,
             command,
             args,
+            isolation_mode,
         } => {
-            info!(agent = %agent_id, domains = ?allowed_domains, "Spawning agent process via IPC");
+            info!(
+                agent = %agent_id,
+                domains = ?allowed_domains,
+                isolation_mode = ?isolation_mode,
+                "Spawning agent process via IPC"
+            );
             let (binary_or_script, cmd_args) = match (command, args) {
                 (Some(cmd), Some(a)) => (cmd, a),
                 (Some(cmd), None) => (cmd, Vec::new()),
@@ -67,7 +79,11 @@ pub async fn dispatch_request(req: IpcRequest, ctx: &DispatchContext) -> IpcResp
                 scratchpad_bytes: scratchpad_bytes.max(1024 * 1024),
             };
 
-            match ctx.agent_runner.spawn_agent(config).await {
+            match ctx
+                .agent_runner
+                .spawn_agent_with_mode(config, isolation_mode)
+                .await
+            {
                 Ok(()) => IpcResponse::ok(format!("Agent '{}' spawned successfully", agent_id)),
                 Err(e) => IpcResponse::error(e),
             }
@@ -86,7 +102,11 @@ pub async fn dispatch_request(req: IpcRequest, ctx: &DispatchContext) -> IpcResp
             command,
             args,
             allow_network,
-        } => execute_sandboxed_request(workspace_path, command, args, allow_network).await,
+            isolation_mode,
+        } => {
+            execute_sandboxed_request(workspace_path, command, args, allow_network, isolation_mode)
+                .await
+        }
 
         IpcRequest::GetSidecarStatus => {
             let state = ctx.orchestrator.current_state().await;
@@ -115,27 +135,41 @@ pub async fn dispatch_request(req: IpcRequest, ctx: &DispatchContext) -> IpcResp
                 "StartSidecarPair requested via IPC"
             );
             let raw_ws = PathBuf::from(&workspace_path);
-            let ws_canon = std::fs::canonicalize(&raw_ws).unwrap_or(raw_ws);
-            let manifest_res = if let Some(ref explicit_cfg) = config_path {
-                let cfg_path = Path::new(explicit_cfg);
-                WorkspaceProjectConfig::load_from_file(cfg_path).map(|cfg| {
-                    let root = cfg_path
-                        .parent()
-                        .map(Path::to_path_buf)
-                        .unwrap_or_else(|| ws_canon.clone());
-                    Some((cfg, root))
-                })
-            } else {
-                WorkspaceProjectConfig::discover_workspace_manifest_checked(&ws_canon).map(|opt| {
-                    opt.map(|(cfg, manifest_file)| {
-                        let root = manifest_file
+            let cfg_clone = config_path.clone();
+            let discovery_res = tokio::task::spawn_blocking(move || {
+                let ws_canon = std::fs::canonicalize(&raw_ws).unwrap_or(raw_ws);
+                let manifest_res = if let Some(ref explicit_cfg) = cfg_clone {
+                    let cfg_path = Path::new(explicit_cfg);
+                    WorkspaceProjectConfig::load_from_file(cfg_path).map(|cfg| {
+                        let root = cfg_path
                             .parent()
                             .map(Path::to_path_buf)
                             .unwrap_or_else(|| ws_canon.clone());
-                        let root = std::fs::canonicalize(&root).unwrap_or(root);
-                        (cfg, root)
+                        Some((cfg, root))
                     })
-                })
+                } else {
+                    WorkspaceProjectConfig::discover_workspace_manifest_checked(&ws_canon).map(
+                        |opt| {
+                            opt.map(|(cfg, manifest_file)| {
+                                let root = manifest_file
+                                    .parent()
+                                    .map(Path::to_path_buf)
+                                    .unwrap_or_else(|| ws_canon.clone());
+                                let root = std::fs::canonicalize(&root).unwrap_or(root);
+                                (cfg, root)
+                            })
+                        },
+                    )
+                };
+                (ws_canon, manifest_res)
+            })
+            .await;
+
+            let (ws_canon, manifest_res) = match discovery_res {
+                Ok(res) => res,
+                Err(e) => {
+                    return IpcResponse::error(format!("Sidecar manifest discovery failed: {}", e));
+                }
             };
 
             match manifest_res {
@@ -206,6 +240,7 @@ pub async fn execute_sandboxed_request(
     command: String,
     args: Vec<String>,
     allow_network: bool,
+    isolation_mode: SandboxIsolationMode,
 ) -> IpcResponse {
     info!(cmd = %command, workspace = %workspace_path, "Executing sandboxed task via IPC");
     let ws_path = PathBuf::from(&workspace_path);
@@ -244,7 +279,13 @@ pub async fn execute_sandboxed_request(
         ipc_socket_path: None,
     };
 
-    let exec_res = tokio::task::spawn_blocking(move || run_sandboxed(&config)).await;
+    let opts = SandboxPolicyOptions {
+        isolation_mode,
+        proxy_addr: None,
+        writable_paths: Vec::new(),
+    };
+    let exec_res =
+        tokio::task::spawn_blocking(move || run_sandboxed_with_options(&config, &opts)).await;
 
     match exec_res {
         Ok(Ok(status)) => {

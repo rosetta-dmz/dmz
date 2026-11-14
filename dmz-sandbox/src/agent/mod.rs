@@ -2,7 +2,7 @@ pub mod ephemeral_fs;
 pub mod network_proxy;
 
 pub use ephemeral_fs::{EphemeralError, EphemeralFs};
-pub use network_proxy::{DomainWhitelist, ProxyError};
+pub use network_proxy::{DomainWhitelist, LoopbackAllowlistProxy, ProxyError};
 use std::path::Path;
 
 /// High-level AI agent containerless sub-sandbox combining volatile storage and network policy enforcement
