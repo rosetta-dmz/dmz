@@ -167,16 +167,24 @@ impl ToolchainProvider {
                     _ => true,
                 };
 
-                if is_strictly_required {
-                    tracing::warn!(
-                        ecosystem = eco.as_str(),
-                        "Workspace requires {} toolchain, but no standalone host distribution was discovered.",
-                        eco.as_str()
-                    );
-                } else {
+                if !is_strictly_required {
                     tracing::info!(
                         ecosystem = eco.as_str(),
                         "Companion {} toolchain was not discovered on host; omitting from bundle.",
+                        eco.as_str()
+                    );
+                } else if *eco == ToolchainEcosystem::Make
+                    && preflight::target_is_macos(target_platform)
+                    && preflight::host_apple_clt_provides("make")
+                {
+                    tracing::info!(
+                        ecosystem = eco.as_str(),
+                        "No standalone Make distribution discovered on host; macOS Apple CLT/Xcode prerequisite provides 'make' on target."
+                    );
+                } else {
+                    tracing::warn!(
+                        ecosystem = eco.as_str(),
+                        "Workspace requires {} toolchain, but no standalone host distribution was discovered.",
                         eco.as_str()
                     );
                 }

@@ -8,7 +8,6 @@ use dmz_core::archive::exporter::ExportMode as CoreExportMode;
 use dmz_core::archive::{
     AirGapExporter, AirGapImporter, AirGapManifest, ExportConfig, ImportConfig,
 };
-use dmz_core::install::{InstallConfig, InstallerEngine};
 use dmz_core::resolver::{ResolveOptions, ResolverEngine};
 use dmz_core::toolchain::ToolchainProfile;
 
@@ -584,15 +583,16 @@ pub(super) fn show(
                             target_workspace_dir: ws_canon.clone(),
                             verify_closure_hash: verify_closure,
                             include_dev,
+                            install_dependencies: auto_install,
                         };
 
                         let outcome = match AirGapImporter::import(&config) {
                             Ok(result) => {
+                                let short_sig: String =
+                                    result.closure_signature.chars().take(12).collect();
                                 let mut msg = format!(
                                     "Imported {} files into store. Verified Closure: {}",
-                                    result.imported_packages,
-                                    &result.closure_signature
-                                        [..12.min(result.closure_signature.len())]
+                                    result.imported_packages, short_sig
                                 );
                                 if let Some(ref proj) = result.workspace_project {
                                     msg.push_str(&format!(
@@ -615,34 +615,16 @@ pub(super) fn show(
                                 let new_ws = result.workspace_path.display().to_string();
 
                                 if auto_install {
-                                    let lockfile = result.workspace_path.join("dmz.lock");
-                                    let install_config = InstallConfig {
-                                        workspace_path: result.workspace_path.clone(),
-                                        lockfile_path: lockfile,
-                                        store_dir: result.store_path.clone(),
-                                    };
-                                    match InstallerEngine::install(&install_config) {
-                                        Ok(count) => {
-                                            msg.push_str(&format!(
-                                                " · Materialized {} packages into workspace offline",
-                                                count
-                                            ));
-                                        }
-                                        Err(dmz_core::install::InstallError::IntegrityMismatch {
-                                            expected,
-                                            actual,
-                                        }) => {
-                                            msg.push_str(&format!(
-                                                " · [SUPPLY CHAIN INTEGRITY MISMATCH] FATAL: Tampered package detected in store! (expected {}, computed {})",
-                                                expected, actual
-                                            ));
-                                        }
-                                        Err(e) => {
-                                            msg.push_str(&format!(
-                                                " · Offline install error: {}",
-                                                e
-                                            ));
-                                        }
+                                    if let Some(ref warn_msg) = result.install_warning {
+                                        msg.push_str(&format!(
+                                            " · Offline install warning: {}",
+                                            warn_msg
+                                        ));
+                                    } else if result.installed_packages > 0 {
+                                        msg.push_str(&format!(
+                                            " · Materialized {} packages into workspace offline",
+                                            result.installed_packages
+                                        ));
                                     }
                                 }
 

@@ -165,6 +165,7 @@ impl AirGapImporter {
             &effective_workspace,
             config.verify_closure_hash,
             config.include_dev,
+            config.install_dependencies,
         );
 
         match result {
@@ -184,6 +185,7 @@ impl AirGapImporter {
         effective_workspace: &Path,
         verify_closure_hash: bool,
         include_dev: bool,
+        install_dependencies: bool,
     ) -> Result<ImportResult, ImportError> {
         // Open archive and initialize zstd stream
         let file = File::open(effective_archive)
@@ -597,7 +599,13 @@ impl AirGapImporter {
         // Materialize offline dependencies (.venv, node_modules, .cargo/vendor) from the local store
         // BEFORE generating final IDE settings and hydrating workspace configurations.
         let lockfile_path = effective_workspace.join("dmz.lock");
-        if lockfile_path.is_file() && effective_store.is_dir() && imported_count > 0 {
+        let mut installed_packages = 0usize;
+        let mut install_warning = None;
+        if install_dependencies
+            && lockfile_path.is_file()
+            && effective_store.is_dir()
+            && imported_count > 0
+        {
             let has_installable_packages = parsed_lockfile
                 .as_ref()
                 .map(|l| l.packages.values().any(|p| !p.is_local_path()))
@@ -608,17 +616,24 @@ impl AirGapImporter {
                     lockfile_path,
                     store_dir: effective_store.to_path_buf(),
                 };
-                if let Err(e) = crate::install::InstallerEngine::install(&install_cfg) {
-                    if verify_closure_hash {
-                        return Err(ImportError::VerificationFailed(format!(
-                            "Post-extraction dependency install failed: {}",
-                            e
-                        )));
+                match crate::install::InstallerEngine::install(&install_cfg) {
+                    Ok(count) => {
+                        installed_packages = count;
                     }
-                    warn!(
-                        error = %e,
-                        "Post-extraction store install skipped or deferred (verify_closure_hash=false)"
-                    );
+                    Err(e) => {
+                        if verify_closure_hash {
+                            return Err(ImportError::VerificationFailed(format!(
+                                "Post-extraction dependency install failed: {}",
+                                e
+                            )));
+                        }
+                        let msg = e.to_string();
+                        warn!(
+                            error = %msg,
+                            "Post-extraction store install skipped or deferred (verify_closure_hash=false)"
+                        );
+                        install_warning = Some(msg);
+                    }
                 }
             }
         }
@@ -662,6 +677,8 @@ impl AirGapImporter {
 
         Ok(ImportResult {
             imported_packages: imported_count,
+            installed_packages,
+            install_warning,
             closure_signature,
             store_path: effective_store.to_path_buf(),
             workspace_path: effective_workspace.to_path_buf(),

@@ -1,10 +1,9 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
 use super::super::ToolchainError;
 use super::{
-    collect_files_recursive, emit_non_relocatable_notice, is_apple_system_toolchain_path,
-    is_non_standalone_path, push_deduped_file, push_system_bin_candidates, push_unique_path,
-    redact_home_prefix, resolve_prefix_root, select_strict_standalone_verified,
-    ToolchainDiscoverer,
+    collect_files_recursive, find_standalone_bin_in_path, is_apple_system_toolchain_path,
+    push_deduped_file, push_system_bin_candidates, push_unique_path, redact_home_prefix,
+    resolve_prefix_root, select_strict_standalone_verified, ToolchainDiscoverer,
 };
 use std::collections::HashSet;
 use std::fs;
@@ -198,14 +197,7 @@ fn collect_cc_binaries(
                     format!("bin/{}.exe", name),
                 );
             }
-        } else if let Ok(found) = which::which(name) {
-            if is_non_standalone_path(&found) {
-                emit_non_relocatable_notice(&found);
-                continue;
-            }
-            if is_apple_system_toolchain_path(&found) {
-                continue;
-            }
+        } else if let Some(found) = find_standalone_bin_in_path(name, true) {
             push_deduped_file(
                 &mut bin_files,
                 &mut seen_bin,

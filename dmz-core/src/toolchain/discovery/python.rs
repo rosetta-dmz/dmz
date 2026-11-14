@@ -3,15 +3,16 @@ use super::super::types::{
 };
 use super::super::ToolchainError;
 use super::{
-    collect_files_recursive, is_non_standalone_path, push_deduped_file, push_system_bin_candidates,
-    push_unique_path, redact_home_prefix, select_strict_standalone_candidate, ToolchainDiscoverer,
+    collect_files_recursive, emit_non_relocatable_notice, is_non_standalone_path,
+    push_deduped_file, push_system_bin_candidates, push_unique_path, redact_home_prefix,
+    select_strict_standalone_candidate, ToolchainDiscoverer,
 };
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 const MAX_STDLIB_WALK_DEPTH: usize = 32;
 
@@ -95,8 +96,36 @@ fn extract_version_tuple(path: &Path) -> Vec<u64> {
     parts
 }
 
+/// Finds the newest versioned `python3.<minor>` executable inside `bin_dir` if `python3` is absent.
+fn find_versioned_python_in_bin(bin_dir: &Path) -> Option<PathBuf> {
+    let entries = fs::read_dir(bin_dir).ok()?;
+    let mut matches: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
+                    name.starts_with("python3.")
+                        && !name.ends_with("-config")
+                        && !name.ends_with(".py")
+                        && !name.ends_with(".pdb")
+                })
+        })
+        .collect();
+
+    matches.sort_by(|a, b| {
+        let va = extract_version_tuple(a);
+        let vb = extract_version_tuple(b);
+        match vb.cmp(&va) {
+            Ordering::Equal => b.cmp(a),
+            other => other,
+        }
+    });
+    matches.into_iter().next()
+}
+
 /// Scans immediate version subdirectories under `parent_dir` (e.g., `uv`, Framework `Versions`)
-/// and records `bin/python3` (or `python.exe` on Windows) candidates, newest versions first.
+/// and records `bin/python3` (or versioned `bin/python3.*` / `python.exe`) candidates, newest versions first.
 fn collect_subdir_python_bins(parent_dir: &Path, candidates: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(parent_dir) else {
         return;
@@ -118,9 +147,12 @@ fn collect_subdir_python_bins(parent_dir: &Path, candidates: &mut Vec<PathBuf>) 
     });
 
     for dir in dirs {
-        let unix_bin = dir.join("bin/python3");
+        let bin_dir = dir.join("bin");
+        let unix_bin = bin_dir.join("python3");
         if unix_bin.is_file() {
             push_unique_path(candidates, unix_bin);
+        } else if let Some(versioned) = find_versioned_python_in_bin(&bin_dir) {
+            push_unique_path(candidates, versioned);
         }
         if cfg!(windows) {
             let win_bin = dir.join("python.exe");
@@ -131,43 +163,106 @@ fn collect_subdir_python_bins(parent_dir: &Path, candidates: &mut Vec<PathBuf>) 
     }
 }
 
-/// Collects candidate Python executables prioritizing active venv, `uv`, and official `python.org`.
-fn collect_python_candidates() -> Vec<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-
-    // 1. Active virtualenv (unwrapped to its standalone base interpreter below)
+/// Appends candidate `bin/python3` / `python.exe` paths from explicit environment variables.
+fn collect_env_python_candidates(candidates: &mut Vec<PathBuf>) {
     if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
         if !venv.is_empty() {
             let venv_path = PathBuf::from(&venv);
             let unix_bin = venv_path.join("bin/python3");
             if unix_bin.is_file() {
-                push_unique_path(&mut candidates, unix_bin);
+                push_unique_path(candidates, unix_bin);
             }
             if cfg!(windows) {
                 let win_bin = venv_path.join("Scripts/python.exe");
                 if win_bin.is_file() {
-                    push_unique_path(&mut candidates, win_bin);
+                    push_unique_path(candidates, win_bin);
                 }
             }
         }
     }
 
-    // 2. Relocatable `uv` (`python-build-standalone`) managed installations
+    for var in ["PYTHON_HOME", "PYTHON3"] {
+        if let Some(val) = std::env::var_os(var).filter(|v| !v.is_empty()) {
+            let p = PathBuf::from(val);
+            if p.is_file() {
+                push_unique_path(candidates, p);
+            } else if p.is_dir() {
+                for rel in ["bin/python3", "python3", "python.exe", "Scripts/python.exe"] {
+                    let candidate = p.join(rel);
+                    if candidate.is_file() {
+                        push_unique_path(candidates, candidate);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Appends standalone Python installs under `$HOME` (`uv`, `python.org`, `rye`, `mise`, `asdf`, `pyenv`, conda).
+fn collect_home_python_candidates(home: &Path, candidates: &mut Vec<PathBuf>) {
+    // Prefer `uv` (`python-build-standalone`) ahead of third-party version managers
+    collect_subdir_python_bins(&home.join(".local/share/uv/python"), candidates);
+    if cfg!(target_os = "macos") {
+        collect_subdir_python_bins(
+            &home.join("Library/Application Support/uv/python"),
+            candidates,
+        );
+        collect_subdir_python_bins(
+            &home.join("Library/Frameworks/Python.framework/Versions"),
+            candidates,
+        );
+    }
+
+    let user_bin_py = home.join(".local/bin/python3");
+    if user_bin_py.is_file() {
+        push_unique_path(candidates, user_bin_py);
+    }
+
+    // Standalone version managers & relocatable user environments (filtered for Homebrew/Nix linkage)
+    for subdir in [
+        ".rye/py",
+        ".local/share/mise/installs/python",
+        ".local/share/rtx/installs/python",
+        ".asdf/installs/python",
+        ".pyenv/versions",
+    ] {
+        collect_subdir_python_bins(&home.join(subdir), candidates);
+    }
+
+    for conda_dir in ["miniforge3", "mambaforge", "miniconda3", "anaconda3"] {
+        let bin = home.join(conda_dir).join("bin/python3");
+        if bin.is_file() {
+            push_unique_path(candidates, bin);
+        }
+    }
+}
+
+/// Collects candidate Python executables prioritizing active venv, `uv`, official `python.org`,
+/// and standalone version managers (`rye`, `mise`, `asdf`, `pyenv`, `miniforge`/`miniconda`).
+fn collect_python_candidates() -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    collect_env_python_candidates(&mut candidates);
+
+    // Relocatable `uv` (`python-build-standalone`) managed installations
     if let Ok(uv_dir) = std::env::var("UV_PYTHON_INSTALL_DIR") {
         if !uv_dir.is_empty() {
             collect_subdir_python_bins(Path::new(&uv_dir), &mut candidates);
         }
     }
-    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-        if !home.is_empty() {
-            collect_subdir_python_bins(
-                &PathBuf::from(&home).join(".local/share/uv/python"),
-                &mut candidates,
-            );
-        }
+    if let Some(xdg_data) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+        collect_subdir_python_bins(&PathBuf::from(xdg_data).join("uv/python"), &mut candidates);
     }
 
-    // 3. First-party official `python.org` installations
+    let home_dir = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    if let Some(ref home) = home_dir {
+        collect_subdir_python_bins(&home.join(".local/share/uv/python"), &mut candidates);
+    }
+
+    // First-party official `python.org` installations
     if cfg!(target_os = "macos") {
         let current_fw =
             PathBuf::from("/Library/Frameworks/Python.framework/Versions/Current/bin/python3");
@@ -192,6 +287,11 @@ fn collect_python_candidates() -> Vec<PathBuf> {
         }
     }
 
+    if let Some(ref home) = home_dir {
+        collect_home_python_candidates(home, &mut candidates);
+    }
+    collect_subdir_python_bins(Path::new("/opt/python"), &mut candidates);
+
     let mut standard_paths = vec![PathBuf::from("/usr/local/bin/python3")];
     if !cfg!(target_os = "macos") {
         standard_paths.push(PathBuf::from("/usr/bin/python3"));
@@ -202,9 +302,54 @@ fn collect_python_candidates() -> Vec<PathBuf> {
         }
     }
 
-    // 4. Fallback to system PATH and standard host bin directories
-    push_system_bin_candidates(&mut candidates, "python3");
+    // Fallback to all system PATH entries and standard host bin directories
+    for bin_name in [
+        "python3",
+        "python3.13",
+        "python3.12",
+        "python3.11",
+        "python3.10",
+    ] {
+        push_system_bin_candidates(&mut candidates, bin_name);
+    }
     candidates
+}
+
+/// Checks whether a Python binary links dynamically to non-standalone package-manager paths
+/// (e.g., Homebrew OpenSSL linked into a `pyenv` build).
+fn has_non_standalone_dylib_deps(bin_path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let Ok(output) = Command::new("otool")
+            .arg("-L")
+            .arg(bin_path)
+            .stdin(Stdio::null())
+            .output()
+        else {
+            return false;
+        };
+        if !output.status.success() {
+            return false;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines().skip(1) {
+            let dep_path = line
+                .trim()
+                .split(" (compatibility version")
+                .next()
+                .unwrap_or("")
+                .trim();
+            if dep_path.starts_with('/') && is_non_standalone_path(Path::new(dep_path)) {
+                return true;
+            }
+        }
+        false
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = bin_path;
+        false
+    }
 }
 
 /// Unwraps shims/symlinks/venvs and filters out unrelocatable macOS stubs before strict selection.
@@ -228,17 +373,30 @@ fn filter_and_select_python(candidates: Vec<PathBuf>) -> Option<PathBuf> {
             continue;
         }
 
+        if has_non_standalone_dylib_deps(&resolved) {
+            emit_non_relocatable_notice(&resolved);
+            continue;
+        }
+
         push_unique_path(&mut filtered, resolved);
     }
 
+    let selected = select_strict_standalone_candidate(filtered);
     if let Some(skipped) = skipped_macos_unrelocatable {
-        warn!(
-            path = %redact_home_prefix(&skipped),
-            "Skipped unrelocatable macOS system/Xcode Python stub; install standalone Python via `uv python install` (python-build-standalone) or python.org"
-        );
+        if selected.is_some() {
+            debug!(
+                path = %redact_home_prefix(&skipped),
+                "Ignoring macOS system/Xcode Python stub because a standalone Python installation was selected"
+            );
+        } else {
+            warn!(
+                path = %redact_home_prefix(&skipped),
+                "Skipped unrelocatable macOS system/Xcode Python stub; install standalone Python via `uv python install` (python-build-standalone) or python.org"
+            );
+        }
     }
 
-    select_strict_standalone_candidate(filtered)
+    selected
 }
 
 /// Resolves the installation prefix root for either a `bin/python*` binary or a macOS
@@ -458,6 +616,7 @@ fn collect_python_libraries(
     let lib_dir = py_root.join("lib");
     if lib_dir.is_dir() {
         collect_python_lib_dir(&lib_dir, py_root, &mut lib_files, &mut seen_lib, profile);
+        collect_python_companion_shared_libs(py_bin, &lib_dir, &mut lib_files, &mut seen_lib);
     }
 
     let framework_py = py_root.join("Python");
@@ -591,6 +750,98 @@ fn collect_python_lib_dir(
             }
         }
     }
+}
+
+/// Collects companion shared libraries under `<py_root>/lib/` referenced via Mach-O `otool -L`
+/// by `py_bin` (or already-discovered `lib/libpython*` dylibs) so non-monolithic standalone
+/// runtimes (e.g., `pyenv`, `miniforge`) remain self-contained in the bundle.
+#[cfg(target_os = "macos")]
+fn collect_python_companion_shared_libs(
+    py_bin: &Path,
+    lib_dir: &Path,
+    lib_files: &mut Vec<(PathBuf, String)>,
+    seen_lib: &mut HashSet<String>,
+) {
+    let mut inspect_targets = vec![py_bin.to_path_buf()];
+    for (src, rel) in lib_files.iter() {
+        if rel.starts_with("lib/") && rel.ends_with(".dylib") {
+            inspect_targets.push(src.clone());
+        }
+    }
+
+    let mut queue = inspect_targets;
+    let mut inspected: HashSet<PathBuf> = HashSet::new();
+    let canonical_lib_dir = fs::canonicalize(lib_dir).unwrap_or_else(|_| lib_dir.to_path_buf());
+
+    while let Some(target) = queue.pop() {
+        if !inspected.insert(target.clone()) {
+            continue;
+        }
+        let Ok(out) = Command::new("otool")
+            .arg("-L")
+            .arg(&target)
+            .stdin(Stdio::null())
+            .output()
+        else {
+            continue;
+        };
+        if !out.status.success() {
+            continue;
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        for line in stdout.lines().skip(1) {
+            let trimmed = line.trim();
+            let dep = trimmed
+                .split(" (compatibility version")
+                .next()
+                .unwrap_or("")
+                .trim();
+            if dep.is_empty() {
+                continue;
+            }
+            let dep_name = dep
+                .strip_prefix("@rpath/")
+                .or_else(|| dep.strip_prefix("@loader_path/"))
+                .or_else(|| dep.strip_prefix("@executable_path/../lib/"))
+                .or_else(|| {
+                    Path::new(dep)
+                        .strip_prefix(lib_dir)
+                        .ok()
+                        .and_then(|p| p.to_str())
+                })
+                .or_else(|| {
+                    Path::new(dep)
+                        .strip_prefix(&canonical_lib_dir)
+                        .ok()
+                        .and_then(|p| p.to_str())
+                });
+
+            let Some(rel_name) = dep_name else {
+                continue;
+            };
+            if rel_name.contains("..") || rel_name.is_empty() {
+                continue;
+            }
+            let candidate = lib_dir.join(rel_name);
+            if candidate.is_file() {
+                let target_rel = format!("lib/{}", rel_name.replace('\\', "/"));
+                let was_new = !seen_lib.contains(&target_rel);
+                push_deduped_file(lib_files, seen_lib, candidate.clone(), target_rel);
+                if was_new {
+                    queue.push(candidate);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn collect_python_companion_shared_libs(
+    _py_bin: &Path,
+    _lib_dir: &Path,
+    _lib_files: &mut Vec<(PathBuf, String)>,
+    _seen_lib: &mut HashSet<String>,
+) {
 }
 
 /// Recursively collects Python stdlib files up to a bounded depth while skipping symlinks and caches.
@@ -956,6 +1207,66 @@ mod tests {
         assert!(full_bins.contains(&"bin/pip3".to_string()));
         assert!(full_libs.contains(&"include/python3.12/Python.h".to_string()));
 
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_filter_and_select_python_skips_stub_when_standalone_present() -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir()?;
+        let standalone_dir = temp.path().join("uv/cpython-3.12.8/bin");
+        fs::create_dir_all(&standalone_dir)?;
+        let standalone_py = standalone_dir.join("python3");
+        fs::write(
+            &standalone_py,
+            "#!/bin/sh\necho \"/tmp/standalone_uv_root\"\n",
+        )?;
+        fs::set_permissions(&standalone_py, fs::Permissions::from_mode(0o755))?;
+
+        let canonical_standalone = fs::canonicalize(&standalone_py)?;
+        let selected =
+            filter_and_select_python(vec![PathBuf::from("/usr/bin/python3"), standalone_py]);
+        assert_eq!(selected, Some(canonical_standalone));
+        Ok(())
+    }
+
+    #[test]
+    fn test_collect_subdir_python_bins_falls_back_to_versioned_binary() -> std::io::Result<()> {
+        let temp = tempdir()?;
+        let py_bin_dir = temp.path().join("3.12.7/bin");
+        fs::create_dir_all(&py_bin_dir)?;
+        let versioned = py_bin_dir.join("python3.12");
+        fs::write(&versioned, "")?;
+        // Ensure helper tools like python3.12-config are ignored
+        fs::write(py_bin_dir.join("python3.12-config"), "")?;
+
+        let mut candidates = Vec::new();
+        collect_subdir_python_bins(temp.path(), &mut candidates);
+        assert_eq!(candidates, vec![versioned]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_collect_home_python_candidates_prefers_uv_over_pyenv_and_mise() -> std::io::Result<()> {
+        let temp = tempdir()?;
+        let home = temp.path();
+        let uv_py = home.join(".local/share/uv/python/cpython-3.12.8/bin/python3");
+        let pyenv_py = home.join(".pyenv/versions/3.12.7/bin/python3");
+        let mise_py = home.join(".local/share/mise/installs/python/3.12.6/bin/python3");
+        for py in [&uv_py, &pyenv_py, &mise_py] {
+            if let Some(p) = py.parent() {
+                fs::create_dir_all(p)?;
+            }
+            fs::write(py, "")?;
+        }
+
+        let mut candidates = Vec::new();
+        collect_home_python_candidates(home, &mut candidates);
+        assert_eq!(candidates.first(), Some(&uv_py));
+        assert!(candidates.contains(&pyenv_py));
+        assert!(candidates.contains(&mise_py));
         Ok(())
     }
 }

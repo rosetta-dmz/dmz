@@ -56,10 +56,8 @@ fn collect_make_candidates() -> Vec<PathBuf> {
 
     if let Some(root) = std::env::var_os("MAKE_HOME").filter(|v| !v.is_empty()) {
         let p = PathBuf::from(root);
-        if p.join("bin/make").is_file() {
-            push_unique_path(&mut candidates, p.join("bin/make"));
-        } else if p.join("make").is_file() {
-            push_unique_path(&mut candidates, p.join("make"));
+        for rel in ["bin/gmake", "bin/make", "gmake", "make"] {
+            push_unique_path(&mut candidates, p.join(rel));
         }
     }
 
@@ -68,11 +66,15 @@ fn collect_make_candidates() -> Vec<PathBuf> {
         .filter(|v| !v.is_empty())
     {
         let home_path = PathBuf::from(home);
-        push_unique_path(&mut candidates, home_path.join(".local/bin/make"));
         push_unique_path(&mut candidates, home_path.join(".local/bin/gmake"));
+        push_unique_path(&mut candidates, home_path.join(".local/bin/make"));
     }
 
-    push_unique_path(&mut candidates, PathBuf::from("/opt/make/bin/make"));
+    for dir in ["/opt/make/bin", "/usr/local/make/bin"] {
+        let dir_path = Path::new(dir);
+        push_unique_path(&mut candidates, dir_path.join("gmake"));
+        push_unique_path(&mut candidates, dir_path.join("make"));
+    }
 
     push_system_bin_candidates(&mut candidates, "gmake");
     push_system_bin_candidates(&mut candidates, "make");
@@ -133,5 +135,27 @@ mod tests {
             assert!(probe_make_version(Path::new("/usr/bin/make")).is_none());
         }
         assert_eq!(resolve_prefix_root(Path::new("/make")), None);
+    }
+
+    #[test]
+    fn test_make_select_prefers_standalone_after_homebrew() {
+        let temp = tempfile::tempdir().unwrap();
+        let make_bin = temp.path().join("bin/gmake");
+        std::fs::create_dir_all(make_bin.parent().unwrap()).unwrap();
+        std::fs::write(&make_bin, "").unwrap();
+
+        let candidates = vec![
+            PathBuf::from("/opt/homebrew/bin/gmake"),
+            PathBuf::from("/Applications/Xcode.app/Contents/Developer/usr/bin/make"),
+            make_bin.clone(),
+        ];
+        let selected = select_strict_standalone_verified(candidates, |p| {
+            if p == make_bin {
+                Some("GNU Make 4.4.1".to_string())
+            } else {
+                None
+            }
+        });
+        assert_eq!(selected, Some((make_bin, "GNU Make 4.4.1".to_string())));
     }
 }

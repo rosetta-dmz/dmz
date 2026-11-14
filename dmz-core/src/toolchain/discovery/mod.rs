@@ -269,8 +269,10 @@ pub fn push_unique_path(candidates: &mut Vec<PathBuf>, path: PathBuf) {
 }
 
 pub fn push_system_bin_candidates(candidates: &mut Vec<PathBuf>, bin_name: &str) {
-    if let Ok(p) = which::which(bin_name) {
-        push_unique_path(candidates, p);
+    if let Ok(paths) = which::which_all(bin_name) {
+        for p in paths {
+            push_unique_path(candidates, p);
+        }
     }
     for dir in &["/usr/local/bin", "/usr/bin", "/bin"] {
         let p = Path::new(dir).join(bin_name);
@@ -278,6 +280,25 @@ pub fn push_system_bin_candidates(candidates: &mut Vec<PathBuf>, bin_name: &str)
             push_unique_path(candidates, p);
         }
     }
+}
+
+/// Searches all `PATH` entries for the first standalone executable matching `bin_name`.
+pub(super) fn find_standalone_bin_in_path(
+    bin_name: &str,
+    reject_apple_clt: bool,
+) -> Option<PathBuf> {
+    let paths = which::which_all(bin_name).ok()?;
+    for found in paths {
+        if is_non_standalone_path(&found) {
+            emit_non_relocatable_notice(&found);
+            continue;
+        }
+        if reject_apple_clt && is_apple_system_toolchain_path(&found) {
+            continue;
+        }
+        return Some(found);
+    }
+    None
 }
 
 /// Selects the highest-priority genuinely standalone candidate from `candidates` and strictly

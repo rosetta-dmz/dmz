@@ -1,8 +1,8 @@
-use crate::cli::{ImportArgs, DEFAULT_LOCKFILE_PATH, DEFAULT_STORE_PATH};
+use crate::cli::{ImportArgs, DEFAULT_STORE_PATH};
 use dmz_core::archive::{AirGapImporter, ImportConfig};
 use dmz_core::ecosystem::EcosystemRegistry;
 use dmz_sandbox::platform::{run_sandboxed, SandboxConfig};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Unpack, verify, and restore an air-gap bundle into local store
 pub fn run_import(args: ImportArgs) -> anyhow::Result<i32> {
@@ -36,49 +36,40 @@ pub fn run_import(args: ImportArgs) -> anyhow::Result<i32> {
         target_workspace_dir: ws_canon.clone(),
         verify_closure_hash: !args.skip_verify,
         include_dev: args.include_dev,
+        install_dependencies: !args.skip_install,
     };
 
-    match AirGapImporter::import(&config) {
+    let import_result = match AirGapImporter::import(&config) {
         Ok(result) => {
             info!(
                 imported = result.imported_packages,
+                installed = result.installed_packages,
                 closure = %result.closure_signature,
                 is_delta = result.is_delta,
                 has_git = result.has_git_history,
                 vcs = ?result.vcs,
                 "Air-gap import completed successfully"
             );
+            result
         }
         Err(e) => {
             error!("Air-gap import failed: {}", e);
             return Ok(1);
         }
-    }
+    };
 
-    // Automated offline installation into project layouts (unless --skip-install)
+    // Report offline installation outcome performed during import (unless --skip-install)
     if !args.skip_install {
-        let lockfile_path = ws_canon.join(DEFAULT_LOCKFILE_PATH);
-        info!(
-            "Running automated offline dependency installation in workspace {:?}",
-            ws_canon
-        );
-        let install_config = dmz_core::install::InstallConfig {
-            workspace_path: ws_canon.clone(),
-            lockfile_path,
-            store_dir: effective_store.clone(),
-        };
-
-        match dmz_core::install::InstallerEngine::install(&install_config) {
-            Ok(count) => {
-                info!(
-                    "Successfully installed {} packages offline into project layouts",
-                    count
-                );
-            }
-            Err(e) => {
-                error!("Offline installation failed: {}", e);
-                return Ok(1);
-            }
+        if let Some(ref warn_msg) = import_result.install_warning {
+            warn!(
+                "Offline dependency installation skipped or deferred: {}",
+                warn_msg
+            );
+        } else {
+            info!(
+                "Successfully installed {} packages offline into project layouts",
+                import_result.installed_packages
+            );
         }
 
         // Automated ecosystem verification (unless --skip-ecosystem-verify)

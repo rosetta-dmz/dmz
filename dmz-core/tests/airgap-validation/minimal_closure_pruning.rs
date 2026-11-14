@@ -194,6 +194,7 @@ fn test_import_prunes_unreferenced_store_files_and_empty_dirs(
         target_workspace_dir: target_ws,
         verify_closure_hash: false,
         include_dev: false,
+        ..Default::default()
     };
 
     let result = AirGapImporter::import(&import_cfg)?;
@@ -287,6 +288,7 @@ serde = "1.0"
         target_workspace_dir: target_ws.clone(),
         verify_closure_hash: false,
         include_dev: false,
+        ..Default::default()
     };
 
     let result = AirGapImporter::import(&import_cfg)?;

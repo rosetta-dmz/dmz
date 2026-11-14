@@ -108,7 +108,7 @@ pub fn workspace_requires_apple_clt(ecosystems: &HashSet<ToolchainEcosystem>) ->
     cfg!(target_os = "macos") && ecosystems_use_native_or_apple_tooling(ecosystems)
 }
 
-fn target_is_macos(target_platform: Option<&str>) -> bool {
+pub(crate) fn target_is_macos(target_platform: Option<&str>) -> bool {
     match target_platform.map(str::trim).filter(|s| !s.is_empty()) {
         Some(target) => {
             let lower = target.to_ascii_lowercase();
@@ -116,6 +116,14 @@ fn target_is_macos(target_platform: Option<&str>) -> bool {
         }
         None => cfg!(target_os = "macos"),
     }
+}
+
+/// Returns `true` when running on macOS and active Apple CLT / Xcode provides `tool` via `xcrun`.
+pub(crate) fn host_apple_clt_provides(tool: &str) -> bool {
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    run_apple_tool_trimmed("/usr/bin/xcrun", &["--find", tool]).is_ok()
 }
 
 /// Returns a concise operator note for export summaries when the workspace relies on native/Apple
@@ -447,5 +455,14 @@ mod tests {
                 assert!(sdk_path.is_dir());
             }
         }
+    }
+
+    #[test]
+    fn test_target_is_macos_matching() {
+        assert!(target_is_macos(Some("macos-arm64")));
+        assert!(target_is_macos(Some("aarch64-apple-darwin")));
+        assert!(!target_is_macos(Some("linux-x86_64")));
+        assert!(!target_is_macos(Some("windows-x86_64")));
+        assert_eq!(target_is_macos(None), cfg!(target_os = "macos"));
     }
 }
