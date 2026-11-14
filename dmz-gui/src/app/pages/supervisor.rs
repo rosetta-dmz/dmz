@@ -656,6 +656,7 @@ pub(super) fn show(
                 });
         }
     });
+    ui.add_space(16.0);
 }
 
 #[cfg(test)]

@@ -49,7 +49,10 @@ impl eframe::App for DmzGuiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let visuals = match self.pages.apply_appearance(&ctx) {
-            Ok(visuals) => visuals,
+            Ok(visuals) => {
+                ui.reset_style();
+                visuals
+            }
             Err(error) => {
                 self.status_message = format!("Could not apply appearance settings: {error}");
                 let mut visuals = egui::Visuals::dark();
@@ -58,6 +61,7 @@ impl eframe::App for DmzGuiApp {
                 visuals.widgets.open.expansion = 0.0;
                 visuals.widgets.inactive.bg_stroke.width = visuals.widgets.hovered.bg_stroke.width;
                 ctx.set_visuals(visuals.clone());
+                ui.reset_style();
                 visuals
             }
         };

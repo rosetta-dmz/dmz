@@ -191,7 +191,7 @@ impl AppearanceState {
                             if super::super::components::action_button(ui, "Import JSON...", false)
                                 .clicked()
                             {
-                                self.import_theme(status_message);
+                                self.import_theme(ctx, status_message);
                             }
                         });
                     });
@@ -208,6 +208,7 @@ impl AppearanceState {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
+                                    let prev_widget_size = self.preferences.widget_size;
                                     egui::ComboBox::from_id_salt("widget_size_combo")
                                         .selected_text(self.preferences.widget_size.label())
                                         .width(140.0)
@@ -228,6 +229,9 @@ impl AppearanceState {
                                                 "Large",
                                             );
                                         });
+                                    if self.preferences.widget_size != prev_widget_size {
+                                        ctx.request_discard("widget size changed");
+                                    }
                                 },
                             );
                         },
@@ -352,10 +356,11 @@ impl AppearanceState {
 
         if let Some(name) = selected {
             self.preferences.theme_name = name;
+            ctx.request_discard("theme changed");
         }
     }
 
-    fn import_theme(&mut self, status_message: &mut String) {
+    fn import_theme(&mut self, ctx: &egui::Context, status_message: &mut String) {
         let Some(source) = rfd::FileDialog::new()
             .add_filter("DMZ theme JSON", &["json"])
             .pick_file()
@@ -367,6 +372,7 @@ impl AppearanceState {
             Ok(theme) => {
                 self.preferences.theme_name = theme.name.clone();
                 *status_message = format!("Imported and applied theme '{}'.", theme.name);
+                ctx.request_discard("imported theme applied");
             }
             Err(error) => {
                 *status_message = format!("Theme import failed: {error}");

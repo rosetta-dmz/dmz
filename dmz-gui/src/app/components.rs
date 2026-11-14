@@ -193,10 +193,12 @@ pub(super) const BROWSE_BUTTON_WIDTH: f32 = 88.0;
 pub(super) fn field_button(ui: &mut egui::Ui, label: &str, width: Option<f32>) -> egui::Response {
     let btn_width = width.unwrap_or(BROWSE_BUTTON_WIDTH);
     ui.scope(|ui| {
-        ui.spacing_mut().button_padding += BUTTON_PADDING_EXTRA;
+        // Keep vertical button padding at 0 (matching TextEdit's symmetric(8, 0) margin)
+        // so the button never exceeds FIELD_BUTTON_HEIGHT and stays vertically aligned.
+        ui.spacing_mut().button_padding.y = 0.0;
         ui.add_sized(
             egui::vec2(btn_width, FIELD_BUTTON_HEIGHT),
-            egui::Button::new(label),
+            egui::Button::new(label).min_size(egui::vec2(btn_width, FIELD_BUTTON_HEIGHT)),
         )
     })
     .inner
