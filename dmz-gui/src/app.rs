@@ -72,6 +72,24 @@ impl eframe::App for DmzGuiApp {
                     .inner_margin(egui::Margin::ZERO),
             )
             .show(ui, |ui| {
+                #[cfg(target_os = "macos")]
+                {
+                    let prev_item_spacing_y = ui.spacing().item_spacing.y;
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    let (_titlebar_rect, titlebar_response) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 28.0),
+                        egui::Sense::click_and_drag(),
+                    );
+                    if titlebar_response.drag_started_by(egui::PointerButton::Primary) {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+                    if titlebar_response.double_clicked() {
+                        let is_maximized =
+                            ui.input(|i| i.viewport().maximized.unwrap_or(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
+                    }
+                    ui.spacing_mut().item_spacing.y = prev_item_spacing_y;
+                }
                 let viewport_size = ui.available_size_before_wrap();
                 ui.allocate_ui_with_layout(
                     viewport_size,
