@@ -212,10 +212,7 @@ pub(super) fn show(
             });
 
         ui.add_space(6.0);
-        ui.checkbox(
-            &mut state.include_dev,
-            "Include dev dependencies (devDependencies, dev-dependencies, test/lint extras)",
-        );
+        ui.checkbox(&mut state.include_dev, "Include dev dependencies");
 
         // Display custom registry mirrors if configured via DMZ_REGISTRY_* environment variables
         let mut custom_mirrors = Vec::new();

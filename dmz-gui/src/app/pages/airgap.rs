@@ -245,23 +245,20 @@ pub(super) fn show(
         );
 
         ui.add_space(4.0);
+        ui.checkbox(&mut state.include_dev, "Include dev dependencies");
+
+        ui.add_space(4.0);
         ui.add_enabled_ui(state.with_toolchain, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label("Toolchain Profile:");
                 ui.radio_value(
                     &mut state.toolchain_profile,
                     ToolchainProfile::Minimal,
-                    "Minimal (Recommended)",
+                    "Minimal",
                 );
                 ui.radio_value(&mut state.toolchain_profile, ToolchainProfile::Full, "Full");
             });
         });
-
-        ui.add_space(4.0);
-        ui.checkbox(
-            &mut state.include_dev,
-            "Include dev dependencies (devDependencies, dev-dependencies, test/lint extras)",
-        );
 
         let is_busy = state.is_busy();
         ui.add_space(12.0);
@@ -531,10 +528,7 @@ pub(super) fn show(
                 "Cryptographically verify closure hash",
             );
             ui.add_space(16.0);
-            ui.checkbox(
-                &mut state.import_include_dev,
-                "Include dev dependencies (toolchain validation)",
-            );
+            ui.checkbox(&mut state.import_include_dev, "Include dev dependencies");
         });
 
         ui.add_space(12.0);

@@ -50,7 +50,7 @@ DMZ uses a shared active workspace concept across all operations:
    - `Dependencies Only`: Verified package store only.
 5. Adjust the **Zstandard level** slider (default is 3; higher levels reduce bundle size at the cost of build time).
 6. Configure minimal-closure toolchain and dev dependency options:
-   - **Package compiler toolchains into bundle**: When enabled, select **Toolchain Profile**: `Minimal (Recommended)` strips IDE/dev tools, foreign targets, host global site-packages/node_modules, and unused JS package managers; `Full` bundles the entire detected toolchain.
+   - **Package compiler toolchains into bundle**: When enabled, select **Toolchain Profile**: `Minimal` strips IDE/dev tools, foreign targets, host global site-packages/node_modules, and unused JS package managers; `Full` bundles the entire detected toolchain.
    - **Include dev dependencies**: Off by default so only required runtime/build packages and toolchains are resolved and bundled.
 7. Click **Bundle (Fetch)** to resolve, download, and package dependencies in a single workflow (requires network), or **Export (Local)** to package an already-cached `.dmz/store` directly with zero network calls.
 
