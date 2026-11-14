@@ -264,16 +264,11 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), ToolchainError
                         )),
                     );
                 }
-                if let Some(sdk_path) = crate::toolchain::ToolchainEnv::find_apple_sdk_root(
-                    &toolchains_dir.join("applesdk"),
-                ) {
-                    if let Ok(rel) = sdk_path.strip_prefix(workspace_root) {
-                        let rel_str = rel.to_string_lossy().replace('\\', "/");
-                        ra_extra_env.insert(
-                            "SDKROOT".into(),
-                            serde_json::Value::String(format!("${{workspaceFolder}}/{}", rel_str)),
-                        );
-                    }
+                if let Some(sdk_path) = crate::toolchain::preflight::resolve_host_macos_sdk_path() {
+                    ra_extra_env.insert(
+                        "SDKROOT".into(),
+                        serde_json::Value::String(sdk_path.to_string_lossy().to_string()),
+                    );
                 }
                 settings.insert(
                     (*env_setting_key).into(),
@@ -300,47 +295,33 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), ToolchainError
             || workspace_root.join("setup.py").is_file()
             || workspace_root.join("Pipfile").is_file();
         let member_venv = workspace_root.join(".venv");
-        let has_valid_venv = member_venv.join("bin/python").exists()
-            || member_venv.join("bin/python3").exists()
-            || member_venv.join("Scripts/python.exe").exists()
-            || member_venv.join("Scripts/python.bat").exists()
-            || member_venv.join("Scripts/python.cmd").exists()
-            || member_venv.join("pyvenv.cfg").exists();
+        let venv_rel = crate::workspace::interpreter::venv_interpreter_rel(&member_venv);
+        let bundled_rel =
+            crate::workspace::interpreter::bundled_interpreter_rel(&toolchains_dir.join("python"));
 
-        if !is_umbrella && (!is_umbrella_member || has_python_project || has_valid_venv) {
-            if has_valid_venv {
-                let py_bin = if cfg!(windows) {
-                    "${workspaceFolder}/.venv/Scripts/python.exe"
-                } else {
-                    "${workspaceFolder}/.venv/bin/python"
-                };
+        if !is_umbrella && (!is_umbrella_member || has_python_project || venv_rel.is_some()) {
+            if let Some(rel) = venv_rel {
                 settings.insert(
                     "python.defaultInterpreterPath".into(),
-                    serde_json::Value::String(py_bin.into()),
+                    serde_json::Value::String(format!("${{workspaceFolder}}/.venv/{}", rel)),
                 );
                 settings.insert(
                     "python.terminal.activateEnvironment".into(),
                     serde_json::Value::Bool(true),
                 );
-            } else if toolchains_dir.join("python").exists() {
-                let py_dir = toolchains_dir.join("python");
-                let has_py_bin = py_dir.join("bin/python3").exists()
-                    || py_dir.join("bin/python").exists()
-                    || py_dir.join("bin/pip").exists()
-                    || py_dir.join("python.exe").exists()
-                    || py_dir.join("bin/python.exe").exists();
-                if has_py_bin {
-                    let py_bin = if cfg!(windows) {
-                        "${workspaceFolder}/.dmz/toolchains/python/python.exe"
-                    } else {
-                        "${workspaceFolder}/.dmz/toolchains/python/bin/python3"
-                    };
-                    settings.insert(
-                        "python.defaultInterpreterPath".into(),
-                        serde_json::Value::String(py_bin.into()),
-                    );
-                }
+            } else if let Some(rel) = bundled_rel {
+                settings.insert(
+                    "python.defaultInterpreterPath".into(),
+                    serde_json::Value::String(format!(
+                        "${{workspaceFolder}}/.dmz/toolchains/python/{}",
+                        rel
+                    )),
+                );
+            } else {
+                settings.remove("python.defaultInterpreterPath");
             }
+        } else if is_umbrella {
+            settings.remove("python.defaultInterpreterPath");
         }
 
         if !is_umbrella
@@ -475,57 +456,13 @@ pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), Toolch
                 "python.terminal.activateEnvironment": true
             });
 
-            let has_bundled_py = workspace_root.join(".dmz/toolchains/python").exists();
-            let member_venv = member_full_path.join(".venv");
-
-            let depth = m
-                .path
-                .components()
-                .filter(|c| matches!(c, std::path::Component::Normal(_)))
-                .count();
-            let rel_prefix = if depth == 0 {
-                ".".to_string()
-            } else {
-                vec![".."; depth].join("/")
-            };
-
-            let py_bin_exists = member_venv.join("bin/python").exists()
-                || member_venv.join("bin/python3").exists()
-                || member_venv.join("Scripts/python.exe").exists()
-                || member_venv.join("Scripts/python.bat").exists()
-                || member_venv.join("Scripts/python.cmd").exists()
-                || member_venv.join("pyvenv.cfg").exists();
-
-            if member_venv.exists() && py_bin_exists {
-                let py_bin = if cfg!(windows) {
-                    "${workspaceFolder}/.venv/Scripts/python.exe"
-                } else {
-                    "${workspaceFolder}/.venv/bin/python"
-                };
-                if let Some(obj) = py_settings.as_object_mut() {
-                    obj.insert(
-                        "python.defaultInterpreterPath".to_string(),
-                        serde_json::Value::String(py_bin.to_string()),
-                    );
-                }
-            } else if has_bundled_py {
-                let py_bin = if rel_prefix == "." {
-                    if cfg!(windows) {
-                        "${workspaceFolder}/.dmz/toolchains/python/python.exe".to_string()
-                    } else {
-                        "${workspaceFolder}/.dmz/toolchains/python/bin/python3".to_string()
-                    }
-                } else if cfg!(windows) {
-                    format!(
-                        "${{workspaceFolder}}/{}/.dmz/toolchains/python/python.exe",
-                        rel_prefix
-                    )
-                } else {
-                    format!(
-                        "${{workspaceFolder}}/{}/.dmz/toolchains/python/bin/python3",
-                        rel_prefix
-                    )
-                };
+            if let Some(py_bin) = crate::workspace::interpreter::resolve_ide_interpreter_setting(
+                &member_full_path,
+                &m.path,
+                workspace_root,
+                Some(&label),
+                false,
+            ) {
                 if let Some(obj) = py_settings.as_object_mut() {
                     obj.insert(
                         "python.defaultInterpreterPath".to_string(),

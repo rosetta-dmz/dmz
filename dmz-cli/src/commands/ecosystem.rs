@@ -30,6 +30,11 @@ pub fn run_ecosystem(action: EcosystemAction) -> anyhow::Result<i32> {
         } => {
             info!("Verifying workspace ecosystems at {:?}", workspace);
             let ws_canon = std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
+            if let Err(e) = dmz_core::toolchain::verify_apple_prereq_for_workspace(&ws_canon, None)
+            {
+                error!("{}", e);
+                return Ok(1);
+            }
             let registry = EcosystemRegistry::new();
             let active = registry.discover_active(&ws_canon);
             if active.is_empty() {

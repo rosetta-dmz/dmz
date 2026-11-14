@@ -110,14 +110,11 @@ pub(super) fn show(
 
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Workspace Mode:").strong());
-            if ui
-                .selectable_label(!state.is_dual_repo, "Single Workspace")
-                .clicked()
-            {
+            if ui.selectable_label(!state.is_dual_repo, "Single").clicked() {
                 state.is_dual_repo = false;
             }
             if ui
-                .selectable_label(state.is_dual_repo, "Multi-Repo / Companion")
+                .selectable_label(state.is_dual_repo, "Multi-Repo")
                 .clicked()
             {
                 state.is_dual_repo = true;
@@ -131,7 +128,7 @@ pub(super) fn show(
             .min_col_width(120.0)
             .show(ui, |ui| {
                 ui.label(if state.is_dual_repo {
-                    "Workspace 1"
+                    "Repo 1"
                 } else {
                     "Workspace Directory"
                 });
@@ -143,7 +140,7 @@ pub(super) fn show(
                 ui.end_row();
 
                 if state.is_dual_repo {
-                    ui.label("Workspace 2");
+                    ui.label("Repo 2");
                     if components::path_browse_row(ui, &mut state.sidecar_path, None) {
                         let mut dialog = rfd::FileDialog::new();
                         let ws_path = PathBuf::from(&*workspace_path);
@@ -583,6 +580,16 @@ pub(super) fn show(
                     state.active_task = Some(("Verifying ecosystem toolchains...".to_string(), rx));
 
                     thread::spawn(move || {
+                        if let Err(e) =
+                            dmz_core::toolchain::verify_apple_prereq_for_workspace(&workspace, None)
+                        {
+                            let _ = tx.send(ResolverTaskOutcome::StatusOnly(format!(
+                                "Toolchain verification blocked: {}",
+                                e
+                            )));
+                            ctx.request_repaint();
+                            return;
+                        }
                         let registry = EcosystemRegistry::new();
                         let active_pairs = registry.discover_active_with_roots(&workspace);
                         let mut passed = 0;

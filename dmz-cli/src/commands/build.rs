@@ -25,6 +25,11 @@ pub fn run_build(
         return Ok(1);
     }
 
+    if let Err(e) = dmz_core::toolchain::verify_apple_prereq_for_workspace(&ws_canon, None) {
+        error!("{}", e);
+        return Ok(1);
+    }
+
     let config = BuildConfig {
         workspace_dir: ws_canon,
         lockfile_path: effective_lockfile,

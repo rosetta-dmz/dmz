@@ -247,7 +247,7 @@ fn test_native_build_tool_cmake_detection_and_packaging() -> anyhow::Result<()> 
 }
 
 #[test]
-fn test_android_ndk_and_apple_sdk_e2e_setup_and_environment() -> anyhow::Result<()> {
+fn test_android_ndk_and_apple_host_prereq_e2e_setup_and_environment() -> anyhow::Result<()> {
     let src_dir = tempdir()?;
     let target_ws = src_dir.path().join("mobile_imported_target");
     fs::create_dir_all(&target_ws)?;
@@ -260,14 +260,11 @@ fn test_android_ndk_and_apple_sdk_e2e_setup_and_environment() -> anyhow::Result<
         "# Official Android NDK CMake Toolchain\n",
     )?;
 
-    // Mock Apple SDK and CLT structure
-    let apple_sdk_dir = target_ws
-        .join(".dmz/toolchains/applesdk/Platforms/MacOSX.platform/Developer/SDKs/MacOSX14.0.sdk");
-    let apple_bin_dir = target_ws.join(".dmz/toolchains/applesdk/bin");
-    fs::create_dir_all(&apple_sdk_dir)?;
-    fs::create_dir_all(&apple_bin_dir)?;
-    fs::write(apple_bin_dir.join("xcrun"), "#!/bin/sh\necho xcrun")?;
-    fs::write(apple_bin_dir.join("swift"), "#!/bin/sh\necho swift")?;
+    // AppleSdk must never bundle proprietary SDKs or @rpath binaries under host-prereq architecture
+    assert!(
+        dmz_core::toolchain::ToolchainProvider::discover_apple_sdk()?.is_none(),
+        "AppleSdk discoverer must not bundle files"
+    );
 
     // Setup imported toolchains (generates dmz.toolchain.cmake and env.sh)
     dmz_core::toolchain::ToolchainPackager::setup_imported_toolchains(&target_ws)
@@ -285,7 +282,7 @@ fn test_android_ndk_and_apple_sdk_e2e_setup_and_environment() -> anyhow::Result<
     );
     assert!(
         cmake_file_content.contains("CMAKE_OSX_SYSROOT"),
-        "dmz.toolchain.cmake must configure Apple SDK sysroot"
+        "dmz.toolchain.cmake must configure host Apple SDK sysroot when present"
     );
 
     let env_sh = target_ws.join(".dmz/env.sh");
@@ -296,12 +293,8 @@ fn test_android_ndk_and_apple_sdk_e2e_setup_and_environment() -> anyhow::Result<
         "env.sh must configure ANDROID_NDK_HOME"
     );
     assert!(
-        env_sh_content.contains("DEVELOPER_DIR"),
-        "env.sh must configure DEVELOPER_DIR"
-    );
-    assert!(
-        env_sh_content.contains("SDKROOT"),
-        "env.sh must configure SDKROOT"
+        !env_sh_content.contains(".dmz/toolchains/applesdk"),
+        "env.sh must not reference non-bundled .dmz/toolchains/applesdk"
     );
 
     // Test environment map injection
@@ -325,33 +318,8 @@ fn test_android_ndk_and_apple_sdk_e2e_setup_and_environment() -> anyhow::Result<
     );
 
     assert!(
-        envs.contains_key("DEVELOPER_DIR"),
-        "DEVELOPER_DIR must be injected"
-    );
-    assert!(
-        envs.get("DEVELOPER_DIR")
-            .unwrap()
-            .replace('\\', "/")
-            .ends_with(".dmz/toolchains/applesdk"),
-        "DEVELOPER_DIR must point to bundled applesdk"
-    );
-
-    assert!(envs.contains_key("SDKROOT"), "SDKROOT must be injected");
-    assert!(
-        envs.get("SDKROOT")
-            .unwrap()
-            .replace('\\', "/")
-            .contains("MacOSX14.0.sdk"),
-        "SDKROOT must resolve to the bundled Apple SDK directory"
-    );
-
-    assert!(envs.contains_key("PATH"), "PATH must be injected");
-    assert!(
-        envs.get("PATH")
-            .unwrap()
-            .replace('\\', "/")
-            .contains(".dmz/toolchains/applesdk/bin"),
-        "PATH must contain applesdk bin"
+        !envs.contains_key("DEVELOPER_DIR"),
+        "DEVELOPER_DIR must not be hijacked into .dmz/toolchains/applesdk"
     );
 
     #[cfg(unix)]

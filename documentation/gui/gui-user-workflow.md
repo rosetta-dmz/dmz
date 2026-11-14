@@ -39,7 +39,7 @@ DMZ uses a shared active workspace concept across all operations:
 
 1. Select the **Air-Gap Manager** tab.
 2. Confirm the **Workspace directory** is set to the codebase you wish to export.
-3. Configure the **Bundle archive (.tar.zst)** save location:
+3. Configure the **Bundle Archive** save location:
    - **Default**: `dist/workspace_closure.tar.zst` (anchored inside `<workspace>/dist/`).
    - **Custom Save Location**: Click **Browse...** (the file dialog automatically opens inside your workspace).
    - **Verification**: Check the **Effective archive destination** preview under the inputs to confirm the exact absolute path before exporting.
@@ -56,7 +56,7 @@ DMZ uses a shared active workspace concept across all operations:
 
 1. On the isolated or target machine, launch `dmz-gui` and select **Air-Gap Manager**.
 2. Set **Workspace directory** to your destination folder where you want the project unpacked.
-3. In **Bundle archive (.tar.zst)**, enter or **Browse...** to select the `.tar.zst` file to import.
+3. In **Bundle Archive**, enter or **Browse...** to select the `.tar.zst` file to import.
 4. Toggles:
    - Enable **Install offline dependencies into workspace** to automatically link packages into `node_modules` or `.cargo`.
    - Enable **Cryptographically verify closure hash** for tamper-proof validation.

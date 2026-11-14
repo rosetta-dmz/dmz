@@ -56,10 +56,9 @@ pub enum SidecarOrchestratorError {
         stderr: String,
     },
 
-    #[error(
-        "Unable to determine execution command for workspace member at {path}. Specify \"exec_command\" and \"exec_args\" in dmz-workspace.toml"
-    )]
-    ExecutionInferenceFailed { path: String },
+    /// `detail` is the full, actionable `WorkspaceError` message (member id, reason, TOML snippet).
+    #[error("{detail}")]
+    ExecutionInferenceFailed { detail: String },
 
     #[error("Workspace member directory does not exist: {0:?}")]
     MemberDirectoryNotFound(PathBuf),

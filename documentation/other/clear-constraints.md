@@ -6,7 +6,7 @@
   - **Languages & Runtimes:** Rust, Go, Python, Node.js, Ruby, PHP.
   - **Native Build Generators:** Kitware CMake, Ninja, GNU Make, Juce Projucer, PkgConfig.
   - **C/C++ Compilers & Linkers:** Standalone Clang/LLVM, GCC, `llvm-ar`, `ar`, `llvm-ranlib`, `ranlib`, `lld`, `ld`, and compiler builtin header packages (`clang -print-resource-dir`).
-  - **Mobile & Platform SDKs:** Android NDK (Clang cross-compilers, sysroots, and `android.toolchain.cmake`), Apple Developer Toolchains (Xcode Command Line Tools, Clang, Swift, `xcodebuild`, `xcrun`, and macOS/iOS SDKs).
+  - **Mobile & Platform SDKs:** Android NDK (Clang cross-compilers, sysroots, and `android.toolchain.cmake`). Apple Developer Toolchains (Xcode Command Line Tools / Xcode, Apple Clang, Swift, `xcodebuild`, `xcrun`, and macOS SDKs) are treated as a **macOS host OS baseline prerequisite** rather than bundled into archives.
 
 * **Zero-Configuration Autonomous Discovery:**
   - Filesystem manifest scanning up to directory depth 3 without requiring user flags.
@@ -50,5 +50,5 @@
 * **Boundary:** Builds requiring root privileges (`sudo`), kernel module insertion, hardware loop mounts, or direct device driver manipulation cannot be executed via user-space sandboxing.
 
 ### Constraint 5: Proprietary SDK Licensing & Hardware Drivers
-* **Constraint:** Apple Developer SDKs, Xcode Command Line Tools, and proprietary graphics/compute runtimes (e.g. NVIDIA CUDA drivers) are subject to vendor license agreements and hardware driver presence.
+* **Constraint:** Apple Developer SDKs, Xcode Command Line Tools (`xcode-select --install`), and proprietary graphics/compute runtimes (e.g. NVIDIA CUDA drivers) are subject to vendor license agreements and OS/hardware driver integration. DMZ treats Apple CLT / Xcode as an OS baseline prerequisite on macOS targets (mirroring `glibc` on Linux and system DLLs on Windows), enforces pre-flight readiness (`xcode-select -p` / `xcrun --sdk macosx --show-sdk-path`), and runs `Make`, `Cc`, `CMake`, `Rust`, and `AppleSdk` workloads natively against the host Apple SDK/CLT without redistributing proprietary Apple binaries.
 * **Boundary:** DMZ discovers and packages existing SDKs on the export machine. It does not license Apple or NVIDIA proprietary software, nor does it emulate GPU hardware drivers on air-gapped target machines lacking physical hardware support.

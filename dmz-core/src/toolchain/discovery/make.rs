@@ -1,10 +1,12 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
 use super::super::ToolchainError;
 use super::{
-    push_system_bin_candidates, push_unique_path, select_preferred_verified, ToolchainDiscoverer,
+    is_apple_system_toolchain_path, push_system_bin_candidates, push_unique_path,
+    redact_home_prefix, resolve_prefix_root, select_strict_standalone_verified,
+    ToolchainDiscoverer,
 };
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use tracing::info;
 
 /// Discovers standalone Make toolchain distributions.
@@ -17,65 +19,24 @@ impl ToolchainDiscoverer for MakeDiscoverer {
     }
 
     fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
-        let mut candidates: Vec<PathBuf> = Vec::new();
-
-        if let Ok(root) = std::env::var("MAKE_HOME") {
-            let p = PathBuf::from(root);
-            if p.join("bin/make").exists() {
-                push_unique_path(&mut candidates, p.join("bin/make"));
-            } else if p.join("make").exists() {
-                push_unique_path(&mut candidates, p.join("make"));
-            }
-        }
-
-        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-            let home_path = PathBuf::from(home);
-            push_unique_path(&mut candidates, home_path.join(".local/bin/make"));
-            push_unique_path(&mut candidates, home_path.join(".local/bin/gmake"));
-        }
-
-        push_unique_path(&mut candidates, PathBuf::from("/opt/make/bin/make"));
-
-        #[cfg(target_os = "macos")]
-        {
-            push_unique_path(
-                &mut candidates,
-                PathBuf::from("/Library/Developer/CommandLineTools/usr/bin/make"),
-            );
-            push_unique_path(
-                &mut candidates,
-                PathBuf::from("/Applications/Xcode.app/Contents/Developer/usr/bin/make"),
-            );
-        }
-
-        push_system_bin_candidates(&mut candidates, "gmake");
-        push_system_bin_candidates(&mut candidates, "make");
-
-        candidates.retain(|c| c.exists());
+        let candidates = collect_make_candidates();
         if candidates.is_empty() {
             return Ok(None);
         }
 
-        let Some((make_bin, version)) = select_preferred_verified(candidates, |candidate| {
-            let output = Command::new(candidate).arg("--version").output().ok()?;
-            if !output.status.success() {
-                return None;
-            }
-            Some(
-                String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .next()
-                    .unwrap_or("make")
-                    .trim()
-                    .to_string(),
-            )
-        }) else {
+        let Some((make_bin, version)) =
+            select_strict_standalone_verified(candidates, probe_make_version)
+        else {
             return Ok(None);
         };
-        let root_dir = make_bin.parent().unwrap_or(Path::new("")).to_path_buf();
 
+        let Some(root_dir) = resolve_prefix_root(&make_bin) else {
+            return Ok(None);
+        };
+
+        let redacted_bin = redact_home_prefix(&make_bin);
         info!(
-            make = ?make_bin,
+            make = %redacted_bin,
             version = %version,
             "Discovered standalone Make distribution"
         );
@@ -87,5 +48,90 @@ impl ToolchainDiscoverer for MakeDiscoverer {
             bin_files: vec![(make_bin, "bin/make".to_string())],
             lib_files: vec![],
         }))
+    }
+}
+
+fn collect_make_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(root) = std::env::var_os("MAKE_HOME").filter(|v| !v.is_empty()) {
+        let p = PathBuf::from(root);
+        if p.join("bin/make").is_file() {
+            push_unique_path(&mut candidates, p.join("bin/make"));
+        } else if p.join("make").is_file() {
+            push_unique_path(&mut candidates, p.join("make"));
+        }
+    }
+
+    if let Some(home) = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|v| !v.is_empty())
+    {
+        let home_path = PathBuf::from(home);
+        push_unique_path(&mut candidates, home_path.join(".local/bin/make"));
+        push_unique_path(&mut candidates, home_path.join(".local/bin/gmake"));
+    }
+
+    push_unique_path(&mut candidates, PathBuf::from("/opt/make/bin/make"));
+
+    push_system_bin_candidates(&mut candidates, "gmake");
+    push_system_bin_candidates(&mut candidates, "make");
+
+    candidates.retain(|c| c.is_file());
+    candidates
+}
+
+fn probe_make_version(candidate: &Path) -> Option<String> {
+    if is_apple_system_toolchain_path(candidate) || !candidate.is_file() {
+        return None;
+    }
+
+    let output = Command::new(candidate)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()
+            .unwrap_or("make")
+            .trim()
+            .to_string(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_make_rejects_homebrew_stub_and_apple_clt() {
+        let brew = vec![
+            PathBuf::from("/opt/homebrew/bin/gmake"),
+            PathBuf::from("/usr/local/Cellar/make/4.4.1/bin/gmake"),
+        ];
+        assert_eq!(
+            select_strict_standalone_verified(brew, |_| Some("GNU Make 4.4.1".to_string())),
+            None
+        );
+
+        let clt_make = Path::new("/Library/Developer/CommandLineTools/usr/bin/make");
+        assert!(is_apple_system_toolchain_path(clt_make));
+        assert!(probe_make_version(clt_make).is_none());
+
+        let xcode_make = Path::new("/Applications/Xcode.app/Contents/Developer/usr/bin/make");
+        assert!(is_apple_system_toolchain_path(xcode_make));
+        assert!(probe_make_version(xcode_make).is_none());
+
+        if cfg!(target_os = "macos") {
+            assert!(is_apple_system_toolchain_path(Path::new("/usr/bin/make")));
+            assert!(probe_make_version(Path::new("/usr/bin/make")).is_none());
+        }
+        assert_eq!(resolve_prefix_root(Path::new("/make")), None);
     }
 }

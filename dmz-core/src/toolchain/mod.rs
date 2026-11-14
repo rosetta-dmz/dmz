@@ -2,18 +2,25 @@ pub mod detection;
 pub mod discovery;
 pub mod env;
 pub mod packager;
+pub mod preflight;
 pub mod setup;
 pub mod types;
 
 pub use detection::ToolchainDetector;
 pub use discovery::{
-    emit_non_relocatable_notice, is_non_standalone_path, AndroidNdkDiscoverer, AppleSdkDiscoverer,
-    CMakeDiscoverer, CcDiscoverer, DiscoveryRegistry, GoDiscoverer, JuceDiscoverer, MakeDiscoverer,
-    NinjaDiscoverer, NodeDiscoverer, PhpDiscoverer, PkgConfigDiscoverer, PythonDiscoverer,
-    RubyDiscoverer, RustDiscoverer, ToolchainDiscoverer,
+    emit_non_relocatable_notice, is_apple_system_toolchain_path, is_non_standalone_path,
+    AndroidNdkDiscoverer, AppleSdkDiscoverer, CMakeDiscoverer, CcDiscoverer, DiscoveryRegistry,
+    GoDiscoverer, JuceDiscoverer, MakeDiscoverer, NinjaDiscoverer, NodeDiscoverer, PhpDiscoverer,
+    PkgConfigDiscoverer, PythonDiscoverer, RubyDiscoverer, RustDiscoverer, ToolchainDiscoverer,
 };
 pub use env::ToolchainEnv;
 pub use packager::ToolchainArchivePackager;
+pub use preflight::{
+    check_apple_developer_tools, ecosystems_use_native_or_apple_tooling, export_apple_prereq_note,
+    export_apple_prereq_note_for_ecosystems, export_apple_prereq_note_from_lockfile,
+    verify_apple_prereq_for_ecosystems, verify_apple_prereq_for_workspace,
+    workspace_requires_apple_clt, ApplePrereqStatus,
+};
 pub use setup::ToolchainSetup;
 pub use types::{DiscoveredToolchain, ToolchainEcosystem, ToolchainManifestEntry};
 
@@ -27,6 +34,8 @@ pub enum ToolchainError {
     DiscoveryFailed(String),
     #[error("Toolchain Packaging Error: {0}")]
     PackagingFailed(String),
+    #[error("Host Prerequisite Missing: {0}")]
+    HostPrerequisiteMissing(String),
 }
 
 impl From<ToolchainError> for String {
@@ -94,6 +103,14 @@ impl ToolchainProvider {
         let toolchains = registry.discover_for_ecosystems(&ecosystems);
 
         for eco in &ecosystems {
+            if eco.is_host_prerequisite() {
+                tracing::info!(
+                    ecosystem = eco.as_str(),
+                    "Treating {} as a host OS baseline prerequisite (verified on target via pre-flight; not bundled in archive).",
+                    eco.as_str()
+                );
+                continue;
+            }
             if !toolchains.iter().any(|tc| tc.ecosystem == *eco) {
                 let is_strictly_required = match eco {
                     ToolchainEcosystem::Ninja => {

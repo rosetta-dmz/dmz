@@ -103,6 +103,13 @@ pub fn run_run(args: RunArgs) -> anyhow::Result<i32> {
         }
     }
 
+    if let Err(e) =
+        dmz_core::toolchain::verify_apple_prereq_for_workspace(&effective_workspace_root, None)
+    {
+        error!("{}", e);
+        return Ok(1);
+    }
+
     let orchestrator = dmz_supervisor::SidecarOrchestrator::new();
     let pair_config = dmz_supervisor::SidecarPairConfig {
         workspace_root: effective_workspace_root,

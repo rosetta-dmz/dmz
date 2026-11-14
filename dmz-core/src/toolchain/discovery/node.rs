@@ -1,13 +1,16 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
 use super::super::ToolchainError;
 use super::{
-    collect_files_recursive, emit_non_relocatable_notice, is_non_standalone_path,
-    push_system_bin_candidates, push_unique_path, select_preferred_candidate, ToolchainDiscoverer,
+    collect_files_recursive, emit_non_relocatable_notice, is_macos_usr_bin_stub,
+    is_non_standalone_path, push_system_bin_candidates, push_unique_path, redact_home_prefix,
+    resolve_prefix_root, select_strict_standalone_verified, ToolchainDiscoverer,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use tracing::info;
+
+const NODE_MANAGERS: &[&str] = &["npm", "npx", "pnpm", "yarn", "corepack"];
 
 /// Discovers host Node.js runtime and companion package managers (npm, npx, pnpm, yarn).
 #[derive(Debug, Default, Clone)]
@@ -19,118 +22,27 @@ impl ToolchainDiscoverer for NodeDiscoverer {
     }
 
     fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
-        let mut node_candidates: Vec<PathBuf> = Vec::new();
-
-        // 1. Check official standalone NVM installations
-        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-            let nvm_dir = PathBuf::from(&home).join(".nvm/versions/node");
-            if let Ok(entries) = fs::read_dir(&nvm_dir) {
-                for entry in entries.flatten() {
-                    let bin = entry.path().join("bin/node");
-                    if bin.exists() {
-                        push_unique_path(&mut node_candidates, bin);
-                    }
-                }
-            }
-        }
-
-        // 2. Check standard system locations
-        let standard_paths = [
-            PathBuf::from("/usr/local/bin/node"),
-            PathBuf::from("/usr/bin/node"),
-        ];
-        for p in &standard_paths {
-            if p.exists() {
-                push_unique_path(&mut node_candidates, p.clone());
-            }
-        }
-
-        // 3. Fallback to system PATH and standard host bin directories
-        push_system_bin_candidates(&mut node_candidates, "node");
-
+        let node_candidates = collect_node_candidates();
         if node_candidates.is_empty() {
             return Ok(None);
         }
 
-        let Some(node_bin) = select_preferred_candidate(node_candidates) else {
+        let Some((node_bin, node_root)) =
+            select_strict_standalone_verified(node_candidates, resolve_node_root_for_candidate)
+        else {
             return Ok(None);
         };
 
-        let canonical_bin = fs::canonicalize(&node_bin).unwrap_or_else(|_| node_bin.clone());
-        let node_root = canonical_bin
-            .parent()
-            .and_then(|p| p.parent())
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("/"));
-
-        let version = Command::new(&node_bin)
-            .arg("--version")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .unwrap_or_else(|| "node".to_string())
-            .trim()
-            .to_string();
-
+        let version = probe_node_version(&node_bin);
+        let redacted_root = redact_home_prefix(&node_root);
         info!(
-            node_root = ?node_root,
+            node_root = %redacted_root,
             version = %version,
             "Discovered host Node.js toolchain"
         );
 
-        let mut bin_files = Vec::new();
-        let mut lib_files = Vec::new();
-
-        bin_files.push((node_bin.clone(), "bin/node".into()));
-
-        // Companion package managers: npm, npx, pnpm, yarn, corepack
-        for mgr in &["npm", "npx", "pnpm", "yarn", "corepack"] {
-            let companion = node_bin.parent().map(|p| p.join(mgr));
-            if let Some(cp) = companion {
-                if cp.exists() {
-                    bin_files.push((cp, format!("bin/{}", mgr)));
-                    continue;
-                }
-            }
-            if cfg!(windows) {
-                let cmd_companion = node_bin.parent().map(|p| p.join(format!("{}.cmd", mgr)));
-                if let Some(cp) = cmd_companion {
-                    if cp.exists() {
-                        bin_files.push((cp, format!("bin/{}.cmd", mgr)));
-                        continue;
-                    }
-                }
-            }
-            if let Ok(found) = which::which(mgr) {
-                if is_non_standalone_path(&found) {
-                    emit_non_relocatable_notice(&found);
-                    continue;
-                }
-                let name = found
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(mgr)
-                    .to_string();
-                bin_files.push((found, format!("bin/{}", name)));
-            }
-        }
-
-        // Collect global lib/node_modules if present in the standalone node root
-        let node_modules_dir = node_root.join("lib/node_modules");
-        if node_modules_dir.exists() {
-            collect_files_recursive(
-                &node_modules_dir,
-                &node_modules_dir,
-                &mut lib_files,
-                "lib/node_modules",
-            );
-        }
-
-        // Collect C/C++ development headers under include/node for native addon compilation (e.g. node-gyp)
-        let include_node = node_root.join("include/node");
-        if include_node.exists() {
-            collect_files_recursive(&include_node, &node_root, &mut lib_files, "");
-        }
+        let bin_files = collect_node_binaries(&node_bin);
+        let lib_files = collect_node_libs(&node_root);
 
         Ok(Some(DiscoveredToolchain {
             ecosystem: ToolchainEcosystem::Node,
@@ -140,6 +52,118 @@ impl ToolchainDiscoverer for NodeDiscoverer {
             lib_files,
         }))
     }
+}
+
+fn collect_node_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(home) = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|v| !v.is_empty())
+    {
+        let nvm_dir = PathBuf::from(&home).join(".nvm/versions/node");
+        if let Ok(entries) = fs::read_dir(&nvm_dir) {
+            for entry in entries.flatten() {
+                let bin = entry.path().join("bin/node");
+                if bin.is_file() {
+                    push_unique_path(&mut candidates, bin);
+                }
+            }
+        }
+    }
+
+    let mut standard_paths = vec![PathBuf::from("/usr/local/bin/node")];
+    if !cfg!(target_os = "macos") {
+        standard_paths.push(PathBuf::from("/usr/bin/node"));
+    }
+    for p in standard_paths {
+        if p.is_file() {
+            push_unique_path(&mut candidates, p);
+        }
+    }
+
+    push_system_bin_candidates(&mut candidates, "node");
+    candidates
+}
+
+fn resolve_node_root_for_candidate(node_bin: &Path) -> Option<PathBuf> {
+    if is_macos_usr_bin_stub(node_bin) || !node_bin.is_file() {
+        return None;
+    }
+    resolve_prefix_root(node_bin)
+}
+
+fn probe_node_version(node_bin: &Path) -> String {
+    Command::new(node_bin)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "node".to_string())
+}
+
+fn collect_node_binaries(node_bin: &Path) -> Vec<(PathBuf, String)> {
+    let mut bin_files = vec![(node_bin.to_path_buf(), "bin/node".into())];
+    let bin_dir = node_bin.parent().filter(|p| !p.as_os_str().is_empty());
+
+    for mgr in NODE_MANAGERS {
+        if let Some(dir) = bin_dir {
+            let cp = dir.join(mgr);
+            if cp.is_file() {
+                bin_files.push((cp, format!("bin/{}", mgr)));
+                continue;
+            }
+            if cfg!(windows) {
+                let cmd_cp = dir.join(format!("{}.cmd", mgr));
+                if cmd_cp.is_file() {
+                    bin_files.push((cmd_cp, format!("bin/{}.cmd", mgr)));
+                    continue;
+                }
+            }
+        }
+        if let Ok(found) = which::which(mgr) {
+            if is_non_standalone_path(&found) {
+                emit_non_relocatable_notice(&found);
+                continue;
+            }
+            if is_macos_usr_bin_stub(&found) {
+                continue;
+            }
+            let name = found
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(mgr)
+                .to_string();
+            bin_files.push((found, format!("bin/{}", name)));
+        }
+    }
+
+    bin_files
+}
+
+fn collect_node_libs(node_root: &Path) -> Vec<(PathBuf, String)> {
+    let mut lib_files = Vec::new();
+
+    let node_modules_dir = node_root.join("lib/node_modules");
+    if node_modules_dir.is_dir() {
+        collect_files_recursive(
+            &node_modules_dir,
+            &node_modules_dir,
+            &mut lib_files,
+            "lib/node_modules",
+        );
+    }
+
+    let include_node = node_root.join("include/node");
+    if include_node.is_dir() {
+        collect_files_recursive(&include_node, node_root, &mut lib_files, "");
+    }
+
+    lib_files
 }
 
 #[cfg(test)]

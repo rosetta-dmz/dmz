@@ -494,6 +494,9 @@ impl AirGapImporter {
         // Verify that every declared toolchain in airgap_manifest.json was extracted with valid binaries
         if verify_closure_hash {
             for tc_entry in &manifest_toolchains {
+                if tc_entry.ecosystem.is_host_prerequisite() {
+                    continue;
+                }
                 if declared_ecosystems.is_empty()
                     || declared_ecosystems.contains(&tc_entry.ecosystem)
                 {
@@ -527,6 +530,11 @@ impl AirGapImporter {
                     }
                 }
             }
+        }
+
+        // Enforce host OS baseline prerequisites on target machines (e.g., macOS Apple CLT/Xcode)
+        if let Err(e) = crate::toolchain::verify_apple_prereq_for_ecosystems(&declared_ecosystems) {
+            return Err(ImportError::VerificationFailed(e.to_string()));
         }
 
         // Automatically discover workspace project manifest if not already populated from airgap_manifest.json
@@ -581,6 +589,10 @@ impl AirGapImporter {
         {
             warn!(error = %e, "Failed to update IDE settings after import");
         }
+
+        // Exported .code-workspace files embed interpreter paths from the source machine; drop or
+        // redirect any that don't resolve on this machine (VS Code errors on dangling paths).
+        crate::workspace::interpreter::sanitize_code_workspace_interpreters(effective_workspace);
 
         // Run post-import ecosystem validation using the registry
         let registry = EcosystemRegistry::new();

@@ -35,8 +35,8 @@ pub fn run_export(args: ExportArgs) -> anyhow::Result<i32> {
     );
 
     let config = ExportConfig {
-        workspace_path: ws_canon,
-        lockfile_path: effective_lockfile,
+        workspace_path: ws_canon.clone(),
+        lockfile_path: effective_lockfile.clone(),
         store_dir: effective_store,
         output_path: effective_output,
         zstd_level: args.zstd_level,
@@ -55,6 +55,11 @@ pub fn run_export(args: ExportArgs) -> anyhow::Result<i32> {
                 packages = manifest.package_count,
                 target_platform = ?manifest.target_platform,
                 "Air-gap export completed successfully"
+            );
+            super::notify_export_host_prerequisites(
+                &ws_canon,
+                &effective_lockfile,
+                manifest.target_platform.as_deref(),
             );
             Ok(0)
         }

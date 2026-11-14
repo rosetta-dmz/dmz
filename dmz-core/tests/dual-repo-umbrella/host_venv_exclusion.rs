@@ -190,3 +190,169 @@ fn test_host_venv_excluded_and_target_venv_and_vscode_settings_materialized_offl
         "Member folder must not have its own bogus .code-workspace file"
     );
 }
+
+/// Regression: a Python member with locked PyPI packages but NO host `.venv` must never be
+/// pointed at a non-existent interpreter (VS Code: "Default interpreter path ... could not be
+/// resolved"), neither in the exported `.code-workspace` nor after import.
+#[test]
+fn test_locked_pypi_without_host_venv_never_emits_dangling_interpreter_path() {
+    use std::io::Read;
+
+    let temp = tempdir().expect("Failed to create tempdir");
+    let base = temp.path();
+
+    let py_dir = base.join("py-service");
+    fs::create_dir_all(&py_dir).unwrap();
+    fs::write(
+        py_dir.join("pyproject.toml"),
+        "[project]\nname = \"py-service\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(py_dir.join("requirements.txt"), "dummy-pkg==1.0.0\n").unwrap();
+    fs::write(py_dir.join("main.py"), "import dummy_pkg\n").unwrap();
+
+    let manifest = WorkspaceProjectConfig::new(
+        "no-venv-suite",
+        vec![
+            WorkspaceMember::new("py-service", Path::new("."), MemberRole::Primary),
+            WorkspaceMember::new("worker", Path::new("../worker"), MemberRole::Sidecar),
+        ],
+    );
+    let worker_dir = base.join("worker");
+    fs::create_dir_all(&worker_dir).unwrap();
+    fs::write(worker_dir.join("worker.py"), "print('ok')\n").unwrap();
+    manifest
+        .save_to_file(&py_dir.join("dmz-workspace.toml"))
+        .unwrap();
+
+    let store_dir = py_dir.join(".dmz/store");
+    let wheel_pkg_dir = store_dir.join("dummy-pkg");
+    fs::create_dir_all(&wheel_pkg_dir).unwrap();
+    let wheel_path = wheel_pkg_dir.join("dummy-pkg-1.0.0.archive");
+    {
+        let file = fs::File::create(&wheel_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("dummy_pkg/__init__.py", options).unwrap();
+        zip.write_all(b"VALUE = 42\n").unwrap();
+        zip.finish().unwrap();
+    }
+    let wheel_bytes = fs::read(&wheel_path).unwrap();
+    let lockfile = DmzLockfile::new(vec![LockedPackage {
+        name: "dummy-pkg".to_string(),
+        version: "1.0.0".to_string(),
+        ecosystem: Ecosystem::PyPI,
+        sha256: DmzLockfile::hash_bytes(&wheel_bytes),
+        source_url: None,
+        dependencies: vec![],
+        member_id: Some("py-service".to_string()),
+    }]);
+    let lockfile_path = py_dir.join("dmz.lock");
+    lockfile.save(&lockfile_path).unwrap();
+
+    let archive_path = py_dir.join("dist/no-venv.tar.zst");
+    AirGapExporter::export(&ExportConfig {
+        workspace_path: py_dir.clone(),
+        lockfile_path,
+        store_dir,
+        output_path: archive_path.clone(),
+        zstd_level: 1,
+        mode: ExportMode::Unified,
+        target_platform: None,
+        with_git_history: false,
+        since: None,
+        with_toolchain: false,
+        multi_workspace: Some(manifest),
+    })
+    .expect("Export failed");
+
+    // 1. The exported .code-workspace must not reference a .venv that was never created
+    let mut code_workspace = String::new();
+    let decoder = zstd::stream::read::Decoder::new(fs::File::open(&archive_path).unwrap()).unwrap();
+    for entry in tar::Archive::new(decoder).entries().unwrap() {
+        let mut entry = entry.unwrap();
+        if entry
+            .path()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(".code-workspace")
+        {
+            entry.read_to_string(&mut code_workspace).unwrap();
+        }
+    }
+    assert!(
+        !code_workspace.is_empty(),
+        "archive must embed .code-workspace"
+    );
+    assert!(
+        !code_workspace.contains(".venv/bin/python")
+            && !code_workspace.contains(".venv/Scripts/python.exe"),
+        "exported .code-workspace must not reference a non-existent .venv:\n{}",
+        code_workspace
+    );
+
+    // 2. After import every emitted interpreter path must resolve to a real file
+    let target_dir = base.join("airgap-target");
+    AirGapImporter::import(&ImportConfig {
+        archive_path,
+        target_store_dir: target_dir.join(".dmz/store"),
+        target_workspace_dir: target_dir.clone(),
+        verify_closure_hash: true,
+    })
+    .expect("Import failed");
+
+    let assert_resolves = |settings_json: &str,
+                           folder: &Path,
+                           label: Option<&str>,
+                           origin: &str| {
+        let v: serde_json::Value = serde_json::from_str(settings_json).unwrap();
+        if let Some(p) = v
+            .get("python.defaultInterpreterPath")
+            .and_then(|p| p.as_str())
+        {
+            if let Some(lbl) = label {
+                assert!(
+                    p.starts_with(&format!("${{workspaceFolder:{}}}", lbl)),
+                    "{origin}: .code-workspace interpreter path '{p}' should be scoped with ${{workspaceFolder:{lbl}}}"
+                );
+            }
+            let dir_str = folder.to_string_lossy();
+            let resolved = match label {
+                Some(lbl) => p.replace(&format!("${{workspaceFolder:{}}}", lbl), &dir_str),
+                None => p.to_string(),
+            }
+            .replace("${workspaceFolder}", &dir_str);
+            assert!(
+                Path::new(&resolved).is_file(),
+                "{origin}: interpreter path '{p}' does not resolve to a file ({resolved})"
+            );
+        }
+    };
+
+    for entry in fs::read_dir(&target_dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "code-workspace") {
+            let doc: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            for folder in doc["folders"].as_array().unwrap() {
+                let folder_dir = target_dir.join(folder["path"].as_str().unwrap());
+                let label = folder["name"].as_str();
+                if let Some(settings) = folder.get("settings") {
+                    assert_resolves(&settings.to_string(), &folder_dir, label, ".code-workspace");
+                }
+            }
+        }
+    }
+    for member_dir in ["workspaces/py-service", "workspaces/worker"] {
+        let settings_path = target_dir.join(member_dir).join(".vscode/settings.json");
+        if settings_path.is_file() {
+            assert_resolves(
+                &fs::read_to_string(&settings_path).unwrap(),
+                &target_dir.join(member_dir),
+                None,
+                member_dir,
+            );
+        }
+    }
+}

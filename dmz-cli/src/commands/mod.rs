@@ -48,6 +48,21 @@ pub use run::run_run;
 pub use sandbox::run_sandbox;
 pub use shell::run_shell;
 
+/// Prints target host prerequisite notes (such as macOS Apple CLT/Xcode) after air-gap export.
+pub fn notify_export_host_prerequisites(
+    workspace_canon: &Path,
+    lockfile_path: &Path,
+    target_platform: Option<&str>,
+) {
+    if let Some(note) = dmz_core::toolchain::export_apple_prereq_note_from_lockfile(
+        workspace_canon,
+        lockfile_path,
+        target_platform,
+    ) {
+        println!("[DMZ PREREQUISITE] {}", note);
+    }
+}
+
 /// Central entrypoint to dispatch any parsed CLI command to its runner
 pub fn dispatch(command: Commands) -> anyhow::Result<i32> {
     match command {

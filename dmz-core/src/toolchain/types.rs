@@ -87,6 +87,12 @@ impl ToolchainEcosystem {
         )
     }
 
+    /// Return true if this ecosystem is satisfied as a host OS baseline prerequisite
+    /// rather than bundled inside DMZ archives (e.g., macOS Apple CLT / Xcode SDK).
+    pub fn is_host_prerequisite(&self) -> bool {
+        matches!(self, Self::AppleSdk)
+    }
+
     /// Parse an ecosystem identifier or stack name into a ToolchainEcosystem.
     pub fn from_str_name(name: &str) -> Option<Self> {
         match name.to_ascii_lowercase().as_str() {

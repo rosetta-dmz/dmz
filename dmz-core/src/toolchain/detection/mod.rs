@@ -127,7 +127,7 @@ impl ToolchainDetector {
             ecosystems.insert(ToolchainEcosystem::Cc);
         }
 
-        // On macOS: If C/C++ compiler is required, the Apple SDK sysroot is strictly required
+        // On macOS: If C/C++ compiler is required, host Apple CLT/Xcode is required as an OS baseline prerequisite
         #[cfg(target_os = "macos")]
         if ecosystems.contains(&ToolchainEcosystem::Cc) {
             ecosystems.insert(ToolchainEcosystem::AppleSdk);

@@ -441,23 +441,43 @@ pub(super) fn show(
                                 project_config.ipc.readiness_timeout_ms = state.readiness_timeout_ms;
                                 project_config.ipc.drain_timeout_ms = state.drain_timeout_ms;
 
+                                // Pre-flight: surface unresolvable launch commands in the UI instead of
+                                // only logging them from the background orchestrator task.
+                                let launch_ids: Vec<String> = project_config
+                                    .primary_member()
+                                    .into_iter()
+                                    .chain(project_config.sidecars())
+                                    .map(|m| m.id.clone())
+                                    .collect();
+                                let preflight_err = project_config
+                                    .resolve_member_layouts(&root, None)
+                                    .iter()
+                                    .filter(|l| launch_ids.contains(&l.member.id))
+                                    .find_map(|l| {
+                                        l.member.resolve_command(&l.host_path, &root).err()
+                                    });
+
                                 let pair_config = dmz_supervisor::SidecarPairConfig {
                                     workspace_root: root,
                                     project: project_config,
                                     allow_network: false,
                                 };
 
-                                let orch = state.orchestrator.clone();
-                                if let Some(ref rt) = state.tokio_rt {
-                                    rt.spawn(async move {
-                                        if let Err(e) = orch.start_pair(pair_config).await {
-                                            tracing::error!("Workspace launch error: {}", e);
-                                        }
-                                    });
-                                    *status_message = format!(
-                                        "Spawning workspace pair under KEP-753 supervision (readiness probe: {}ms)",
-                                        state.readiness_timeout_ms
-                                    );
+                                if let Some(err) = preflight_err {
+                                    *status_message = format!("Cannot launch: {}", err);
+                                } else {
+                                    let orch = state.orchestrator.clone();
+                                    if let Some(ref rt) = state.tokio_rt {
+                                        rt.spawn(async move {
+                                            if let Err(e) = orch.start_pair(pair_config).await {
+                                                tracing::error!("Workspace launch error: {}", e);
+                                            }
+                                        });
+                                        *status_message = format!(
+                                            "Spawning workspace pair under KEP-753 supervision (readiness probe: {}ms)",
+                                            state.readiness_timeout_ms
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -514,12 +534,17 @@ pub(super) fn show(
                         ui.label(&layout.member.id);
                         ui.label(format!("{:?}", layout.member.role));
                         ui.label(layout.member.path.display().to_string());
-                        let cmd_display =
-                            match layout.member.resolve_command(&layout.host_path, &root) {
-                                Ok((cmd, args)) if args.is_empty() => cmd,
-                                Ok((cmd, args)) => format!("{} {}", cmd, args.join(" ")),
-                                Err(_) => "unconfigured (requires exec_command)".to_string(),
-                            };
+                        let cmd_display = match layout
+                            .member
+                            .resolve_command(&layout.host_path, &root)
+                        {
+                            Ok((cmd, args)) if args.is_empty() => cmd,
+                            Ok((cmd, args)) => format!("{} {}", cmd, args.join(" ")),
+                            Err(dmz_core::workspace::WorkspaceError::CommandInferenceFailed {
+                                reason,
+                                ..
+                            }) => format!("unconfigured: {}", reason),
+                        };
                         ui.label(cmd_display);
                         ui.end_row();
                     }

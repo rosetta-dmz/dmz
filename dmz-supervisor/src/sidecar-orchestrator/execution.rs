@@ -8,19 +8,18 @@ use tracing::info;
 use super::child::ManagedChild;
 use super::types::{SidecarOrchestratorError, SidecarPairConfig};
 
-/// Automatically infers execution command and arguments for a workspace member based on project manifests
+/// Resolves the execution command and arguments for a workspace member (explicit `exec_command`
+/// first, then manifest-based inference). Propagates the actionable core error unchanged.
 pub fn infer_member_execution_in(
     workspace_root: &Path,
     member_dir: &Path,
     member: &WorkspaceMember,
 ) -> Result<(String, Vec<String>), SidecarOrchestratorError> {
-    if let Ok(resolved) = member.resolve_command(member_dir, workspace_root) {
-        return Ok(resolved);
-    }
-
-    Err(SidecarOrchestratorError::ExecutionInferenceFailed {
-        path: member_dir.display().to_string(),
-    })
+    member
+        .resolve_command(member_dir, workspace_root)
+        .map_err(|e| SidecarOrchestratorError::ExecutionInferenceFailed {
+            detail: e.to_string(),
+        })
 }
 
 /// Automatically infers execution command and arguments for a workspace member based on project manifests.
@@ -110,9 +109,22 @@ pub async fn spawn_member_process(
         }
     }
 
-    let (raw_exec_cmd, default_args) = member
-        .resolve_command(&member_dir, workspace_root)
-        .or_else(|_| infer_member_execution(&member_dir, member))?;
+    // Manifest inspection performs blocking filesystem I/O; keep it off the async reactor.
+    let (raw_exec_cmd, default_args) = {
+        let (root, dir, member) = (
+            workspace_root.to_path_buf(),
+            member_dir.clone(),
+            member.clone(),
+        );
+        tokio::task::spawn_blocking(move || infer_member_execution_in(&root, &dir, &member))
+            .await
+            .map_err(|e| {
+                SidecarOrchestratorError::Generic(format!(
+                    "Execution inference task failed to complete: {}",
+                    e
+                ))
+            })??
+    };
 
     let effective_cwd = if (raw_exec_cmd == "cargo" || raw_exec_cmd.ends_with("/cargo"))
         && !member_dir.join("Cargo.toml").is_file()

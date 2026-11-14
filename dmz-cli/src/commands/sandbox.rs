@@ -53,6 +53,10 @@ pub fn run_sandbox(
         }
     }
 
+    if let Err(e) = dmz_core::toolchain::verify_apple_prereq_for_workspace(&ws_canon, None) {
+        eprintln!("\x1b[33m[DMZ PREREQUISITE WARNING]\x1b[0m {}", e);
+    }
+
     info!(
         workspace = ?ws_canon,
         closure = ?effective_closure,

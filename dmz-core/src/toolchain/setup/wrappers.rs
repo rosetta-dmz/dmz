@@ -60,27 +60,15 @@ if [ ! -f "$_REAL" ]; then
     esac
 fi
 
-# Locate Apple SDK root
+# Locate Apple SDK root from explicit SDKROOT or host macOS CLT/Xcode prerequisite
 _SDK="${SDKROOT}"
 if [ -z "$_SDK" ] || [ ! -d "$_SDK" ]; then
-    for _candidate in \
-        "$_DIR/../../applesdk/SDKs/MacOSX.sdk" \
-        "$_DIR/../../applesdk/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
-    do
-        if [ -d "$_candidate" ]; then
-            _SDK="$_candidate"
-            break
+    if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ -x /usr/bin/xcrun ]; then
+        _HOST_SDK="$(/usr/bin/xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
+        if [ -n "$_HOST_SDK" ] && [ -d "$_HOST_SDK" ]; then
+            _SDK="$_HOST_SDK"
         fi
-    done
-fi
-
-if [ -z "$_SDK" ] || [ ! -d "$_SDK" ]; then
-    for _glob in "$_DIR"/../../applesdk/SDKs/MacOSX*.sdk "$_DIR"/../../applesdk/Platforms/MacOSX.platform/Developer/SDKs/MacOSX*.sdk; do
-        if [ -d "$_glob" ]; then
-            _SDK="$_glob"
-            break
-        fi
-    done
+    fi
 fi
 
 # Check if -isysroot or --sysroot is already specified in arguments

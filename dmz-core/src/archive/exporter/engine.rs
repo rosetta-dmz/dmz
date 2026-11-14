@@ -360,6 +360,21 @@ impl AirGapExporter {
             }
         }
 
+        let host_platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+        let target_platform = config
+            .target_platform
+            .clone()
+            .or_else(|| lockfile.target_platform.clone())
+            .or_else(|| config.with_toolchain.then_some(host_platform));
+
+        if let Some(note) = crate::toolchain::export_apple_prereq_note(
+            &workspace_root,
+            Some(&lockfile),
+            target_platform.as_deref(),
+        ) {
+            info!("{}", note);
+        }
+
         // Package active host toolchains if requested (`--with-toolchain`)
         let mut toolchain_manifest_entries = Vec::new();
         if config.with_toolchain {
@@ -385,13 +400,6 @@ impl AirGapExporter {
                 }
             }
         }
-
-        let host_platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-        let target_platform = config
-            .target_platform
-            .clone()
-            .or_else(|| lockfile.target_platform.clone())
-            .or_else(|| config.with_toolchain.then_some(host_platform));
 
         // Write air-gap manifest header
         let manifest = AirGapManifest {

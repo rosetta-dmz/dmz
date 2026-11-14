@@ -141,12 +141,103 @@ pub fn is_non_standalone_path(path: &Path) -> bool {
     false
 }
 
+/// Redacts any host `$HOME` / `$USERPROFILE` prefix from logged paths (CWE-532).
+pub(super) fn redact_home_prefix(path: &Path) -> String {
+    for var in ["HOME", "USERPROFILE"] {
+        if let Some(home) = std::env::var_os(var) {
+            if !home.is_empty() {
+                if let Ok(rel) = path.strip_prefix(Path::new(&home)) {
+                    let rel_str = rel.to_string_lossy().replace('\\', "/");
+                    return if rel_str.is_empty() {
+                        "~".to_string()
+                    } else {
+                        format!("~/{}", rel_str)
+                    };
+                }
+            }
+        }
+    }
+    path.to_string_lossy().into_owned()
+}
+
 /// Emits standard agnostic guidance when a non-relocatable toolchain is encountered.
 pub fn emit_non_relocatable_notice(path: &Path) {
+    let redacted = redact_home_prefix(path);
     warn!(
         "Non-relocatable toolchain detected at {:?}. Please use the official standalone toolchain from the provider.",
-        path
+        redacted
     );
+}
+
+/// Returns `true` when `path` points to a macOS `/usr/bin/*` system/xcode-select stub.
+pub fn is_macos_usr_bin_stub(path: &Path) -> bool {
+    if cfg!(target_os = "macos") {
+        is_usr_bin_path(path)
+    } else {
+        false
+    }
+}
+
+/// Returns `true` when `path` resides inside an Apple-managed Developer installation
+/// (`/Library/Developer/CommandLineTools`, `Xcode*.app/Contents/Developer`, or `/usr/bin/*` stub)
+/// which must be treated as a macOS host baseline prerequisite and never bundled.
+pub fn is_apple_system_toolchain_path(path: &Path) -> bool {
+    let matches_apple = |p: &Path| {
+        let s = p.to_string_lossy();
+        s.starts_with("/Library/Developer/CommandLineTools")
+            || s.contains(".app/Contents/Developer/")
+            || s.ends_with(".app/Contents/Developer")
+            || s.contains("XcodeDefault.xctoolchain")
+    };
+
+    if is_macos_usr_bin_stub(path) || matches_apple(path) {
+        return true;
+    }
+
+    fs::canonicalize(path)
+        .ok()
+        .is_some_and(|canon| matches_apple(&canon))
+}
+
+fn is_usr_bin_path(path: &Path) -> bool {
+    if path.parent() == Some(Path::new("/usr/bin")) {
+        return true;
+    }
+    fs::canonicalize(path)
+        .ok()
+        .is_some_and(|canonical| canonical.parent() == Some(Path::new("/usr/bin")))
+}
+
+/// Resolves a toolchain prefix root from a binary path (e.g., `/opt/pkg/bin/tool` -> `/opt/pkg`),
+/// refusing empty paths and filesystem/drive roots (`/` or `C:\`).
+pub fn resolve_prefix_root(bin_path: &Path) -> Option<PathBuf> {
+    let resolved = fs::canonicalize(bin_path).unwrap_or_else(|_| bin_path.to_path_buf());
+    let bin_dir = resolved.parent()?;
+    let prefix = if bin_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("bin"))
+    {
+        bin_dir.parent()?
+    } else {
+        bin_dir
+    };
+    if prefix.as_os_str().is_empty() || prefix == Path::new("/") || prefix.parent().is_none() {
+        return None;
+    }
+    Some(prefix.to_path_buf())
+}
+
+/// Appends `(src, rel)` only if `rel` has not already been recorded in `seen_rel`.
+pub(super) fn push_deduped_file(
+    acc: &mut Vec<(PathBuf, String)>,
+    seen_rel: &mut HashSet<String>,
+    src: PathBuf,
+    rel: String,
+) {
+    if seen_rel.insert(rel.clone()) {
+        acc.push((src, rel));
+    }
 }
 
 /// Appends a path to the candidates list if not already present.
@@ -168,42 +259,33 @@ pub fn push_system_bin_candidates(candidates: &mut Vec<PathBuf>, bin_name: &str)
     }
 }
 
-/// Selects the highest-priority standalone candidate from `candidates`, emitting
-/// non-relocatable notices for non-standalone entries encountered before selection.
-pub fn select_preferred_candidate(candidates: Vec<PathBuf>) -> Option<PathBuf> {
-    select_preferred_verified(candidates, |_| Some(())).map(|(p, ())| p)
+/// Selects the highest-priority genuinely standalone candidate from `candidates` and strictly
+/// rejects non-relocatable package-manager installs (Homebrew, Linuxbrew, Nix, Snap) without
+/// falling back to them.
+pub fn select_strict_standalone_candidate(candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    select_strict_standalone_verified(candidates, |_| Some(())).map(|(p, ())| p)
 }
 
-/// Evaluates `candidates` (standalone first) using `probe`, returning the highest-priority
-/// standalone candidate whose probe returns `Some` (or the first successful fallback).
-pub fn select_preferred_verified<T, F>(
-    mut candidates: Vec<PathBuf>,
+/// Evaluates `candidates` in priority order using `probe`, strictly rejecting non-standalone
+/// package-manager installs (Homebrew, Linuxbrew, Nix, Snap) with a notice and never falling
+/// back to them.
+pub fn select_strict_standalone_verified<T, F>(
+    candidates: Vec<PathBuf>,
     mut probe: F,
 ) -> Option<(PathBuf, T)>
 where
     F: FnMut(&Path) -> Option<T>,
 {
-    candidates.sort_by_key(|c| is_non_standalone_path(c));
-    let mut chosen: Option<(PathBuf, T)> = None;
     for candidate in candidates {
-        let non_standalone = is_non_standalone_path(&candidate);
-        if non_standalone {
+        if is_non_standalone_path(&candidate) {
             emit_non_relocatable_notice(&candidate);
+            continue;
         }
         if let Some(value) = probe(&candidate) {
-            let should_replace = match &chosen {
-                None => true,
-                Some((prev, _)) => !non_standalone && is_non_standalone_path(prev),
-            };
-            if should_replace {
-                chosen = Some((candidate, value));
-                if !non_standalone {
-                    break;
-                }
-            }
+            return Some((candidate, value));
         }
     }
-    chosen
+    None
 }
 
 /// Recursively collects all files within a directory relative to a base directory,
@@ -247,5 +329,91 @@ fn collect_files_bounded(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_select_strict_standalone_candidate_never_falls_back_to_non_standalone() {
+        let non_standalone = vec![
+            PathBuf::from("/opt/homebrew/bin/python3"),
+            PathBuf::from("/usr/local/Cellar/node/22.0.0/bin/node"),
+            PathBuf::from("/home/linuxbrew/.linuxbrew/bin/go"),
+            PathBuf::from("/nix/store/abc123-go-1.22/bin/go"),
+            PathBuf::from("/snap/node/current/bin/node"),
+        ];
+        assert_eq!(select_strict_standalone_candidate(non_standalone), None);
+
+        let mixed = vec![
+            PathBuf::from("/opt/homebrew/bin/node"),
+            PathBuf::from("/usr/local/go/bin/go"),
+        ];
+        assert_eq!(
+            select_strict_standalone_candidate(mixed),
+            Some(PathBuf::from("/usr/local/go/bin/go"))
+        );
+    }
+
+    #[test]
+    fn test_select_strict_standalone_verified_rejects_homebrew_and_failed_probes() {
+        let candidates = vec![
+            PathBuf::from("/opt/homebrew/bin/cmake"),
+            PathBuf::from("/usr/local/bad/bin/cmake"),
+            PathBuf::from("/opt/cmake/bin/cmake"),
+        ];
+        let picked = select_strict_standalone_verified(candidates, |p| {
+            if p == Path::new("/opt/cmake/bin/cmake") {
+                Some("3.30.0".to_string())
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            picked,
+            Some((PathBuf::from("/opt/cmake/bin/cmake"), "3.30.0".to_string()))
+        );
+
+        let only_brew = vec![PathBuf::from("/opt/homebrew/bin/cmake")];
+        assert_eq!(
+            select_strict_standalone_verified(only_brew, |_| Some("3.30.0")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_resolve_prefix_root_and_usr_bin_detection() {
+        assert_eq!(
+            resolve_prefix_root(Path::new("/opt/pkg/bin/pkg-config")),
+            Some(PathBuf::from("/opt/pkg"))
+        );
+        assert_eq!(
+            resolve_prefix_root(Path::new("/opt/ninja/ninja")),
+            Some(PathBuf::from("/opt/ninja"))
+        );
+        assert_eq!(
+            resolve_prefix_root(Path::new("/bin/dmz_nonexistent_tool")),
+            None
+        );
+        assert_eq!(resolve_prefix_root(Path::new("bin/tool")), None);
+        assert_eq!(resolve_prefix_root(Path::new("/tool")), None);
+
+        assert!(is_usr_bin_path(Path::new("/usr/bin/php")));
+        assert!(!is_usr_bin_path(Path::new("/usr/local/bin/php")));
+    }
+
+    #[test]
+    fn test_redact_home_prefix_masks_user_home() {
+        if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+            let sample = Path::new(&home).join(".local/bin/tool");
+            assert_eq!(redact_home_prefix(&sample), "~/.local/bin/tool");
+            assert_eq!(redact_home_prefix(Path::new(&home)), "~");
+        }
+        assert_eq!(
+            redact_home_prefix(Path::new("/opt/toolchain/bin/tool")),
+            "/opt/toolchain/bin/tool"
+        );
     }
 }

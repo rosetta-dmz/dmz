@@ -16,7 +16,7 @@ pub fn package_multi_workspace_umbrella<W: Write>(
     ws_project: &WorkspaceProjectConfig,
     manifest_path_opt: Option<&Path>,
     changed_files_filter: Option<&HashSet<PathBuf>>,
-    lockfile: &DmzLockfile,
+    _lockfile: &DmzLockfile,
     deterministic_epoch: u64,
     with_toolchain: bool,
 ) -> Result<WorkspaceProjectConfig, ExportError> {
@@ -235,62 +235,16 @@ pub fn package_multi_workspace_umbrella<W: Write>(
                 "python.terminal.activateEnvironment": true
             });
 
-            let has_bundled_py =
-                with_toolchain || workspace_root.join(".dmz/toolchains/python").exists();
-            let member_venv = host_dir.join(".venv");
-            let has_locked_pypi = lockfile
-                .packages
-                .values()
-                .any(|p| p.ecosystem == crate::resolver::manifest::Ecosystem::PyPI);
-
-            let depth = m
-                .path
-                .components()
-                .filter(|c| matches!(c, std::path::Component::Normal(_)))
-                .count();
-            let rel_prefix = if depth == 0 {
-                ".".to_string()
-            } else {
-                vec![".."; depth].join("/")
-            };
-
-            let py_bin_exists = member_venv.join("bin/python").exists()
-                || member_venv.join("bin/python3").exists()
-                || member_venv.join("Scripts/python.exe").exists()
-                || member_venv.join("Scripts/python.bat").exists()
-                || member_venv.join("Scripts/python.cmd").exists()
-                || member_venv.join("pyvenv.cfg").exists();
-
-            if (member_venv.exists() && py_bin_exists) || has_locked_pypi {
-                let py_bin = if cfg!(windows) {
-                    "${workspaceFolder}/.venv/Scripts/python.exe"
-                } else {
-                    "${workspaceFolder}/.venv/bin/python"
-                };
-                if let Some(obj) = py_settings.as_object_mut() {
-                    obj.insert(
-                        "python.defaultInterpreterPath".to_string(),
-                        serde_json::Value::String(py_bin.to_string()),
-                    );
-                }
-            } else if has_bundled_py {
-                let py_bin = if rel_prefix == "." {
-                    if cfg!(windows) {
-                        "${workspaceFolder}/.dmz/toolchains/python/python.exe".to_string()
-                    } else {
-                        "${workspaceFolder}/.dmz/toolchains/python/bin/python3".to_string()
-                    }
-                } else if cfg!(windows) {
-                    format!(
-                        "${{workspaceFolder}}/{}/.dmz/toolchains/python/python.exe",
-                        rel_prefix
-                    )
-                } else {
-                    format!(
-                        "${{workspaceFolder}}/{}/.dmz/toolchains/python/bin/python3",
-                        rel_prefix
-                    )
-                };
+            // Scope `.code-workspace` paths via `${workspaceFolder:<label>}` so VS Code's Python
+            // extension never hits multi-root `${workspaceFolder}` ambiguity, and only emit a path
+            // when a real interpreter exists (or is guaranteed to be bundled with `--with-toolchain`).
+            if let Some(py_bin) = crate::workspace::interpreter::resolve_ide_interpreter_setting(
+                host_dir,
+                &m.path,
+                workspace_root,
+                Some(&label),
+                with_toolchain,
+            ) {
                 if let Some(obj) = py_settings.as_object_mut() {
                     obj.insert(
                         "python.defaultInterpreterPath".to_string(),

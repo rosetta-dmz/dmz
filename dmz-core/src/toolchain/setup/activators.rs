@@ -60,13 +60,6 @@ export DMZ_WORKSPACE="$DMZ_WS"
 if [ -d "$DMZ_WS/.dmz/toolchains" ]; then
     for tc_bin in "$DMZ_WS"/.dmz/toolchains/*/bin; do
         if [ -d "$tc_bin" ]; then
-            case "$tc_bin" in
-                *"/applesdk/bin")
-                    if [ ! -d "$DMZ_WS/.dmz/toolchains/applesdk/SDKs" ] && [ ! -d "$DMZ_WS/.dmz/toolchains/applesdk/Platforms" ]; then
-                        continue
-                    fi
-                    ;;
-            esac
             case ":$PATH:" in
                 *":$tc_bin:"*) ;;
                 *) export PATH="$tc_bin:$PATH" ;;
@@ -214,28 +207,16 @@ fi
 "#
     .to_string();
 
-    if crate::toolchain::ToolchainEnv::is_genuine_apple_developer_dir(
-        &workspace_root.join(".dmz/toolchains/applesdk"),
-    ) || crate::toolchain::ToolchainEnv::find_apple_sdk_root(
-        &workspace_root.join(".dmz/toolchains/applesdk"),
-    )
-    .is_some()
+    if cfg!(target_os = "macos")
+        || workspace_root.join(".dmz/toolchains/cmake").exists()
+        || workspace_root.join(".dmz/toolchains/cc").exists()
     {
         env_sh_content.push_str(
             r#"
-if [ -d "$DMZ_WS/.dmz/toolchains/applesdk" ]; then
-    for sdk_parent in "$DMZ_WS/.dmz/toolchains/applesdk/Platforms/MacOSX.platform/Developer/SDKs" "$DMZ_WS/.dmz/toolchains/applesdk/SDKs"; do
-        if [ -d "$sdk_parent" ]; then
-            for sdk_path in "$sdk_parent"/MacOSX*.sdk; do
-                if [ -d "$sdk_path" ]; then
-                    export SDKROOT="$sdk_path"
-                    break 2
-                fi
-            done
-        fi
-    done
-    if [ -f "$DMZ_WS/.dmz/toolchains/applesdk/usr/bin/xcrun" ] || [ -f "$DMZ_WS/.dmz/toolchains/applesdk/bin/xcrun" ]; then
-        export DEVELOPER_DIR="$DMZ_WS/.dmz/toolchains/applesdk"
+if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ -z "${SDKROOT:-}" ] && [ -x /usr/bin/xcrun ]; then
+    _DMZ_HOST_SDK="$(/usr/bin/xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
+    if [ -n "$_DMZ_HOST_SDK" ] && [ -d "$_DMZ_HOST_SDK" ]; then
+        export SDKROOT="$_DMZ_HOST_SDK"
     fi
 fi
 "#,

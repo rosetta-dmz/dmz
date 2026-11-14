@@ -542,6 +542,8 @@ mod tests {
         let ws_err = crate::workspace::WorkspaceError::CommandInferenceFailed {
             member_id: "app".into(),
             member_dir: "/tmp/app".into(),
+            reason: "no recognised project manifest".into(),
+            hint: String::new(),
         };
         let ws_diag = DiagnosticError::classify(&ws_err);
         assert_eq!(ws_diag.category, ErrorCategory::UserCodeFault);

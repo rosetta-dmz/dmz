@@ -46,6 +46,10 @@ pub fn run_shell(
         );
     }
 
+    if let Err(e) = dmz_core::toolchain::verify_apple_prereq_for_workspace(&abs_workspace, None) {
+        eprintln!("\x1b[33m[DMZ PREREQUISITE WARNING]\x1b[0m {}", e);
+    }
+
     // Resolve shell binary: user option -> $SHELL -> platform default
     let shell_cmd = shell.unwrap_or_else(|| {
         std::env::var("SHELL").unwrap_or_else(|_| {

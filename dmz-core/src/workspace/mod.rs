@@ -4,6 +4,7 @@ pub mod diagnostics;
 pub mod discovery;
 pub mod env;
 pub mod inference;
+pub mod interpreter;
 pub mod layout;
 pub mod schema;
 pub mod socket;

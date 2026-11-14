@@ -5,7 +5,9 @@ use std::thread;
 
 use super::super::components;
 use dmz_core::archive::exporter::ExportMode as CoreExportMode;
-use dmz_core::archive::{AirGapExporter, AirGapImporter, ExportConfig, ImportConfig};
+use dmz_core::archive::{
+    AirGapExporter, AirGapImporter, AirGapManifest, ExportConfig, ImportConfig,
+};
 use dmz_core::install::{InstallConfig, InstallerEngine};
 use dmz_core::resolver::ResolverEngine;
 
@@ -129,7 +131,7 @@ pub(super) fn show(
                 }
                 ui.end_row();
 
-                ui.label("Bundle Archive (.tar.zst)");
+                ui.label("Bundle Archive");
                 ui.allocate_ui_with_layout(
                     egui::vec2(ui.available_width(), components::FIELD_BUTTON_HEIGHT),
                     egui::Layout::left_to_right(egui::Align::Center),
@@ -323,8 +325,8 @@ pub(super) fn show(
                         }
 
                         let config = ExportConfig {
-                            workspace_path: ws_canon,
-                            lockfile_path: lockfile,
+                            workspace_path: ws_canon.clone(),
+                            lockfile_path: lockfile.clone(),
                             store_dir: store,
                             output_path: output,
                             zstd_level,
@@ -336,20 +338,12 @@ pub(super) fn show(
                         };
 
                         let outcome = match AirGapExporter::export(&config) {
-                            Ok(manifest) => {
-                                let ws_info = if let Some(ref proj) = manifest.workspace_project {
-                                    format!(" [Dual-Workspace: {} members]", proj.members.len())
-                                } else {
-                                    String::new()
-                                };
-                                AirGapTaskOutcome::Success(format!(
-                                    "Bundle created successfully! Packages: {}, SHA256: {}{}",
-                                    manifest.package_count,
-                                    &manifest.archive_sha256
-                                        [..12.min(manifest.archive_sha256.len())],
-                                    ws_info
-                                ))
-                            }
+                            Ok(manifest) => AirGapTaskOutcome::Success(format_export_success_summary(
+                                "Bundle created successfully.",
+                                &ws_canon,
+                                &lockfile,
+                                &manifest,
+                            )),
                             Err(error) => {
                                 AirGapTaskOutcome::Failure(format!("Bundle Export Failed: {error}"))
                             }
@@ -407,8 +401,8 @@ pub(super) fn show(
                             );
 
                         let config = ExportConfig {
-                            workspace_path: ws_canon,
-                            lockfile_path: lockfile,
+                            workspace_path: ws_canon.clone(),
+                            lockfile_path: lockfile.clone(),
                             store_dir: store,
                             output_path: output,
                             zstd_level,
@@ -420,20 +414,12 @@ pub(super) fn show(
                         };
 
                         let outcome = match AirGapExporter::export(&config) {
-                            Ok(manifest) => {
-                                let ws_info = if let Some(ref proj) = manifest.workspace_project {
-                                    format!(" [Dual-Workspace: {} members]", proj.members.len())
-                                } else {
-                                    String::new()
-                                };
-                                AirGapTaskOutcome::Success(format!(
-                                    "Exported {} packages to archive (SHA256: {}){}",
-                                    manifest.package_count,
-                                    &manifest.archive_sha256
-                                        [..12.min(manifest.archive_sha256.len())],
-                                    ws_info
-                                ))
-                            }
+                            Ok(manifest) => AirGapTaskOutcome::Success(format_export_success_summary(
+                                "Export completed.",
+                                &ws_canon,
+                                &lockfile,
+                                &manifest,
+                            )),
                             Err(error) => {
                                 AirGapTaskOutcome::Failure(format!("Export Failed: {error}"))
                             }
@@ -641,6 +627,39 @@ pub(super) fn show(
             }
         });
     });
+}
+
+fn format_export_success_summary(
+    prefix: &str,
+    workspace_canon: &Path,
+    lockfile_path: &Path,
+    manifest: &AirGapManifest,
+) -> String {
+    let ws_info = if let Some(ref proj) = manifest.workspace_project {
+        format!(" [Dual-Workspace: {} members]", proj.members.len())
+    } else {
+        String::new()
+    };
+    let short_sha = manifest
+        .archive_sha256
+        .get(..12)
+        .unwrap_or(&manifest.archive_sha256);
+
+    let mut summary = format!(
+        "{prefix} Packages: {}, SHA256: {short_sha}{ws_info}",
+        manifest.package_count
+    );
+
+    if let Some(prereq_note) = dmz_core::toolchain::export_apple_prereq_note_from_lockfile(
+        workspace_canon,
+        lockfile_path,
+        manifest.target_platform.as_deref(),
+    ) {
+        summary.push('\n');
+        summary.push_str(&prereq_note);
+    }
+
+    summary
 }
 
 #[cfg(test)]

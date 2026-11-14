@@ -230,35 +230,30 @@ pub fn hydrate_offline_dependencies(
                     serde_json::Map::new()
                 };
 
+                // Only reference interpreters that exist on disk; otherwise drop any stale value
+                // carried in from the bundle so VS Code can auto-discover (no dangling path error).
                 let bundled_py = workspace_root.join(".dmz/toolchains/python");
-                let py_bin_exists = member_venv.join("bin/python").exists()
-                    || member_venv.join("bin/python3").exists()
-                    || member_venv.join("Scripts/python.exe").exists()
-                    || member_venv.join("Scripts/python.bat").exists()
-                    || member_venv.join("Scripts/python.cmd").exists()
-                    || member_venv.join("pyvenv.cfg").exists();
+                let venv_interpreter =
+                    crate::workspace::interpreter::venv_interpreter_rel(&member_venv);
+                let bundled_interpreter =
+                    crate::workspace::interpreter::bundled_interpreter_rel(&bundled_py);
 
-                if member_venv.exists() && py_bin_exists {
-                    let py_bin = if cfg!(windows) {
-                        "${workspaceFolder}/.venv/Scripts/python.exe"
-                    } else {
-                        "${workspaceFolder}/.venv/bin/python"
-                    };
+                if let Some(rel) = venv_interpreter {
                     settings_map.insert(
                         "python.defaultInterpreterPath".into(),
-                        serde_json::Value::String(py_bin.into()),
+                        serde_json::Value::String(format!("${{workspaceFolder}}/.venv/{}", rel)),
                     );
-                } else if bundled_py.exists() {
+                } else if let Some(rel) = bundled_interpreter {
                     let rel_py = relative_path_between(dir, &bundled_py);
-                    let py_bin = if cfg!(windows) {
-                        format!("${{workspaceFolder}}/{}/python.exe", rel_py)
-                    } else {
-                        format!("${{workspaceFolder}}/{}/bin/python3", rel_py)
-                    };
                     settings_map.insert(
                         "python.defaultInterpreterPath".into(),
-                        serde_json::Value::String(py_bin),
+                        serde_json::Value::String(format!(
+                            "${{workspaceFolder}}/{}/{}",
+                            rel_py, rel
+                        )),
                     );
+                } else {
+                    settings_map.remove("python.defaultInterpreterPath");
                 }
                 settings_map.insert(
                     "python.terminal.activateEnvironment".into(),
