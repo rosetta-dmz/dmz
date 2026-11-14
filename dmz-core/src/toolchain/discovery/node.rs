@@ -205,28 +205,23 @@ fn collect_node_libs_for(
 
     let node_modules_dir = node_root.join("lib/node_modules");
     if node_modules_dir.is_dir() {
-        if profile == ToolchainProfile::Full {
-            collect_files_recursive(
-                &node_modules_dir,
-                &node_modules_dir,
-                &mut lib_files,
-                "lib/node_modules",
-            );
-        } else {
-            let allowed_mods: HashSet<&str> = selected_managers.iter().copied().collect();
-            if let Ok(entries) = fs::read_dir(&node_modules_dir) {
-                for entry in entries.flatten() {
-                    let mod_name = entry.file_name().to_string_lossy().into_owned();
-                    let matches_mgr = allowed_mods.contains(mod_name.as_str())
-                        || (mod_name == "npm" && allowed_mods.contains("npx"));
-                    if matches_mgr && entry.path().is_dir() {
-                        collect_files_recursive(
-                            &entry.path(),
-                            &node_modules_dir,
-                            &mut lib_files,
-                            "lib/node_modules",
-                        );
-                    }
+        // Restrict `lib/node_modules` to official package managers selected for the active
+        // profile (`NODE_MANAGERS` for `Full`, lockfile-matched managers for `Minimal`) so
+        // arbitrary host `npm install -g` packages never leak into bundles.
+        let _ = profile;
+        let allowed_mods: HashSet<&str> = selected_managers.iter().copied().collect();
+        if let Ok(entries) = fs::read_dir(&node_modules_dir) {
+            for entry in entries.flatten() {
+                let mod_name = entry.file_name().to_string_lossy().into_owned();
+                let matches_mgr = allowed_mods.contains(mod_name.as_str())
+                    || (mod_name == "npm" && allowed_mods.contains("npx"));
+                if matches_mgr && entry.path().is_dir() {
+                    collect_files_recursive(
+                        &entry.path(),
+                        &node_modules_dir,
+                        &mut lib_files,
+                        "lib/node_modules",
+                    );
                 }
             }
         }
@@ -313,6 +308,8 @@ mod tests {
         fs::create_dir_all(nm.join("npm"))?;
         fs::create_dir_all(nm.join("pnpm"))?;
         fs::create_dir_all(nm.join("corepack"))?;
+        fs::create_dir_all(nm.join("global-third-party-tool"))?;
+        fs::create_dir_all(nm.join("@scope/leaked-pkg"))?;
 
         fs::write(bin.join("node"), "node")?;
         fs::write(bin.join("npm"), "npm")?;
@@ -322,6 +319,8 @@ mod tests {
         fs::write(nm.join("npm/package.json"), "{}")?;
         fs::write(nm.join("pnpm/package.json"), "{}")?;
         fs::write(nm.join("corepack/package.json"), "{}")?;
+        fs::write(nm.join("global-third-party-tool/package.json"), "{}")?;
+        fs::write(nm.join("@scope/leaked-pkg/package.json"), "{}")?;
 
         let minimal_bins: Vec<String> = collect_node_binaries_for(&bin, &["pnpm"])
             .into_iter()
@@ -340,10 +339,13 @@ mod tests {
         assert!(minimal_libs.contains(&"lib/node_modules/pnpm/package.json".to_string()));
         assert!(!minimal_libs.contains(&"lib/node_modules/npm/package.json".to_string()));
         assert!(!minimal_libs.contains(&"lib/node_modules/corepack/package.json".to_string()));
+        assert!(!minimal_libs
+            .iter()
+            .any(|r| r.contains("global-third-party-tool") || r.contains("@scope/leaked-pkg")));
         assert!(!minimal_libs.contains(&"include/node/node.h".to_string()));
 
         let full_libs: Vec<String> =
-            collect_node_libs_for(&node_root, ToolchainProfile::Full, &["pnpm"], true)
+            collect_node_libs_for(&node_root, ToolchainProfile::Full, NODE_MANAGERS, true)
                 .into_iter()
                 .map(|(_, r)| r)
                 .collect();
@@ -351,6 +353,10 @@ mod tests {
         assert!(full_libs.contains(&"lib/node_modules/pnpm/package.json".to_string()));
         assert!(full_libs.contains(&"lib/node_modules/corepack/package.json".to_string()));
         assert!(full_libs.contains(&"include/node/node.h".to_string()));
+        // Even under Full, arbitrary host-global `npm install -g` packages must be excluded.
+        assert!(!full_libs
+            .iter()
+            .any(|r| r.contains("global-third-party-tool") || r.contains("@scope/leaked-pkg")));
 
         // Context helper includes headers when Cc or binding.gyp is active, or Full profile
         let ws_plain = temp.path().join("plain_js");

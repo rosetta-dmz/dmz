@@ -185,9 +185,9 @@ fn collect_ruby_libs_for_profile(
 
     let lib_ruby = ruby_root.join("lib/ruby");
     if lib_ruby.is_dir() {
-        if profile == ToolchainProfile::Full {
-            collect_files_recursive(&lib_ruby, ruby_root, &mut lib_files, "");
-        } else if let Ok(entries) = fs::read_dir(&lib_ruby) {
+        // Always exclude host-global `gems` and `site_ruby` in both `Minimal` and `Full`;
+        // workspace gems belong exclusively in `dmz.lock`.
+        if let Ok(entries) = fs::read_dir(&lib_ruby) {
             for entry in entries.flatten() {
                 let p = entry.path();
                 let name = entry.file_name().to_string_lossy().into_owned();
@@ -203,6 +203,13 @@ fn collect_ruby_libs_for_profile(
                     }
                 }
             }
+        }
+    }
+
+    if profile == ToolchainProfile::Full {
+        let include_dir = ruby_root.join("include");
+        if include_dir.is_dir() {
+            collect_files_recursive(&include_dir, ruby_root, &mut lib_files, "");
         }
     }
 
@@ -293,5 +300,49 @@ mod tests {
             )));
         }
         assert_eq!(resolve_prefix_root(Path::new("/ruby")), None);
+    }
+
+    #[test]
+    fn test_ruby_profiles_exclude_host_gems_and_site_ruby() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempdir()?;
+        let ruby_root = temp.path().join("ruby_root");
+        fs::create_dir_all(ruby_root.join("lib/ruby/3.2.0"))?;
+        fs::create_dir_all(ruby_root.join("lib/ruby/gems/3.2.0/gems/leaked-gem-1.0"))?;
+        fs::create_dir_all(ruby_root.join("lib/ruby/site_ruby/3.2.0"))?;
+        fs::create_dir_all(ruby_root.join("include/ruby-3.2.0"))?;
+
+        fs::write(ruby_root.join("lib/ruby/3.2.0/rubygems.rb"), "# stdlib")?;
+        fs::write(
+            ruby_root.join("lib/ruby/gems/3.2.0/gems/leaked-gem-1.0/leaked.rb"),
+            "# host gem",
+        )?;
+        fs::write(
+            ruby_root.join("lib/ruby/site_ruby/3.2.0/local_override.rb"),
+            "# host site_ruby",
+        )?;
+        fs::write(ruby_root.join("include/ruby-3.2.0/ruby.h"), "/* header */")?;
+
+        let min_rels: Vec<String> =
+            collect_ruby_libs_for_profile(&ruby_root, ToolchainProfile::Minimal)
+                .into_iter()
+                .map(|(_, r)| r)
+                .collect();
+        assert!(min_rels.contains(&"lib/ruby/3.2.0/rubygems.rb".to_string()));
+        assert!(!min_rels.iter().any(|r| r.contains("lib/ruby/gems")));
+        assert!(!min_rels.iter().any(|r| r.contains("lib/ruby/site_ruby")));
+        assert!(!min_rels.iter().any(|r| r.starts_with("include/")));
+
+        let full_rels: Vec<String> =
+            collect_ruby_libs_for_profile(&ruby_root, ToolchainProfile::Full)
+                .into_iter()
+                .map(|(_, r)| r)
+                .collect();
+        assert!(full_rels.contains(&"lib/ruby/3.2.0/rubygems.rb".to_string()));
+        assert!(full_rels.contains(&"include/ruby-3.2.0/ruby.h".to_string()));
+        assert!(!full_rels.iter().any(|r| r.contains("lib/ruby/gems")));
+        assert!(!full_rels.iter().any(|r| r.contains("lib/ruby/site_ruby")));
+
+        Ok(())
     }
 }

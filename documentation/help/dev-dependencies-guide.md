@@ -100,3 +100,19 @@ dmz airgap import --archive dev-bundle.tar.zst --store ./offline_store --include
 | Setting up an offline developer workstation | **Select** (`--include-dev`) |
 
 > **Tip:** Keep the setting consistent across your pipeline (`resolve` $\rightarrow$ `bundle`/`export` $\rightarrow$ `import`). If you resolve a lockfile with `--include-dev`, pass `--include-dev` to `bundle`, `export`, and `import` as well so toolchain detection and validation align with the locked packages.
+
+## Toolchains (`--toolchain-profile`) vs. Project Packages (`dmz.lock` / `--include-dev`)
+
+DMZ enforces a strict supply-chain boundary aligned with reproducible hermetic build systems (such as Nix and Bazel) and SLSA provenance guarantees:
+
+- **`ToolchainProfile` (`Minimal` vs. `Full`) controls first-party toolchain components only:**
+  - `Minimal` *(default)* bundles only the core compiler/runtime, host/target sysroots, and the workspace's active package manager. Recommended for CI builds, reproducible verification, and production air-gap bundles.
+  - `Full` adds first-party toolchain distribution components (`rust-analyzer`, `clippy`, `rustdoc`, `ctest`, `cpack`, headers, stdlib extras, cross-targets, and official Node package managers) for offline developer workstations or multi-target build servers.
+  - **Host-global package caches are always excluded in both profiles** (Python `site-packages`/`dist-packages`, third-party global `node_modules`, Ruby `gems`/`site_ruby`, and PHP PEAR/PECL state) so builds never silently capture unhashed, non-reproducible machine state.
+- **`dmz.lock` + `--include-dev` controls third-party packages:** Every third-party runtime or dev/test/lint dependency (`pytest`, `eslint`, `ruff`, `typescript`, `vite`, etc.) must be declared in your workspace manifest/lockfile and resolved through `dmz.lock` (checked via SHA-256 into `.dmz/store`).
+
+### GUI Workflow Mapping
+
+1. **Resolver tab (Third-party & dev packages):** Check **Include dev dependencies (devDependencies, dev-dependencies, test/lint extras)** when dev/test/lint packages are needed, then click **Scan & Resolve** to write `dmz.lock` and **Fetch Dependencies** to cache verified artifacts into `.dmz/store`.
+2. **Air-Gap Manager tab — Export (First-party toolchains):** Enable **Package compiler toolchains into bundle** and choose **Minimal** or **Full**. Remember that **Bundle (Fetch)** only auto-resolves `dmz.lock` when `dmz.lock` does not yet exist; if `dmz.lock` already exists, both **Bundle (Fetch)** and **Export (Local)** reuse that existing `dmz.lock` for packages and apply **Include dev dependencies** only to toolchain detection. Re-run **Scan & Resolve** in **Resolver** first whenever you want to add or remove dev packages in `dmz.lock`.
+3. **Air-Gap Manager tab — Import (Offline target):** Keep **Cryptographically verify closure hash** and **Install offline dependencies into workspace** enabled, and enable **Include dev dependencies** if the archive was built with dev dependencies so post-import validation matches.

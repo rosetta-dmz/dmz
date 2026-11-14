@@ -612,13 +612,20 @@ fn collect_python_files_recursive_deduped(
             let p = entry.path();
             if p.is_dir() && !p.is_symlink() {
                 let name = entry.file_name();
-                if name == "__pycache__" || name == "idlelib" || name == "test" || name == "tests" {
+                // Always exclude caches, stdlib tests/IDE, and ambient host package directories
+                // (`site-packages`/`dist-packages`) regardless of profile; project dependencies
+                // must flow exclusively through `dmz.lock`.
+                if name == "__pycache__"
+                    || name == "idlelib"
+                    || name == "test"
+                    || name == "tests"
+                    || name == "site-packages"
+                    || name == "dist-packages"
+                {
                     continue;
                 }
                 if profile == ToolchainProfile::Minimal
-                    && (name == "site-packages"
-                        || name == "dist-packages"
-                        || name == "tkinter"
+                    && (name == "tkinter"
                         || name == "turtledemo"
                         || name == "ensurepip"
                         || name == "pydoc_data")
@@ -878,7 +885,9 @@ mod tests {
             ToolchainProfile::Full,
         );
         let full_rels: Vec<String> = full_files.into_iter().map(|(_, r)| r).collect();
-        assert!(full_rels.iter().any(|r| r.contains("site-packages")));
+        // Even under Full, host `site-packages` and `dist-packages` must stay excluded.
+        assert!(!full_rels.iter().any(|r| r.contains("site-packages")));
+        assert!(!full_rels.iter().any(|r| r.contains("dist-packages")));
         assert!(full_rels.iter().any(|r| r.contains("ensurepip")));
         assert!(full_rels.iter().any(|r| r.contains("tkinter")));
 

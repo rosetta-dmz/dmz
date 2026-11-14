@@ -274,7 +274,7 @@ pub struct BundleArgs {
     #[arg(long, default_value_t = false)]
     pub include_dev: bool,
 
-    /// Compiler toolchain packaging profile (minimal excludes dev/IDE binaries and foreign targets)
+    /// Compiler toolchain packaging profile: minimal (core runtime/build essentials) or full (adds first-party IDE/doc tools, headers, stdlib extras, and cross-targets; host-global package caches are always excluded—use --include-dev for project dev packages)
     #[arg(long, value_enum, default_value_t = CliToolchainProfile::Minimal)]
     pub toolchain_profile: CliToolchainProfile,
 }
@@ -337,7 +337,7 @@ pub struct ExportArgs {
     #[arg(long, default_value_t = false)]
     pub include_dev: bool,
 
-    /// Compiler toolchain packaging profile (minimal excludes dev/IDE binaries and foreign targets)
+    /// Compiler toolchain packaging profile: minimal (core runtime/build essentials) or full (adds first-party IDE/doc tools, headers, stdlib extras, and cross-targets; host-global package caches are always excluded—use --include-dev for project dev packages)
     #[arg(long, value_enum, default_value_t = CliToolchainProfile::Minimal)]
     pub toolchain_profile: CliToolchainProfile,
 }

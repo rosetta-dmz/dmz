@@ -170,8 +170,8 @@ dmz bundle [OPTIONS]
 * `--zstd-level <LEVEL>` — Zstandard compression level from `1` to `22`. *(Default: `3`)*
 * `-t, --target <TARGET>` — Target platform specification (e.g., `macos-arm64`, `linux-x86_64`).
 * `--with-toolchain` — Automatically captures host compiler runtimes (Rust `cargo`/`rustc`, Node.js, Python, Go, PHP, Ruby) directly into the bundle for true zero-dependency target execution.
-* `--toolchain-profile <minimal|full>` — Compiler toolchain closure profile: `minimal` (default) strips IDE/dev tools (`rustdoc`, `rust-analyzer`, `cargo-clippy`), foreign targets, host global packages, and unused package managers; `full` packages the entire detected distribution.
-* `--include-dev` — Include development dependencies during resolution and toolchain detection. *(Default: `false`)*
+* `--toolchain-profile <minimal|full>` — First-party compiler toolchain closure profile: `minimal` (default) packages core compiler/runtime, host/target sysroots, and the lockfile's package manager while stripping IDE/dev tools (`rustdoc`, `rust-analyzer`, `cargo-clippy`), foreign cross-targets, and unused package managers; `full` adds first-party toolchain extras (`rust-analyzer`, `clippy`, `rustdoc`, `ctest`, `cpack`, headers, stdlib extras, cross-targets, and official Node package managers). Host-global package caches (`site-packages`, `dist-packages`, non-manager `node_modules`, Ruby `gems`/`site_ruby`, PEAR/PECL) are excluded in **both** profiles; third-party runtime/dev packages belong in `dmz.lock` (`--include-dev`).
+* `--include-dev` — Include project development dependencies (`devDependencies`, `dev-dependencies`, test/lint extras) from workspace manifests in `dmz.lock` and toolchain detection. *(Default: `false`)*
 * `--with-git-history` — Archives a deterministic Git bundle v2 file (`workspace.bundle`) alongside the closure.
 * `--since <REF>` — Baseline commit, ref, or previous manifest/bundle for incremental delta export.
 * `--refresh-lock` — Force re-resolving dependency manifests even if `dmz.lock` already exists.
@@ -205,8 +205,8 @@ dmz airgap export [OPTIONS]
 * `--zstd-level <LEVEL>` — Zstandard compression level from `1` to `22`. *(Default: `3`)*
 * `-t, --target <TARGET>` — Target platform specification (e.g., `macos-arm64`, `linux-x86_64`).
 * `--with-toolchain` — Package active compiler toolchains (cargo, rustc, node, go, python, php, ruby) into bundle.
-* `--toolchain-profile <minimal|full>` — Compiler toolchain closure profile (`minimal` by default, or `full`).
-* `--include-dev` — Include development dependencies during toolchain detection. *(Default: `false`)*
+* `--toolchain-profile <minimal|full>` — First-party compiler toolchain closure profile (`minimal` by default, or `full` for extra first-party IDE/doc tools, headers, stdlib extras, cross-targets, and official package managers). Host-global package caches are excluded in **both** profiles; third-party packages belong in `dmz.lock` (`--include-dev`).
+* `--include-dev` — Include development dependencies during toolchain detection (pair with a `dmz.lock` resolved with `--include-dev`). *(Default: `false`)*
 * `--with-git-history` — Archive deterministic Git bundle alongside closure.
 * `--since <REF>` — Baseline commit, ref, or previous manifest/bundle for incremental delta export.
 * `-v, --verbose` — Enable verbose debug logging output.

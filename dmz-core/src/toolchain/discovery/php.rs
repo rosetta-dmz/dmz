@@ -169,6 +169,10 @@ fn collect_php_assets_for_profile(
     let lib_php = php_root.join("lib/php");
     if lib_php.is_dir() {
         collect_files_recursive(&lib_php, php_root, &mut lib_files, "");
+        // Reuse canonical host-global cache filter to exclude PEAR/PECL state under both profiles.
+        lib_files.retain(|(_, rel)| {
+            !super::super::packager::is_forbidden_host_package_cache(ToolchainEcosystem::Php, rel)
+        });
         if profile == ToolchainProfile::Minimal {
             lib_files.retain(|(_, rel)| {
                 !rel.contains("/test/")
@@ -241,5 +245,50 @@ mod tests {
             assert!(probe_php_version(Path::new("/usr/bin/php")).is_none());
         }
         assert_eq!(resolve_prefix_root(Path::new("/php")), None);
+    }
+
+    #[test]
+    fn test_php_profiles_exclude_host_pear_state() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let php_root = temp.path().join("php_root");
+        fs::create_dir_all(php_root.join("lib/php/extensions/no-debug-non-zts"))?;
+        fs::create_dir_all(php_root.join("lib/php/pear/Archive"))?;
+        fs::create_dir_all(php_root.join("lib/php/.registry"))?;
+        fs::create_dir_all(php_root.join("lib/php/build/tests"))?;
+
+        fs::write(php_root.join("php.ini"), "[PHP]\n")?;
+        fs::write(
+            php_root.join("lib/php/extensions/no-debug-non-zts/openssl.so"),
+            "ext",
+        )?;
+        fs::write(php_root.join("lib/php/pear/Archive/Tar.php"), "<?php")?;
+        fs::write(php_root.join("lib/php/.registry/pear.reg"), "reg")?;
+        fs::write(php_root.join("lib/php/.depdb"), "db")?;
+        fs::write(php_root.join("lib/php/build/tests/run.phpt"), "test")?;
+
+        let min_rels: Vec<String> =
+            collect_php_assets_for_profile(&php_root, ToolchainProfile::Minimal)
+                .into_iter()
+                .map(|(_, r)| r)
+                .collect();
+        assert!(min_rels.contains(&"php.ini".to_string()));
+        assert!(min_rels.iter().any(|r| r.ends_with("openssl.so")));
+        assert!(!min_rels.iter().any(|r| r.contains("/pear/")));
+        assert!(!min_rels.iter().any(|r| r.contains("/.registry/")));
+        assert!(!min_rels.iter().any(|r| r.ends_with("/.depdb")));
+        assert!(!min_rels.iter().any(|r| r.contains("/tests/")));
+
+        let full_rels: Vec<String> =
+            collect_php_assets_for_profile(&php_root, ToolchainProfile::Full)
+                .into_iter()
+                .map(|(_, r)| r)
+                .collect();
+        assert!(full_rels.iter().any(|r| r.ends_with("openssl.so")));
+        assert!(full_rels.iter().any(|r| r.contains("/tests/")));
+        assert!(!full_rels.iter().any(|r| r.contains("/pear/")));
+        assert!(!full_rels.iter().any(|r| r.contains("/.registry/")));
+        assert!(!full_rels.iter().any(|r| r.ends_with("/.depdb")));
+
+        Ok(())
     }
 }

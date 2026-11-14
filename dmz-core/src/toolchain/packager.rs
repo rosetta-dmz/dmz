@@ -1,9 +1,96 @@
-use super::types::{DiscoveredToolchain, ToolchainManifestEntry};
+use super::types::{DiscoveredToolchain, ToolchainEcosystem, ToolchainManifestEntry};
 use super::ToolchainError;
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 use tar::Builder as TarBuilder;
 use tracing::info;
+
+const ALLOWED_NODE_MANAGER_MODULES: &[&str] = &["npm", "npx", "pnpm", "yarn", "corepack"];
+
+/// Returns `true` when `rel_path` targets an ambient host-global package cache rather than
+/// a first-party toolchain component.
+pub(crate) fn is_forbidden_host_package_cache(
+    ecosystem: ToolchainEcosystem,
+    rel_path: &str,
+) -> bool {
+    let normalized = rel_path.replace('\\', "/");
+    let segments: Vec<String> = Path::new(&normalized)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect();
+
+    match ecosystem {
+        ToolchainEcosystem::Python => segments
+            .iter()
+            .any(|seg| seg == "site-packages" || seg == "dist-packages"),
+        ToolchainEcosystem::Node => {
+            matches!(segments.first().map(String::as_str), Some("lib"))
+                && matches!(segments.get(1).map(String::as_str), Some("node_modules"))
+                && segments
+                    .get(2)
+                    .map(String::as_str)
+                    .is_some_and(|pkg| !ALLOWED_NODE_MANAGER_MODULES.contains(&pkg))
+        }
+        ToolchainEcosystem::Ruby => {
+            matches!(segments.first().map(String::as_str), Some("lib"))
+                && matches!(segments.get(1).map(String::as_str), Some("ruby"))
+                && matches!(
+                    segments.get(2).map(String::as_str),
+                    Some("gems" | "site_ruby")
+                )
+        }
+        ToolchainEcosystem::Php => {
+            matches!(segments.first().map(String::as_str), Some("lib"))
+                && matches!(segments.get(1).map(String::as_str), Some("php"))
+                && matches!(
+                    segments.get(2).map(String::as_str),
+                    Some(
+                        "pear"
+                            | ".registry"
+                            | ".channels"
+                            | ".depdb"
+                            | ".depdblock"
+                            | ".filemap"
+                            | ".lock"
+                    )
+                )
+        }
+        _ => false,
+    }
+}
+
+fn validate_toolchain_rel_path(
+    ecosystem: ToolchainEcosystem,
+    rel_path: &str,
+    kind: &str,
+) -> Result<(), ToolchainError> {
+    let rel_p = Path::new(rel_path);
+    if rel_p.is_absolute()
+        || rel_p.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(ToolchainError::PackagingFailed(format!(
+            "Refusing to package toolchain {} with insecure path: {}",
+            kind, rel_path
+        )));
+    }
+
+    if is_forbidden_host_package_cache(ecosystem, rel_path) {
+        return Err(ToolchainError::PackagingFailed(format!(
+            "Refusing to package host-global package cache {}: {}",
+            kind, rel_path
+        )));
+    }
+
+    Ok(())
+}
 
 /// Packaging engine responsible for serializing discovered toolchains into an airgap archive stream.
 pub struct ToolchainArchivePackager;
@@ -49,22 +136,7 @@ impl ToolchainArchivePackager {
 
             // Package binaries with executable permissions (0o755) and normalized ownership/timestamps
             for (host_path, rel_path) in &sorted_bins {
-                let rel_p = Path::new(rel_path);
-                if rel_p.is_absolute()
-                    || rel_p.components().any(|c| {
-                        matches!(
-                            c,
-                            std::path::Component::ParentDir
-                                | std::path::Component::RootDir
-                                | std::path::Component::Prefix(_)
-                        )
-                    })
-                {
-                    return Err(ToolchainError::PackagingFailed(format!(
-                        "Refusing to package toolchain binary with insecure path: {}",
-                        rel_path
-                    )));
-                }
+                validate_toolchain_rel_path(tc.ecosystem, rel_path, "binary")?;
 
                 let archive_entry_path = format!("{}/{}", base_archive_path, rel_path);
 
@@ -168,22 +240,7 @@ impl ToolchainArchivePackager {
 
             // Package library / runtime assets (0o755 for executables/shared libraries, 0o644 for headers/data)
             for (host_path, rel_path) in &sorted_libs {
-                let rel_p = Path::new(rel_path);
-                if rel_p.is_absolute()
-                    || rel_p.components().any(|c| {
-                        matches!(
-                            c,
-                            std::path::Component::ParentDir
-                                | std::path::Component::RootDir
-                                | std::path::Component::Prefix(_)
-                        )
-                    })
-                {
-                    return Err(ToolchainError::PackagingFailed(format!(
-                        "Refusing to package toolchain asset with insecure path: {}",
-                        rel_path
-                    )));
-                }
+                validate_toolchain_rel_path(tc.ecosystem, rel_path, "asset")?;
 
                 let archive_entry_path = format!("{}/{}", base_archive_path, rel_path);
 
@@ -478,5 +535,103 @@ mod tests {
         tar_builder.finish().unwrap();
 
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_package_toolchain_rejects_host_global_package_caches(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let ws = temp.path();
+        let sample_file = ws.join("sample.txt");
+        fs::write(&sample_file, "payload")?;
+
+        let forbidden_cases = [
+            (
+                ToolchainEcosystem::Python,
+                "lib/python3.12/site-packages/leaked/__init__.py",
+            ),
+            (
+                ToolchainEcosystem::Python,
+                "./Lib/dist-packages/leaked_deb.py",
+            ),
+            (
+                ToolchainEcosystem::Node,
+                "lib/node_modules/global-tool/index.js",
+            ),
+            (
+                ToolchainEcosystem::Node,
+                "lib\\node_modules\\@scope\\pkg\\index.js",
+            ),
+            (
+                ToolchainEcosystem::Ruby,
+                "lib/ruby/gems/3.2.0/gems/leaked/lib.rb",
+            ),
+            (
+                ToolchainEcosystem::Ruby,
+                "lib/ruby/site_ruby/3.2.0/override.rb",
+            ),
+            (ToolchainEcosystem::Php, "lib/php/pear/Archive/Tar.php"),
+            (ToolchainEcosystem::Php, "lib/php/.registry/pear.reg"),
+            (ToolchainEcosystem::Php, "lib/php/.depdb"),
+        ];
+
+        for (eco, rel_path) in forbidden_cases {
+            let toolchain = DiscoveredToolchain {
+                ecosystem: eco,
+                version: "1.0.0".to_string(),
+                bin_files: Vec::new(),
+                lib_files: vec![(sample_file.clone(), rel_path.to_string())],
+                root_dir: ws.to_path_buf(),
+            };
+            let mut tar_buf = Vec::new();
+            let mut tar_builder = TarBuilder::new(&mut tar_buf);
+            let res = ToolchainArchivePackager::package(&mut tar_builder, &[toolchain]);
+            assert!(
+                res.is_err(),
+                "Expected host-global cache path to fail fast: {:?}",
+                rel_path
+            );
+            let err_msg = res.err().map(|e| e.to_string()).unwrap_or_default();
+            assert!(
+                err_msg.contains("host-global package cache"),
+                "Unexpected error for {}: {}",
+                rel_path,
+                err_msg
+            );
+        }
+
+        // First-party Node package managers and language stdlib/extensions must still succeed.
+        let allowed_cases = [
+            (ToolchainEcosystem::Node, "lib/node_modules/npm/index.js"),
+            (
+                ToolchainEcosystem::Node,
+                "lib/node_modules/pnpm/dist/pnpm.cjs",
+            ),
+            (
+                ToolchainEcosystem::Python,
+                "lib/python3.12/json/__init__.py",
+            ),
+            (ToolchainEcosystem::Ruby, "lib/ruby/3.2.0/rubygems.rb"),
+            (
+                ToolchainEcosystem::Php,
+                "lib/php/extensions/no-debug-non-zts/openssl.so",
+            ),
+        ];
+
+        for (eco, rel_path) in allowed_cases {
+            let toolchain = DiscoveredToolchain {
+                ecosystem: eco,
+                version: "1.0.0".to_string(),
+                bin_files: Vec::new(),
+                lib_files: vec![(sample_file.clone(), rel_path.to_string())],
+                root_dir: ws.to_path_buf(),
+            };
+            let mut tar_buf = Vec::new();
+            let mut tar_builder = TarBuilder::new(&mut tar_buf);
+            let entries = ToolchainArchivePackager::package(&mut tar_builder, &[toolchain])?;
+            assert_eq!(entries.len(), 1);
+        }
+
+        Ok(())
     }
 }

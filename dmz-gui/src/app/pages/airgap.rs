@@ -474,7 +474,7 @@ pub(super) fn show(
     });
 
     if state.show_export_tip {
-        ui.add_space(12.0);
+        ui.add_space(16.0);
         components::dismissable_toast(
             ui,
             "Level 3 is the default. Higher levels can reduce transfer size at the cost of build time. Select Bundle (Fetch) to automatically resolve and fetch dependencies before export, or Export (Local) to package an already-cached local store directly with zero network access.",

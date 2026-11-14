@@ -158,7 +158,12 @@ pub struct DiscoveredToolchain {
 }
 
 /// Controls whether toolchain discovery captures only runtime/build essentials (`Minimal`)
-/// or includes optional IDE/linter/doc tooling and extra targets (`Full`).
+/// or includes first-party IDE/linter/doc tooling, headers, stdlib extras, and extra targets (`Full`).
+///
+/// Neither profile ever captures ambient host-global package caches (`site-packages`,
+/// `dist-packages`, unreferenced global `node_modules`, Ruby `gems`/`site_ruby`, or PHP PEAR
+/// packages); third-party project/dev dependencies must flow exclusively through `dmz.lock`
+/// (`--include-dev`).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolchainProfile {

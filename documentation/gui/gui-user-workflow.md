@@ -49,10 +49,13 @@ DMZ uses a shared active workspace concept across all operations:
    - `Code Only`: Application source code only.
    - `Dependencies Only`: Verified package store only.
 5. Adjust the **Zstandard level** slider (default is 3; higher levels reduce bundle size at the cost of build time).
-6. Configure minimal-closure toolchain and dev dependency options:
-   - **Package compiler toolchains into bundle**: When enabled, select **Toolchain Profile**: `Minimal` strips IDE/dev tools, foreign targets, host global site-packages/node_modules, and unused JS package managers; `Full` bundles the entire detected toolchain.
-   - **Include dev dependencies**: Off by default so only required runtime/build packages and toolchains are resolved and bundled.
+6. Configure first-party toolchain and lockfile-pinned dev dependency options:
+   - **Package compiler toolchains into bundle**: When enabled, select **Toolchain Profile**:
+     - `Minimal` *(default)*: Captures only the core compiler/runtime, host/target sysroots, and the lockfile's package manager (recommended for CI builds, reproducible verification, and production air-gap bundles).
+     - `Full`: Adds only **first-party toolchain distribution components** (`rust-analyzer`, `clippy`, `rustdoc`, `ctest`, `cpack`, C headers, stdlib extras, cross-targets, and official Node package managers). Host-global package caches (`site-packages`, `dist-packages`, third-party global `node_modules`, Ruby `gems`/`site_ruby`, PEAR/PECL) are excluded under **both** profiles so bundles remain reproducible and SHA-256 verifiable.
+   - **Include dev dependencies**: Off by default so only required runtime/build packages and toolchains are resolved and bundled. Third-party dev/test/lint packages (`pytest`, `eslint`, `ruff`, `typescript`, `vite`, etc.) must be declared in your workspace manifest and resolved via `dmz.lock` rather than pulled from host-global caches.
 7. Click **Bundle (Fetch)** to resolve, download, and package dependencies in a single workflow (requires network), or **Export (Local)** to package an already-cached `.dmz/store` directly with zero network calls.
+   > **Note:** **Bundle (Fetch)** only auto-resolves `dmz.lock` when `dmz.lock` does not yet exist. If `dmz.lock` already exists from an earlier **Scan & Resolve** without dev dependencies, both **Bundle (Fetch)** and **Export (Local)** reuse that existing `dmz.lock` for packages and only pass **Include dev dependencies** to toolchain detection. To add or remove dev packages in `dmz.lock`, re-run **Scan & Resolve** in the **Resolver** tab first.
 
 ---
 
@@ -62,9 +65,9 @@ DMZ uses a shared active workspace concept across all operations:
 2. Set **Workspace directory** to your destination folder where you want the project unpacked.
 3. In **Bundle Archive**, enter or **Browse...** to select the `.tar.zst` file to import.
 4. Toggles:
-   - Enable **Install offline dependencies into workspace** to automatically link packages into `node_modules`, `.cargo`, or single-copy `.dmz/venv` (linked via `.venv/.../dmz_store.pth`).
+   - Enable **Install offline dependencies into workspace** to automatically link locked prod/dev packages from `dmz.lock` into `node_modules`, `.cargo`, or single-copy `.dmz/venv` (linked via `.venv/.../dmz_store.pth`).
    - Enable **Cryptographically verify closure hash** for tamper-proof validation (also prunes unreferenced store files and unrequested `.dmz/toolchains`).
-   - Optional: enable **Include dev dependencies (toolchain validation)** *(off by default)* if the imported archive was generated with dev toolchains required by dev-only manifests.
+   - Optional: enable **Include dev dependencies** *(off by default)* on the import row if your bundle resolved dev dependencies, so post-import toolchain validation matches the dev-enabled workspace closure.
 5. Click **Import & verify bundle**.
 
 ---
