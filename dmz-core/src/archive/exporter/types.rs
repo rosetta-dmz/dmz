@@ -71,7 +71,7 @@ impl Default for ExportConfig {
             since: None,
             with_toolchain: false,
             multi_workspace: None,
-            include_dev: false,
+            include_dev: true,
             toolchain_profile: crate::toolchain::ToolchainProfile::Minimal,
         }
     }

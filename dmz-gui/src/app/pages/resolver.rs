@@ -40,7 +40,7 @@ impl Default for ResolverState {
     fn default() -> Self {
         Self {
             target_platform: String::new(),
-            include_dev: false,
+            include_dev: true,
             store_dir: String::from(".dmz/store"),
             discovered_stacks: Vec::new(),
             is_dual_repo: false,

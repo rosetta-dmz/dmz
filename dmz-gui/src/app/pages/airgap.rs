@@ -66,8 +66,8 @@ impl Default for AirGapState {
             verify_closure: true,
             with_toolchain: true,
             toolchain_profile: ToolchainProfile::Minimal,
-            include_dev: false,
-            import_include_dev: false,
+            include_dev: true,
+            import_include_dev: true,
             show_export_tip: true,
             active_task: None,
         }
@@ -312,7 +312,12 @@ pub(super) fn show(
                                 &ws_canon, &lockfile,
                             );
 
-                        if !lockfile.exists() {
+                        if dmz_core::resolver::lockfile::DmzLockfile::file_needs_refresh(
+                            &lockfile,
+                            target_opt.as_deref(),
+                            include_dev,
+                            multi_workspace.as_ref(),
+                        ) {
                             let resolve_options = ResolveOptions {
                                 target_platform: target_opt.clone(),
                                 include_dev,

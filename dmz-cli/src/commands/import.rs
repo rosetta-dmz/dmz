@@ -76,6 +76,7 @@ pub fn run_import(args: ImportArgs) -> anyhow::Result<i32> {
     }
     let ws_canon =
         std::fs::canonicalize(&args.workspace).unwrap_or_else(|_| args.workspace.clone());
+    let include_dev = args.include_dev_enabled();
     let effective_archive = if args.archive.is_relative() {
         if args.archive.exists() {
             std::fs::canonicalize(&args.archive).unwrap_or(args.archive)
@@ -96,7 +97,7 @@ pub fn run_import(args: ImportArgs) -> anyhow::Result<i32> {
         target_store_dir: effective_store.clone(),
         target_workspace_dir: ws_canon.clone(),
         verify_closure_hash: !args.skip_verify,
-        include_dev: args.include_dev,
+        include_dev,
         install_dependencies: !args.skip_install,
     };
 

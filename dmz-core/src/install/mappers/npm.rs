@@ -73,19 +73,26 @@ impl NpmMapper {
         Ok(())
     }
 
-    /// Hydrates cross-platform CLI binary shims in `node_modules/.bin/` for all declared
-    /// or installed executables in the workspace without hardcoded framework checks.
+    /// Hydrates cross-platform CLI binary shims in `node_modules/.bin/` for installed
+    /// packages in the workspace without fabricating empty stub `node_modules` directories.
     pub fn hydrate_workspace_bin_shims(workspace_path: &Path) {
-        let bin_dir = workspace_path.join("node_modules/.bin");
+        Self::hydrate_workspace_bin_shims_with_options(workspace_path, true);
+    }
+
+    /// Hydrates `node_modules/.bin/*` shims and `.modules.yaml` with explicit `include_dev` state.
+    pub fn hydrate_workspace_bin_shims_with_options(workspace_path: &Path, include_dev: bool) {
+        let nm_dir = workspace_path.join("node_modules");
+        if !nm_dir.is_dir() || !super::pnpm::PnpmMapper::has_installed_packages(&nm_dir) {
+            return;
+        }
+
+        let bin_dir = nm_dir.join(".bin");
         if fs::create_dir_all(&bin_dir).is_err() {
             return;
         }
 
         // 1. Scan installed packages in node_modules/ (including @scoped packages)
-        let nm_dir = workspace_path.join("node_modules");
-        if nm_dir.is_dir() {
-            Self::scan_and_link_node_modules(&nm_dir, &bin_dir);
-        }
+        Self::scan_and_link_node_modules(&nm_dir, &bin_dir);
 
         // 2. Discover from workspace root package.json for pre-install / air-gap offline readiness
         let root_pkg_json = workspace_path.join("package.json");
@@ -93,8 +100,8 @@ impl NpmMapper {
             Self::discover_and_link_from_root_manifest(&root_pkg_json, &bin_dir);
         }
 
-        // 3. Ensure node_modules/.modules.yaml exists so pnpm recognizes packages as installed
-        super::pnpm::PnpmMapper::ensure_modules_yaml(workspace_path);
+        // 3. Ensure node_modules/.modules.yaml exists with accurate linker & devDependencies flags
+        super::pnpm::PnpmMapper::ensure_modules_yaml_with_options(workspace_path, include_dev);
     }
 
     /// Recursively scans `node_modules/` (up to 2 levels for scoped packages) and materializes shims

@@ -368,9 +368,11 @@ impl InstallerEngine {
             }
         }
 
+        let include_dev = lockfile.include_dev.unwrap_or(true);
+
         // 2. Hydrate CLI binary shims (e.g. node_modules/.bin/tauri)
         for dir in &target_dirs {
-            mappers::NpmMapper::hydrate_workspace_bin_shims(dir);
+            mappers::NpmMapper::hydrate_workspace_bin_shims_with_options(dir, include_dev);
         }
 
         // 3. Regenerate environment activator scripts (.dmz/env.sh, .dmz/env.bat)
@@ -383,7 +385,7 @@ impl InstallerEngine {
         // 4. Wire transitive pnpm dependency symlinks inside `.pnpm/` virtual store and ensure .modules.yaml
         for dir in &target_dirs {
             mappers::PnpmMapper::wire_pnpm_dependency_links(dir, lockfile)?;
-            mappers::PnpmMapper::ensure_modules_yaml(dir);
+            mappers::PnpmMapper::ensure_modules_yaml_with_options(dir, include_dev);
         }
 
         Ok(())
@@ -486,6 +488,7 @@ mod tests {
         let lockfile = DmzLockfile {
             version: 1,
             target_platform: None,
+            include_dev: None,
             vcs: None,
             workspaces: std::collections::BTreeMap::new(),
             closure_signature,

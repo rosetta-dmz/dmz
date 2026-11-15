@@ -9,6 +9,7 @@ use tracing::{error, info};
 /// Bundle store items and dmz.lock into a portable air-gap archive (.tar.zst)
 pub fn run_export(args: ExportArgs) -> anyhow::Result<i32> {
     let with_toolchain = args.toolchain_enabled();
+    let include_dev = args.include_dev_enabled();
     let ws_canon =
         std::fs::canonicalize(&args.workspace).unwrap_or_else(|_| args.workspace.clone());
 
@@ -46,7 +47,7 @@ pub fn run_export(args: ExportArgs) -> anyhow::Result<i32> {
         with_git_history: args.with_git_history,
         since: args.since,
         with_toolchain,
-        include_dev: args.include_dev,
+        include_dev,
         toolchain_profile: args.toolchain_profile.into(),
         multi_workspace,
     };

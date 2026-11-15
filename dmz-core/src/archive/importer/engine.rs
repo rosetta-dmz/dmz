@@ -1,5 +1,7 @@
 use super::backup::{create_backup_snapshot, restore_backup_snapshot};
-use super::hydration::{hydrate_offline_dependencies, relative_path_between};
+use super::hydration::{
+    hydrate_offline_dependencies, hydrate_offline_dependencies_with_options, relative_path_between,
+};
 use super::security::{
     is_contained_path, is_safe_relative_path, unpack_tar_entry_contained,
     unpack_tar_entry_contained_bounded,
@@ -639,10 +641,15 @@ impl AirGapImporter {
         }
 
         // Hydrate offline dependencies: Tauri/npm CLI shims, Cargo vendored sources, and scoped Python settings
-        hydrate_offline_dependencies(
+        let resolved_include_dev = parsed_lockfile
+            .as_ref()
+            .and_then(|l| l.include_dev)
+            .unwrap_or(include_dev);
+        hydrate_offline_dependencies_with_options(
             effective_workspace,
             effective_store,
             workspace_project.as_ref(),
+            resolved_include_dev,
         );
 
         // Re-synchronize IDE settings and .code-workspace after .venv and node_modules are materialized
@@ -654,6 +661,21 @@ impl AirGapImporter {
         // Exported .code-workspace files embed interpreter paths from the source machine; drop or
         // redirect any that don't resolve on this machine (VS Code errors on dangling paths).
         crate::workspace::interpreter::sanitize_code_workspace_interpreters(effective_workspace);
+        crate::workspace::interpreter::sanitize_vscode_settings_interpreters(
+            effective_workspace,
+            effective_workspace,
+        );
+        if let Some(wp) = workspace_project.as_ref() {
+            for member in &wp.members {
+                let member_dir = effective_workspace.join(&member.path);
+                if member_dir.is_dir() {
+                    crate::workspace::interpreter::sanitize_vscode_settings_interpreters(
+                        &member_dir,
+                        effective_workspace,
+                    );
+                }
+            }
+        }
 
         // Run post-import ecosystem validation using the registry
         let registry = EcosystemRegistry::new();

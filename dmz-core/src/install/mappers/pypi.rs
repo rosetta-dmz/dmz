@@ -1,8 +1,9 @@
 use crate::install::archive::SafeArchiveExtractor;
 use crate::install::InstallError;
 use crate::resolver::lockfile::LockedPackage;
+use std::ffi::OsStr;
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use tracing::warn;
 
 /// Python / PyPI site-packages mapper (Production-Grade)
@@ -288,11 +289,28 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
         Ok(())
     }
 
-    /// Hydrates runnable python interpreter launcher scripts and configuration into .venv
+    /// Hydrates a PEP 405 virtual environment into `.venv` using a real symlink (Unix) or
+    /// interpreter copy (Windows) to the resolved Python binary — bundled `.dmz/toolchains/python`
+    /// first, then host `PATH` outside `.venv` — instead of synthetic shell stubs.
     pub fn hydrate_venv_environment(
-        _workspace_path: &Path,
+        workspace_path: &Path,
         root_venv: &Path,
         py_ver: &str,
+    ) -> Result<(), InstallError> {
+        let path_env = std::env::var_os("PATH");
+        Self::hydrate_venv_environment_with_path(
+            workspace_path,
+            root_venv,
+            py_ver,
+            path_env.as_deref(),
+        )
+    }
+
+    pub(crate) fn hydrate_venv_environment_with_path(
+        workspace_path: &Path,
+        root_venv: &Path,
+        py_ver: &str,
+        path_env: Option<&OsStr>,
     ) -> Result<(), InstallError> {
         let venv_bin = root_venv.join("bin");
         let venv_scripts = root_venv.join("Scripts");
@@ -301,83 +319,9 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
         fs::create_dir_all(&venv_scripts)
             .map_err(|e| InstallError::IoError(format!("Failed to create .venv/Scripts: {}", e)))?;
 
-        // 1. pyvenv.cfg (always overwrite to eliminate any leaked host paths)
-        let pyvenv_cfg = root_venv.join("pyvenv.cfg");
-        let _ = fs::remove_file(&pyvenv_cfg);
-        let ver_clean = py_ver.trim_start_matches("python");
-        let cfg_content = format!(
-            "home = /usr/bin\ninclude-system-site-packages = false\nversion = {}.0\n",
-            ver_clean
-        );
-        fs::write(&pyvenv_cfg, cfg_content)
-            .map_err(|e| InstallError::IoError(format!("Failed to write pyvenv.cfg: {}", e)))?;
+        Self::remove_stale_python_launchers(&venv_bin, &venv_scripts, py_ver);
 
-        // 2. Unix & Git Bash / MSYS2 launcher: root_venv/bin/python and root_venv/bin/python3
-        let sh_content = format!(
-            r#"#!/bin/sh
-VENV_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-export VIRTUAL_ENV="$VENV_DIR"
-export PATH="$VENV_DIR/bin:$PATH"
-export PYTHONPATH="$VENV_DIR/../.dmz/venv/lib/{py_ver}/site-packages:$VENV_DIR/lib/{py_ver}/site-packages:${{PYTHONPATH:-}}"
-
-# Check bundled toolchain python across single-repo and umbrella member depths
-_PY=""
-_PY_HOME=""
-for _CAND_ROOT in \
-    "$VENV_DIR/../.dmz/toolchains/python" \
-    "$VENV_DIR/../../.dmz/toolchains/python" \
-    "$VENV_DIR/../../../.dmz/toolchains/python" \
-    "$VENV_DIR/.dmz/toolchains/python"; do
-    if [ -x "$_CAND_ROOT/bin/python3" ]; then
-        _PY="$_CAND_ROOT/bin/python3"
-        _PY_HOME="$(cd "$_CAND_ROOT" 2>/dev/null && pwd)"
-        break
-    elif [ -x "$_CAND_ROOT/bin/python" ]; then
-        _PY="$_CAND_ROOT/bin/python"
-        _PY_HOME="$(cd "$_CAND_ROOT" 2>/dev/null && pwd)"
-        break
-    fi
-done
-
-if [ -n "$_PY_HOME" ]; then
-    export PYTHONHOME="$_PY_HOME"
-    export DYLD_FALLBACK_LIBRARY_PATH="$_PY_HOME/lib:${{DYLD_FALLBACK_LIBRARY_PATH:-}}"
-    export LD_LIBRARY_PATH="$_PY_HOME/lib:${{LD_LIBRARY_PATH:-}}"
-elif command -v python3 >/dev/null 2>&1; then
-    _PY="python3"
-elif command -v python >/dev/null 2>&1; then
-    _PY="python"
-fi
-
-if [ -n "$_PY" ]; then
-    exec "$_PY" "$@"
-else
-    echo "DMZ Error: No Python interpreter found in bundled toolchains or system PATH." >&2
-    exit 1
-fi
-"#,
-            py_ver = py_ver
-        );
-
-        for name in &["python", "python3"] {
-            let bin_path = venv_bin.join(name);
-            let _ = fs::remove_file(&bin_path);
-            fs::write(&bin_path, &sh_content).map_err(|e| {
-                InstallError::IoError(format!(
-                    "Failed to write python launcher {:?}: {}",
-                    bin_path, e
-                ))
-            })?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Err(e) = fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755)) {
-                    warn!(path = ?bin_path, error = %e, "Failed to chmod python launcher");
-                }
-            }
-        }
-
-        // Also create activate script
+        // Create standard POSIX activate script regardless of interpreter discovery.
         let activate_path = venv_bin.join("activate");
         let _ = fs::remove_file(&activate_path);
         let activate_content = r#"VIRTUAL_ENV="$(cd "$(dirname "$0")/.." && pwd)"
@@ -390,34 +334,243 @@ export PATH
             warn!(path = ?activate_path, error = %e, "Failed to write venv activate script");
         }
 
-        // 3. Windows launcher: root_venv/Scripts/python.bat and python.cmd
-        let cmd_content = format!(
-            r#"@echo off
-set "VENV_DIR=%~dp0.."
-set "VIRTUAL_ENV=%VENV_DIR%"
-set "PATH=%VENV_DIR%\Scripts;%PATH%"
-set "PYTHONPATH=%VENV_DIR%\..\.dmz\venv\lib\{py_ver}\site-packages;%VENV_DIR%\lib\{py_ver}\site-packages;%PYTHONPATH%"
+        let pyvenv_cfg = root_venv.join("pyvenv.cfg");
+        let _ = fs::remove_file(&pyvenv_cfg);
 
-set "_PY=python"
-if exist "%VENV_DIR%\..\.dmz\toolchains\python\python.exe" (
-    set "_PY=%VENV_DIR%\..\.dmz\toolchains\python\python.exe"
-) else if exist "%VENV_DIR%\..\..\.dmz\toolchains\python\python.exe" (
-    set "_PY=%VENV_DIR%\..\..\.dmz\toolchains\python\python.exe"
-) else if exist "%VENV_DIR%\..\..\..\.dmz\toolchains\python\python.exe" (
-    set "_PY=%VENV_DIR%\..\..\..\.dmz\toolchains\python\python.exe"
-)
+        let Some(resolved) =
+            Self::resolve_base_python_with_path(workspace_path, root_venv, path_env)
+        else {
+            warn!(
+                venv = ?root_venv,
+                "No Python interpreter found in bundled .dmz/toolchains/python or host PATH; omitting broken .venv/bin/python"
+            );
+            return Ok(());
+        };
 
-"%_PY%" %*
-"#,
-            py_ver = py_ver
+        let ver_clean = py_ver.trim_start_matches("python");
+        let cfg_content = format!(
+            "home = {}\ninclude-system-site-packages = false\nversion = {}.0\n",
+            resolved.home_dir.display(),
+            ver_clean
         );
-        for name in &["python.bat", "python.cmd"] {
-            let cmd_path = venv_scripts.join(name);
-            let _ = fs::remove_file(&cmd_path);
-            if let Err(e) = fs::write(&cmd_path, &cmd_content) {
-                warn!(path = ?cmd_path, error = %e, "Failed to write Windows python launcher");
+        fs::write(&pyvenv_cfg, cfg_content)
+            .map_err(|e| InstallError::IoError(format!("Failed to write pyvenv.cfg: {}", e)))?;
+
+        #[cfg(unix)]
+        {
+            Self::link_unix_python_binaries(&venv_bin, &resolved, py_ver)?;
+        }
+
+        #[cfg(windows)]
+        {
+            Self::materialize_windows_python_binaries(&venv_scripts, &resolved)?;
+        }
+
+        Ok(())
+    }
+
+    fn remove_stale_python_launchers(venv_bin: &Path, venv_scripts: &Path, py_ver: &str) {
+        let mut unix_names = vec!["python", "python3"];
+        if py_ver != "python" && py_ver != "python3" {
+            unix_names.push(py_ver);
+        }
+        for name in unix_names {
+            let p = venv_bin.join(name);
+            if p.exists() || fs::symlink_metadata(&p).is_ok() {
+                let _ = fs::remove_file(&p);
+            }
+        }
+        for name in &["python.exe", "python3.exe", "python.bat", "python.cmd"] {
+            let p = venv_scripts.join(name);
+            if p.exists() || fs::symlink_metadata(&p).is_ok() {
+                let _ = fs::remove_file(&p);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn link_unix_python_binaries(
+        venv_bin: &Path,
+        resolved: &ResolvedPython,
+        py_ver: &str,
+    ) -> Result<(), InstallError> {
+        let primary_target = if resolved.is_bundled {
+            Self::relative_path_to(venv_bin, &resolved.executable)
+        } else {
+            resolved.executable.clone()
+        };
+        let py3_link = venv_bin.join("python3");
+        std::os::unix::fs::symlink(&primary_target, &py3_link).map_err(|e| {
+            InstallError::IoError(format!(
+                "Failed to symlink {:?} -> {:?}: {}",
+                py3_link, primary_target, e
+            ))
+        })?;
+
+        if !py3_link.is_file() {
+            let _ = fs::remove_file(&py3_link);
+            return Err(InstallError::IoError(format!(
+                "Created Python symlink at {:?} does not resolve to an existing file (target: {:?})",
+                py3_link, primary_target
+            )));
+        }
+
+        let py_link = venv_bin.join("python");
+        if let Err(e) = std::os::unix::fs::symlink("python3", &py_link) {
+            warn!(path = ?py_link, error = %e, "Failed to symlink python -> python3");
+        }
+
+        if py_ver != "python" && py_ver != "python3" {
+            let ver_link = venv_bin.join(py_ver);
+            if let Err(e) = std::os::unix::fs::symlink("python3", &ver_link) {
+                warn!(path = ?ver_link, error = %e, "Failed to create versioned python symlink");
             }
         }
         Ok(())
     }
+
+    #[cfg(windows)]
+    fn materialize_windows_python_binaries(
+        venv_scripts: &Path,
+        resolved: &ResolvedPython,
+    ) -> Result<(), InstallError> {
+        let exe_dst = venv_scripts.join("python.exe");
+        fs::copy(&resolved.executable, &exe_dst).map_err(|e| {
+            InstallError::IoError(format!(
+                "Failed to materialize {:?} from {:?}: {}",
+                exe_dst, resolved.executable, e
+            ))
+        })?;
+        let py3_dst = venv_scripts.join("python3.exe");
+        let _ = fs::copy(&resolved.executable, &py3_dst);
+        Ok(())
+    }
+
+    fn resolve_base_python_with_path(
+        workspace_path: &Path,
+        root_venv: &Path,
+        path_env: Option<&OsStr>,
+    ) -> Option<ResolvedPython> {
+        let mut roots_to_scan = vec![workspace_path];
+        if let Some(venv_parent) = root_venv.parent() {
+            if venv_parent != workspace_path {
+                roots_to_scan.push(venv_parent);
+            }
+        }
+
+        let bundled_candidates: &[&str] = if cfg!(windows) {
+            &["python.exe", "Scripts/python.exe"]
+        } else {
+            &["bin/python3", "bin/python"]
+        };
+
+        for origin in roots_to_scan {
+            let mut cursor = Some(origin);
+            for _depth in 0..=3 {
+                let Some(dir) = cursor else {
+                    break;
+                };
+                let toolchain_py = dir.join(".dmz").join("toolchains").join("python");
+                for rel in bundled_candidates {
+                    let cand = toolchain_py.join(rel);
+                    if cand.is_file() {
+                        let canon_cand = fs::canonicalize(&cand).unwrap_or_else(|_| cand.clone());
+                        let home_dir = canon_cand
+                            .parent()
+                            .map(Path::to_path_buf)
+                            .unwrap_or(toolchain_py.clone());
+                        return Some(ResolvedPython {
+                            executable: cand,
+                            home_dir,
+                            is_bundled: true,
+                        });
+                    }
+                }
+                cursor = dir.parent();
+            }
+        }
+
+        let path_str = path_env?;
+        let venv_canon = fs::canonicalize(root_venv).unwrap_or_else(|_| root_venv.to_path_buf());
+        let host_names: &[&str] = if cfg!(windows) {
+            &["python.exe", "python3.exe"]
+        } else {
+            &["python3", "python"]
+        };
+
+        for dir in std::env::split_paths(path_str) {
+            if dir.as_os_str().is_empty() {
+                continue;
+            }
+            let dir_canon = fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+            if dir.starts_with(root_venv) || dir_canon.starts_with(&venv_canon) {
+                continue;
+            }
+            for name in host_names {
+                let cand = dir.join(name);
+                if cand.is_file() {
+                    let home_dir = cand
+                        .parent()
+                        .map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+                        .unwrap_or(dir_canon.clone());
+                    return Some(ResolvedPython {
+                        executable: cand,
+                        home_dir,
+                        is_bundled: false,
+                    });
+                }
+            }
+        }
+
+        None
+    }
+
+    fn normalize_lexical(path: &Path) -> PathBuf {
+        let mut out = PathBuf::new();
+        for comp in path.components() {
+            match comp {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                        out.pop();
+                    } else if !out.has_root() {
+                        out.push("..");
+                    }
+                }
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
+    }
+
+    fn relative_path_to(from_dir: &Path, target: &Path) -> PathBuf {
+        let from_norm = Self::normalize_lexical(from_dir);
+        let to_norm = Self::normalize_lexical(target);
+        let from_comps: Vec<Component<'_>> = from_norm.components().collect();
+        let to_comps: Vec<Component<'_>> = to_norm.components().collect();
+
+        let common = from_comps
+            .iter()
+            .zip(to_comps.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        if common == 0 && (from_norm.is_absolute() || to_norm.is_absolute()) {
+            return target.to_path_buf();
+        }
+
+        let mut rel = PathBuf::new();
+        for _ in from_comps.iter().skip(common) {
+            rel.push("..");
+        }
+        for comp in to_comps.iter().skip(common) {
+            rel.push(comp.as_os_str());
+        }
+        rel
+    }
+}
+
+struct ResolvedPython {
+    executable: PathBuf,
+    home_dir: PathBuf,
+    is_bundled: bool,
 }

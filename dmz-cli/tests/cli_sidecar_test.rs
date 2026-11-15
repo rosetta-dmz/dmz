@@ -356,37 +356,52 @@ fn test_cli_include_dev_and_toolchain_profile_defaults_and_overrides(
     use dmz_cli::cli::CliToolchainProfile;
 
     let res_default = Cli::try_parse_from(["dmz", "resolve"])?;
-    if let Commands::Resolve { include_dev, .. } = res_default.command {
-        assert!(!include_dev);
+    if let Commands::Resolve {
+        include_dev,
+        prod_only,
+        ..
+    } = res_default.command
+    {
+        assert!(include_dev);
+        assert!(!prod_only);
     } else {
         return Err("Expected Commands::Resolve".into());
     }
 
-    let res_dev = Cli::try_parse_from(["dmz", "resolve", "--include-dev"])?;
-    if let Commands::Resolve { include_dev, .. } = res_dev.command {
+    let res_prod = Cli::try_parse_from(["dmz", "resolve", "--prod-only"])?;
+    if let Commands::Resolve {
+        include_dev,
+        prod_only,
+        ..
+    } = res_prod.command
+    {
         assert!(include_dev);
+        assert!(prod_only);
     } else {
         return Err("Expected Commands::Resolve".into());
     }
 
     let bundle_default = Cli::try_parse_from(["dmz", "bundle"])?;
     if let Commands::Bundle(args) = bundle_default.command {
-        assert!(!args.include_dev);
+        assert!(args.include_dev_enabled());
         assert_eq!(args.toolchain_profile, CliToolchainProfile::Minimal);
     } else {
         return Err("Expected Commands::Bundle".into());
     }
 
-    let bundle_full = Cli::try_parse_from([
-        "dmz",
-        "bundle",
-        "--include-dev",
-        "--toolchain-profile",
-        "full",
-    ])?;
-    if let Commands::Bundle(args) = bundle_full.command {
-        assert!(args.include_dev);
+    let bundle_prod =
+        Cli::try_parse_from(["dmz", "bundle", "--no-dev", "--toolchain-profile", "full"])?;
+    if let Commands::Bundle(args) = bundle_prod.command {
+        assert!(!args.include_dev_enabled());
         assert_eq!(args.toolchain_profile, CliToolchainProfile::Full);
+    } else {
+        return Err("Expected Commands::Bundle".into());
+    }
+
+    // --include-dev passed after --prod-only overrides back to true (explicit intent wins)
+    let bundle_override = Cli::try_parse_from(["dmz", "bundle", "--prod-only", "--include-dev"])?;
+    if let Commands::Bundle(args) = bundle_override.command {
+        assert!(args.include_dev_enabled());
     } else {
         return Err("Expected Commands::Bundle".into());
     }
@@ -400,8 +415,16 @@ fn test_cli_include_dev_and_toolchain_profile_defaults_and_overrides(
         "full",
     ])?;
     if let Commands::Export(args) = export_full.command {
-        assert!(!args.include_dev);
+        assert!(args.include_dev_enabled());
         assert_eq!(args.toolchain_profile, CliToolchainProfile::Full);
+    } else {
+        return Err("Expected Commands::Export".into());
+    }
+
+    let export_prod =
+        Cli::try_parse_from(["dmz", "export", "--output", "out.tar.zst", "--prod-only"])?;
+    if let Commands::Export(args) = export_prod.command {
+        assert!(!args.include_dev_enabled());
     } else {
         return Err("Expected Commands::Export".into());
     }
@@ -409,7 +432,15 @@ fn test_cli_include_dev_and_toolchain_profile_defaults_and_overrides(
     let import_dev =
         Cli::try_parse_from(["dmz", "import", "--archive", "in.tar.zst", "--include-dev"])?;
     if let Commands::Import(args) = import_dev.command {
-        assert!(args.include_dev);
+        assert!(args.include_dev_enabled());
+    } else {
+        return Err("Expected Commands::Import".into());
+    }
+
+    let import_prod =
+        Cli::try_parse_from(["dmz", "import", "--archive", "in.tar.zst", "--prod-only"])?;
+    if let Commands::Import(args) = import_prod.command {
+        assert!(!args.include_dev_enabled());
     } else {
         return Err("Expected Commands::Import".into());
     }

@@ -57,6 +57,8 @@ pub struct DmzLockfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_platform: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_dev: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcs: Option<VcsProvenance>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub workspaces: BTreeMap<String, WorkspaceMetadata>,
@@ -116,10 +118,56 @@ impl DmzLockfile {
         Self {
             version: 1,
             target_platform,
+            include_dev: None,
             vcs: None,
             workspaces: BTreeMap::new(),
             closure_signature,
             packages: package_map,
+        }
+    }
+
+    /// Returns `true` when this lockfile was resolved with incompatible options or is missing
+    /// declared workspace members, signaling that `bundle` / `Bundle (Fetch)` should re-resolve.
+    pub fn is_stale_for_bundle(
+        &self,
+        target_platform: Option<&str>,
+        include_dev: bool,
+        multi_workspace: Option<&crate::workspace::WorkspaceProjectConfig>,
+    ) -> bool {
+        if self.target_platform.as_deref() != target_platform {
+            return true;
+        }
+        // Only treat missing `include_dev` metadata as stale when `include_dev` is requested,
+        // so legacy lockfiles without devDeps are refreshed once devDeps are enabled.
+        if self.include_dev != Some(include_dev) && (self.include_dev.is_some() || include_dev) {
+            return true;
+        }
+        if let Some(mws) = multi_workspace {
+            for member in &mws.members {
+                if !self.workspaces.contains_key(&member.id) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Checks whether a lockfile on disk is missing, unreadable/corrupt, or stale for the requested
+    /// bundle configuration.
+    pub fn file_needs_refresh(
+        lockfile_path: &Path,
+        target_platform: Option<&str>,
+        include_dev: bool,
+        multi_workspace: Option<&crate::workspace::WorkspaceProjectConfig>,
+    ) -> bool {
+        if !lockfile_path.exists() {
+            return true;
+        }
+        match Self::load_and_verify(lockfile_path) {
+            Ok(existing) => {
+                existing.is_stale_for_bundle(target_platform, include_dev, multi_workspace)
+            }
+            Err(_) => true,
         }
     }
 
@@ -335,5 +383,67 @@ mod tests {
             lockfile.closure_signature,
             DmzLockfile::compute_closure_hash(&lockfile.packages)
         );
+    }
+
+    #[test]
+    fn test_lockfile_file_needs_refresh_detects_staleness() {
+        use crate::workspace::{MemberRole, WorkspaceMember, WorkspaceProjectConfig};
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("dmz.lock");
+        assert!(DmzLockfile::file_needs_refresh(&path, None, true, None));
+
+        // Legacy lockfile with include_dev=None requires refresh when include_dev=true.
+        let mut lockfile = DmzLockfile::with_platform(vec![], Some("darwin-arm64".into()));
+        lockfile.include_dev = None;
+        lockfile.save(&path).unwrap();
+        assert!(DmzLockfile::file_needs_refresh(
+            &path,
+            Some("darwin-arm64"),
+            true,
+            None
+        ));
+
+        // Stamped lockfile matches identical target & include_dev=true.
+        lockfile.include_dev = Some(true);
+        lockfile.save(&path).unwrap();
+        assert!(!DmzLockfile::file_needs_refresh(
+            &path,
+            Some("darwin-arm64"),
+            true,
+            None
+        ));
+
+        // Stale if requested include_dev or target platform differs.
+        assert!(DmzLockfile::file_needs_refresh(
+            &path,
+            Some("darwin-arm64"),
+            false,
+            None
+        ));
+        assert!(DmzLockfile::file_needs_refresh(
+            &path,
+            Some("linux-x64"),
+            true,
+            None
+        ));
+
+        // Stale if multi-workspace manifest declares a member absent from dmz.lock.
+        let mut ws_cfg = WorkspaceProjectConfig {
+            name: "suite".to_string(),
+            members: vec![WorkspaceMember::new(
+                "tauri-ui",
+                "../ui",
+                MemberRole::Sidecar,
+            )],
+            ..Default::default()
+        };
+        ws_cfg.members[0].ecosystem = Some("node".to_string());
+        assert!(DmzLockfile::file_needs_refresh(
+            &path,
+            Some("darwin-arm64"),
+            true,
+            Some(&ws_cfg)
+        ));
     }
 }

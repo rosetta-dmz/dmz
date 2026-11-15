@@ -52,8 +52,17 @@ pub enum Commands {
         target: Option<String>,
 
         /// Include development dependencies (devDependencies, dev-dependencies, test/lint extras)
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = true, overrides_with = "prod_only")]
         include_dev: bool,
+
+        /// Exclude development dependencies (production/runtime-only closure)
+        #[arg(
+            long,
+            default_value_t = false,
+            overrides_with = "include_dev",
+            alias = "no-dev"
+        )]
+        prod_only: bool,
     },
 
     /// Fetch and cache locked dependencies into the secure store
@@ -213,8 +222,17 @@ pub enum Commands {
         target: Option<String>,
 
         /// Include development dependencies (devDependencies, dev-dependencies, test/lint extras)
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = true, overrides_with = "prod_only")]
         include_dev: bool,
+
+        /// Exclude development dependencies (production/runtime-only closure)
+        #[arg(
+            long,
+            default_value_t = false,
+            overrides_with = "include_dev",
+            alias = "no-dev"
+        )]
+        prod_only: bool,
     },
 
     /// Inspect and manage multi-ecosystem workspace stacks (Rust, Node, Go, Python, etc.)
@@ -283,8 +301,17 @@ pub struct BundleArgs {
     pub no_toolchain: bool,
 
     /// Include development dependencies during resolution and toolchain detection
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true, overrides_with = "prod_only")]
     pub include_dev: bool,
+
+    /// Exclude development dependencies (production/runtime-only closure)
+    #[arg(
+        long,
+        default_value_t = false,
+        overrides_with = "include_dev",
+        alias = "no-dev"
+    )]
+    pub prod_only: bool,
 
     /// Compiler toolchain packaging profile: minimal (core runtime/build essentials) or full (adds first-party IDE/doc tools, headers, stdlib extras, and cross-targets; host-global package caches are always excluded—use --include-dev for project dev packages)
     #[arg(long, value_enum, default_value_t = CliToolchainProfile::Minimal)]
@@ -295,6 +322,11 @@ impl BundleArgs {
     /// Returns whether toolchain packaging is effectively enabled
     pub fn toolchain_enabled(&self) -> bool {
         self.with_toolchain && !self.no_toolchain
+    }
+
+    /// Returns whether development dependencies are included
+    pub fn include_dev_enabled(&self) -> bool {
+        self.include_dev && !self.prod_only
     }
 }
 
@@ -346,8 +378,17 @@ pub struct ExportArgs {
     pub no_toolchain: bool,
 
     /// Include development dependencies during toolchain detection
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true, overrides_with = "prod_only")]
     pub include_dev: bool,
+
+    /// Exclude development dependencies (production/runtime-only closure)
+    #[arg(
+        long,
+        default_value_t = false,
+        overrides_with = "include_dev",
+        alias = "no-dev"
+    )]
+    pub prod_only: bool,
 
     /// Compiler toolchain packaging profile: minimal (core runtime/build essentials) or full (adds first-party IDE/doc tools, headers, stdlib extras, and cross-targets; host-global package caches are always excluded—use --include-dev for project dev packages)
     #[arg(long, value_enum, default_value_t = CliToolchainProfile::Minimal)]
@@ -358,6 +399,11 @@ impl ExportArgs {
     /// Returns whether toolchain packaging is effectively enabled
     pub fn toolchain_enabled(&self) -> bool {
         self.with_toolchain && !self.no_toolchain
+    }
+
+    /// Returns whether development dependencies are included
+    pub fn include_dev_enabled(&self) -> bool {
+        self.include_dev && !self.prod_only
     }
 }
 
@@ -398,8 +444,24 @@ pub struct ImportArgs {
     pub no_sandbox: bool,
 
     /// Include development dependencies during toolchain validation
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true, overrides_with = "prod_only")]
     pub include_dev: bool,
+
+    /// Exclude development dependencies (production/runtime-only closure)
+    #[arg(
+        long,
+        default_value_t = false,
+        overrides_with = "include_dev",
+        alias = "no-dev"
+    )]
+    pub prod_only: bool,
+}
+
+impl ImportArgs {
+    /// Returns whether development dependencies are included
+    pub fn include_dev_enabled(&self) -> bool {
+        self.include_dev && !self.prod_only
+    }
 }
 
 /// Shared command arguments for workspace execution under supervisor orchestration

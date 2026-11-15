@@ -104,25 +104,25 @@ fn test_npm_workspace_resolution() {
         "NPM workspace dependency 'express' was missing from closure packages"
     );
     assert!(
-        !lockfile.packages.contains_key("jest:29.7.0"),
-        "NPM workspace devDependency 'jest' should be excluded by default (include_dev=false)"
+        lockfile.packages.contains_key("jest:29.7.0"),
+        "NPM workspace devDependency 'jest' should be included by default (include_dev=true)"
     );
 
-    let lockfile_with_dev = dmz_core::resolver::ResolverEngine::resolve_workspace_with_options(
+    let lockfile_prod_only = dmz_core::resolver::ResolverEngine::resolve_workspace_with_options(
         root,
         dmz_core::resolver::ResolveOptions {
             target_platform: None,
-            include_dev: true,
+            include_dev: false,
         },
     )
-    .expect("Resolver failed with include_dev=true");
+    .expect("Resolver failed with include_dev=false");
     assert!(
-        lockfile_with_dev.packages.contains_key("express:4.19.2"),
-        "Runtime dependency 'express' must remain present with include_dev=true"
+        lockfile_prod_only.packages.contains_key("express:4.19.2"),
+        "Runtime dependency 'express' must remain present with include_dev=false"
     );
     assert!(
-        lockfile_with_dev.packages.contains_key("jest:29.7.0"),
-        "NPM workspace devDependency 'jest' must be included when include_dev=true"
+        !lockfile_prod_only.packages.contains_key("jest:29.7.0"),
+        "NPM workspace devDependency 'jest' must be excluded when include_dev=false"
     );
 }
 

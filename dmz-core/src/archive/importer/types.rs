@@ -19,7 +19,7 @@ impl Default for ImportConfig {
             target_store_dir: PathBuf::from(".dmz/store"),
             target_workspace_dir: PathBuf::from("workspace"), // Sub-folder default
             verify_closure_hash: true,
-            include_dev: false,
+            include_dev: true,
             install_dependencies: true,
         }
     }

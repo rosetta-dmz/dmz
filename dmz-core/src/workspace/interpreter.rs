@@ -73,6 +73,80 @@ pub fn sanitize_code_workspace_interpreters(workspace_root: &Path) {
     }
 }
 
+/// Re-validates `python.defaultInterpreterPath` and strips deprecated/dangling
+/// `python.pythonPath` inside `<dir>/.vscode/settings.json` so VS Code never errors on stale
+/// interpreter paths carried over from an exported workspace.
+pub fn sanitize_vscode_settings_interpreters(dir: &Path, workspace_root: &Path) {
+    let settings_file = dir.join(".vscode").join("settings.json");
+    let Ok(content) = fs::read_to_string(&settings_file) else {
+        return;
+    };
+    let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return;
+    };
+    let Some(obj) = doc.as_object_mut() else {
+        return;
+    };
+
+    let mut changed = obj.remove("python.pythonPath").is_some();
+
+    if let Some(current) = obj
+        .get(SETTING_KEY)
+        .and_then(|v| v.as_str())
+        .map(String::from)
+    {
+        let expanded = expand_folder_vars(&current, dir, None);
+        let expanded_path = Path::new(&expanded);
+        let exists = if expanded_path.is_absolute() {
+            expanded_path.is_file()
+        } else {
+            dir.join(expanded_path).is_file()
+        };
+
+        if !exists {
+            let member_venv = dir.join(".venv");
+            let bundled_dir = workspace_root.join(".dmz/toolchains/python");
+            if let Some(rel) = venv_interpreter_rel(&member_venv) {
+                obj.insert(
+                    SETTING_KEY.to_string(),
+                    serde_json::Value::String(format!("${{workspaceFolder}}/.venv/{}", rel)),
+                );
+            } else if let Some(rel) = bundled_interpreter_rel(&bundled_dir) {
+                let rel_member = dir
+                    .strip_prefix(workspace_root)
+                    .unwrap_or_else(|_| Path::new("."));
+                let prefix = relative_root_prefix(rel_member);
+                let target = if prefix == "." {
+                    format!("${{workspaceFolder}}/.dmz/toolchains/python/{}", rel)
+                } else {
+                    format!(
+                        "${{workspaceFolder}}/{}/.dmz/toolchains/python/{}",
+                        prefix, rel
+                    )
+                };
+                obj.insert(SETTING_KEY.to_string(), serde_json::Value::String(target));
+            } else {
+                obj.remove(SETTING_KEY);
+            }
+            changed = true;
+        }
+    }
+
+    if changed {
+        match serde_json::to_string_pretty(&doc)
+            .map_err(std::io::Error::other)
+            .and_then(|out| super::atomic_write_file(&settings_file, out))
+        {
+            Ok(()) => {
+                info!(file = ?settings_file, "Sanitized unresolved Python interpreter path in .vscode/settings.json")
+            }
+            Err(e) => {
+                warn!(file = ?settings_file, error = %e, "Failed to update .vscode/settings.json interpreter path")
+            }
+        }
+    }
+}
+
 /// True for relative paths without `..`, root or prefix components (CWE-22).
 fn is_contained_relative_path(path: &Path) -> bool {
     path.components().all(|c| {
@@ -310,5 +384,48 @@ mod tests {
         let tmp = tempdir().unwrap();
         fs::write(tmp.path().join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
         assert!(venv_interpreter_rel(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn test_sanitize_vscode_settings_interpreters_drops_stale_path_and_keeps_valid() {
+        let tmp = tempdir().unwrap();
+        let member = tmp.path().join("workspaces/py");
+        fs::create_dir_all(member.join(".vscode")).unwrap();
+        fs::write(
+            member.join(".vscode/settings.json"),
+            r#"{
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.pythonPath": "/nonexistent/host/python",
+  "editor.tabSize": 4
+}"#,
+        )
+        .unwrap();
+
+        sanitize_vscode_settings_interpreters(&member, tmp.path());
+        let after_strip: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(member.join(".vscode/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(after_strip.get("python.defaultInterpreterPath").is_none());
+        assert!(after_strip.get("python.pythonPath").is_none());
+        assert_eq!(after_strip["editor.tabSize"], 4);
+
+        // When a real .venv interpreter exists, preserve it.
+        fs::create_dir_all(member.join(".venv/bin")).unwrap();
+        fs::write(member.join(".venv/bin/python"), "").unwrap();
+        fs::write(
+            member.join(".vscode/settings.json"),
+            r#"{"python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python"}"#,
+        )
+        .unwrap();
+        sanitize_vscode_settings_interpreters(&member, tmp.path());
+        let after_keep: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(member.join(".vscode/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            after_keep["python.defaultInterpreterPath"],
+            "${workspaceFolder}/.venv/bin/python"
+        );
     }
 }

@@ -319,9 +319,11 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), ToolchainError
                 );
             } else {
                 settings.remove("python.defaultInterpreterPath");
+                settings.remove("python.pythonPath");
             }
         } else if is_umbrella {
             settings.remove("python.defaultInterpreterPath");
+            settings.remove("python.pythonPath");
         }
 
         if !is_umbrella
@@ -384,71 +386,80 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), ToolchainError
     Ok(())
 }
 
-/// Generates or updates `<project>.code-workspace` for multi-root projects
-pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), ToolchainError> {
-    let manifest_path = workspace_root.join("dmz-workspace.toml");
-    if !manifest_path.exists() {
-        return Ok(());
+/// Input descriptor for one member folder included in a generated `.code-workspace` file.
+pub(crate) struct WorkspaceFolderInput<'a> {
+    pub label: &'a str,
+    pub folder_path: &'a str,
+    pub rel_path: &'a Path,
+    pub fs_dir: &'a Path,
+    pub ecosystem: Option<&'a str>,
+}
+
+fn is_ecosystem_member(ecosystem: Option<&str>, candidates: &[&str]) -> bool {
+    ecosystem.is_some_and(|e| candidates.contains(&e))
+}
+
+fn toolchain_root_var(first_member: Option<&WorkspaceFolderInput<'_>>) -> String {
+    match first_member {
+        Some(m) => {
+            let folder_var = crate::workspace::interpreter::workspace_folder_var(Some(m.label));
+            let prefix = crate::workspace::interpreter::relative_root_prefix(m.rel_path);
+            if prefix == "." {
+                folder_var
+            } else {
+                format!("{}/{}", folder_var, prefix)
+            }
+        }
+        None => "${workspaceFolder}".to_string(),
     }
+}
 
-    let ws_project = match crate::workspace::WorkspaceProjectConfig::load_from_file(&manifest_path)
-    {
-        Ok(p) => p,
-        Err(_) => return Ok(()),
-    };
-
+/// Builds a multi-root VS Code / Cursor `.code-workspace` document shared between air-gap
+/// bundle export and post-import workspace setup.
+///
+/// Uses unambiguous `${workspaceFolder:<label>}` variable scoping for member interpreters,
+/// `node_modules/.bin`, and umbrella `.dmz/toolchains/*/bin` paths.
+pub(crate) fn build_multi_root_workspace_doc(
+    workspace_root: &Path,
+    members: &[WorkspaceFolderInput<'_>],
+    assume_bundled_python: bool,
+    include_documentation: bool,
+) -> serde_json::Value {
     let mut folders = Vec::new();
     let mut linked_rust_projects = Vec::new();
     let mut node_bin_unix = Vec::new();
     let mut node_bin_win = Vec::new();
 
-    for m in &ws_project.members {
-        let m_path_str = m.path.to_string_lossy().to_string();
-        let member_full_path = workspace_root.join(&m.path);
+    for m in members {
+        let is_python = is_ecosystem_member(m.ecosystem, &["python", "pypi"])
+            || m.fs_dir.join("requirements.txt").exists()
+            || m.fs_dir.join("pyproject.toml").exists();
 
-        let is_python = m.ecosystem.as_deref() == Some("python")
-            || m.ecosystem.as_deref() == Some("pypi")
-            || member_full_path.join("requirements.txt").exists()
-            || member_full_path.join("pyproject.toml").exists();
+        let is_rust = is_ecosystem_member(m.ecosystem, &["rust", "cargo"])
+            || m.fs_dir.join("Cargo.toml").exists()
+            || m.fs_dir.join("src-tauri/Cargo.toml").exists();
 
-        let is_rust = m.ecosystem.as_deref() == Some("rust")
-            || m.ecosystem.as_deref() == Some("cargo")
-            || member_full_path.join("Cargo.toml").exists()
-            || member_full_path.join("src-tauri/Cargo.toml").exists();
-
-        let is_node = m.ecosystem.as_deref() == Some("node")
-            || m.ecosystem.as_deref() == Some("npm")
-            || member_full_path.join("package.json").exists();
+        let is_node = is_ecosystem_member(m.ecosystem, &["node", "npm"])
+            || m.fs_dir.join("package.json").exists();
 
         if is_rust {
-            if member_full_path.join("Cargo.toml").exists() {
-                linked_rust_projects.push(format!("{}/Cargo.toml", m_path_str));
+            if m.fs_dir.join("Cargo.toml").exists() {
+                linked_rust_projects.push(format!("{}/Cargo.toml", m.folder_path));
             }
-            if member_full_path.join("src-tauri/Cargo.toml").exists() {
-                linked_rust_projects.push(format!("{}/src-tauri/Cargo.toml", m_path_str));
+            if m.fs_dir.join("src-tauri/Cargo.toml").exists() {
+                linked_rust_projects.push(format!("{}/src-tauri/Cargo.toml", m.folder_path));
             }
         }
 
+        let folder_var = crate::workspace::interpreter::workspace_folder_var(Some(m.label));
         if is_node {
-            node_bin_unix.push(format!(
-                "${{workspaceFolder}}/{}/node_modules/.bin",
-                m_path_str
-            ));
-            node_bin_win.push(format!(
-                "${{workspaceFolder}}\\{}\\node_modules\\.bin",
-                m_path_str
-            ));
+            node_bin_unix.push(format!("{}/node_modules/.bin", folder_var));
+            node_bin_win.push(format!("{}\\node_modules\\.bin", folder_var));
         }
-
-        let label = if !m.id.is_empty() {
-            m.id.clone()
-        } else {
-            m_path_str.to_string()
-        };
 
         let mut folder_entry = serde_json::json!({
-            "name": label,
-            "path": m_path_str
+            "name": m.label,
+            "path": m.folder_path
         });
 
         if is_python {
@@ -456,12 +467,15 @@ pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), Toolch
                 "python.terminal.activateEnvironment": true
             });
 
+            // Scope `.code-workspace` paths via `${workspaceFolder:<label>}` so VS Code's Python
+            // extension never hits multi-root `${workspaceFolder}` ambiguity, and only emit a path
+            // when a real interpreter exists (or is guaranteed to be bundled with `--with-toolchain`).
             if let Some(py_bin) = crate::workspace::interpreter::resolve_ide_interpreter_setting(
-                &member_full_path,
-                &m.path,
+                m.fs_dir,
+                m.rel_path,
                 workspace_root,
-                Some(&label),
-                false,
+                Some(m.label),
+                assume_bundled_python,
             ) {
                 if let Some(obj) = py_settings.as_object_mut() {
                     obj.insert(
@@ -479,33 +493,27 @@ pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), Toolch
         folders.push(folder_entry);
     }
 
-    if workspace_root.join("documentation").is_dir() {
+    if include_documentation && workspace_root.join("documentation").is_dir() {
         folders.push(serde_json::json!({
             "name": "Documentation",
             "path": "documentation"
         }));
     }
 
-    let project_name = if !ws_project.name.is_empty() {
-        &ws_project.name
-    } else {
-        "workspace"
-    };
-
     let unix_node_prefix = if !node_bin_unix.is_empty() {
         format!("{}:", node_bin_unix.join(":"))
     } else {
         String::new()
     };
-
     let win_node_prefix = if !node_bin_win.is_empty() {
         format!("{};", node_bin_win.join(";"))
     } else {
         String::new()
     };
 
+    let root_var = toolchain_root_var(members.first());
     let toolchains_dir = workspace_root.join(".dmz/toolchains");
-    let mut bin_subpaths: Vec<String> = Vec::new();
+    let mut bin_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     if let Ok(entries) = fs::read_dir(&toolchains_dir) {
         for entry in entries.flatten() {
             let name_os = entry.file_name();
@@ -514,36 +522,46 @@ pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), Toolch
             {
                 continue;
             }
-            let bin = entry.path().join("bin");
-            if bin.exists() {
-                let name = name_os.to_string_lossy().to_string();
-                bin_subpaths.push(format!("${{workspaceFolder}}/.dmz/toolchains/{}/bin", name));
+            if entry.path().join("bin").exists() {
+                bin_names.insert(name_os.to_string_lossy().to_string());
             }
         }
     }
 
-    let unix_path = if bin_subpaths.is_empty() {
-        format!("{}${{workspaceFolder}}/.dmz/toolchains/node/bin:${{workspaceFolder}}/.dmz/toolchains/rust/bin:${{workspaceFolder}}/.dmz/toolchains/python/bin:${{env:PATH}}", unix_node_prefix)
-    } else {
-        format!(
-            "{}{}:${{env:PATH}}",
-            unix_node_prefix,
-            bin_subpaths.join(":")
-        )
-    };
+    let bin_subpaths: Vec<String> = bin_names
+        .into_iter()
+        .map(|name| format!("{}/.dmz/toolchains/{}/bin", root_var, name))
+        .collect();
 
-    let win_path = if bin_subpaths.is_empty() {
-        format!("{}${{workspaceFolder}}\\.dmz\\toolchains\\node\\bin;${{workspaceFolder}}\\.dmz\\toolchains\\rust\\bin;${{workspaceFolder}}\\.dmz\\toolchains\\python;${{env:PATH}}", win_node_prefix)
+    let (unix_path, win_path) = if bin_subpaths.is_empty() {
+        let win_root = root_var.replace('/', "\\");
+        (
+            format!(
+                "{}{}/.dmz/toolchains/node/bin:{}/.dmz/toolchains/rust/bin:{}/.dmz/toolchains/python/bin:${{env:PATH}}",
+                unix_node_prefix, root_var, root_var, root_var
+            ),
+            format!(
+                "{}{}\\.dmz\\toolchains\\node\\bin;{}\\.dmz\\toolchains\\rust\\bin;{}\\.dmz\\toolchains\\python;${{env:PATH}}",
+                win_node_prefix, win_root, win_root, win_root
+            ),
+        )
     } else {
         let win_subpaths: Vec<String> = bin_subpaths.iter().map(|p| p.replace('/', "\\")).collect();
-        format!(
-            "{}{};${{env:PATH}}",
-            win_node_prefix,
-            win_subpaths.join(";")
+        (
+            format!(
+                "{}{}:${{env:PATH}}",
+                unix_node_prefix,
+                bin_subpaths.join(":")
+            ),
+            format!(
+                "{}{};${{env:PATH}}",
+                win_node_prefix,
+                win_subpaths.join(";")
+            ),
         )
     };
 
-    let code_workspace_obj = serde_json::json!({
+    serde_json::json!({
         "folders": folders,
         "settings": {
             "rust-analyzer.linkedProjects": linked_rust_projects,
@@ -557,7 +575,62 @@ pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), Toolch
                 "PATH": win_path
             }
         }
-    });
+    })
+}
+
+/// Generates or updates `<project>.code-workspace` for multi-root projects
+pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), ToolchainError> {
+    let manifest_path = workspace_root.join("dmz-workspace.toml");
+    if !manifest_path.exists() {
+        return Ok(());
+    }
+
+    let ws_project = match crate::workspace::WorkspaceProjectConfig::load_from_file(&manifest_path)
+    {
+        Ok(p) => p,
+        Err(_) => return Ok(()),
+    };
+
+    let member_storage: Vec<(String, String, &Path, std::path::PathBuf, Option<&str>)> = ws_project
+        .members
+        .iter()
+        .map(|m| {
+            let folder_path = m.path.to_string_lossy().replace('\\', "/");
+            let label = if !m.id.is_empty() {
+                m.id.clone()
+            } else {
+                folder_path.clone()
+            };
+            (
+                label,
+                folder_path,
+                m.path.as_path(),
+                workspace_root.join(&m.path),
+                m.ecosystem.as_deref(),
+            )
+        })
+        .collect();
+
+    let inputs: Vec<WorkspaceFolderInput<'_>> = member_storage
+        .iter()
+        .map(
+            |(label, folder_path, rel_path, fs_dir, ecosystem)| WorkspaceFolderInput {
+                label: label.as_str(),
+                folder_path: folder_path.as_str(),
+                rel_path,
+                fs_dir: fs_dir.as_path(),
+                ecosystem: *ecosystem,
+            },
+        )
+        .collect();
+
+    let code_workspace_obj = build_multi_root_workspace_doc(workspace_root, &inputs, false, true);
+
+    let project_name = if !ws_project.name.is_empty() {
+        &ws_project.name
+    } else {
+        "workspace"
+    };
 
     let cw_path = workspace_root.join(format!("{}.code-workspace", project_name));
     let content = serde_json::to_string_pretty(&code_workspace_obj).map_err(|e| {
@@ -567,4 +640,71 @@ pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), Toolch
         .map_err(|e| ToolchainError::Io(format!("Failed to write {}: {}", cw_path.display(), e)))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_generate_multi_root_workspace_uses_folder_label_scoping() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+
+        fs::create_dir_all(root.join("workspaces/py-api")).unwrap();
+        fs::create_dir_all(root.join("workspaces/tauri-ui")).unwrap();
+        fs::write(
+            root.join("workspaces/py-api/requirements.txt"),
+            "fastapi==0.111.0\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("workspaces/tauri-ui/package.json"),
+            r#"{"name": "tauri-ui", "devDependencies": {"@tauri-apps/cli": "^2.0.0"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("dmz-workspace.toml"),
+            r#"
+name = "dual-suite"
+
+[[members]]
+id = "py-api"
+path = "workspaces/py-api"
+role = "primary"
+ecosystem = "python"
+
+[[members]]
+id = "tauri-ui"
+path = "workspaces/tauri-ui"
+role = "sidecar"
+ecosystem = "node"
+"#,
+        )
+        .unwrap();
+
+        generate_multi_root_workspace(root).unwrap();
+        let cw_text = fs::read_to_string(root.join("dual-suite.code-workspace")).unwrap();
+        let cw: serde_json::Value = serde_json::from_str(&cw_text).unwrap();
+
+        let osx_path = cw["settings"]["terminal.integrated.env.osx"]["PATH"]
+            .as_str()
+            .unwrap();
+        assert!(
+            osx_path.contains("${workspaceFolder:tauri-ui}/node_modules/.bin"),
+            "Expected labeled node_modules/.bin in PATH, got: {}",
+            osx_path
+        );
+        assert!(
+            osx_path.contains("${workspaceFolder:py-api}/../../.dmz/toolchains/"),
+            "Expected labeled relative toolchains in PATH, got: {}",
+            osx_path
+        );
+        assert!(
+            !osx_path.contains("${workspaceFolder}/"),
+            "Ambiguous unlabeled ${{workspaceFolder}} should not appear in multi-root PATH: {}",
+            osx_path
+        );
+    }
 }

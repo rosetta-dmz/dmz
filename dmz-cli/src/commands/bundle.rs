@@ -78,13 +78,21 @@ pub fn run_bundle(args: BundleArgs) -> anyhow::Result<i32> {
             )
         });
 
-    // Resolve manifests if lockfile is missing or refresh_lock is requested
-    let should_resolve = args.refresh_lock || !effective_lockfile.exists();
+    let include_dev = args.include_dev_enabled();
+
+    // Resolve manifests if lockfile is missing, stale, or refresh_lock is requested
+    let should_resolve = args.refresh_lock
+        || dmz_core::resolver::lockfile::DmzLockfile::file_needs_refresh(
+            &effective_lockfile,
+            args.target.as_deref(),
+            include_dev,
+            multi_workspace.as_ref(),
+        );
     if should_resolve {
         info!("Resolving workspace dependency manifests at {:?}", ws_canon);
         let resolve_options = dmz_core::resolver::ResolveOptions {
             target_platform: args.target.clone(),
-            include_dev: args.include_dev,
+            include_dev,
         };
         let resolve_res = if let Some(ref mws) = multi_workspace {
             ResolverEngine::resolve_multi_workspace_with_options(
@@ -160,7 +168,7 @@ pub fn run_bundle(args: BundleArgs) -> anyhow::Result<i32> {
         with_git_history: args.with_git_history,
         since: args.since,
         with_toolchain,
-        include_dev: args.include_dev,
+        include_dev,
         toolchain_profile: args.toolchain_profile.into(),
         multi_workspace,
     };

@@ -40,10 +40,19 @@ impl From<ResolverError> for String {
 }
 
 /// Configuration options controlling dependency resolution scope and filtering.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolveOptions {
     pub target_platform: Option<String>,
     pub include_dev: bool,
+}
+
+impl Default for ResolveOptions {
+    fn default() -> Self {
+        Self {
+            target_platform: None,
+            include_dev: true,
+        }
+    }
 }
 
 pub struct ResolverEngine;
@@ -63,7 +72,7 @@ impl ResolverEngine {
             workspace_dir,
             ResolveOptions {
                 target_platform,
-                include_dev: false,
+                ..Default::default()
             },
         )
     }
@@ -102,7 +111,7 @@ impl ResolverEngine {
     ) -> Result<DmzLockfile, ResolverError> {
         let options = ResolveOptions {
             target_platform,
-            include_dev: false,
+            ..Default::default()
         };
         Self::resolve_multi_workspace_with_options(workspace_dir, project, manifest_path, &options)
     }
@@ -182,6 +191,7 @@ impl ResolverEngine {
 
         let mut unified_lock =
             DmzLockfile::with_platform(merged_packages, options.target_platform.clone());
+        unified_lock.include_dev = Some(options.include_dev);
         for meta in workspaces_meta {
             unified_lock.add_workspace(meta);
         }
@@ -218,7 +228,7 @@ impl ResolverEngine {
             workspace_dir,
             &ResolveOptions {
                 target_platform,
-                include_dev: false,
+                ..Default::default()
             },
         )
     }
@@ -302,6 +312,7 @@ impl ResolverEngine {
 
         let mut lockfile =
             DmzLockfile::with_platform(locked_packages, options.target_platform.clone());
+        lockfile.include_dev = Some(options.include_dev);
         if let Ok(Some(prov)) = crate::vcs::GitProvider::get_provenance(workspace_dir) {
             info!(
                 commit = %prov.commit,

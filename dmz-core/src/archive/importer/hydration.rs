@@ -40,6 +40,17 @@ pub fn hydrate_offline_dependencies(
     store_dir: &Path,
     workspace_project: Option<&WorkspaceProjectConfig>,
 ) {
+    hydrate_offline_dependencies_with_options(workspace_root, store_dir, workspace_project, true);
+}
+
+/// Option-aware variant of [`hydrate_offline_dependencies`] propagating the resolved
+/// `include_dev` policy to Node/pnpm metadata hydration and sanitizing stale IDE interpreter hints.
+pub fn hydrate_offline_dependencies_with_options(
+    workspace_root: &Path,
+    store_dir: &Path,
+    workspace_project: Option<&WorkspaceProjectConfig>,
+    include_dev: bool,
+) {
     // Collect target directories (either umbrella member folders or workspace root)
     let mut target_dirs: Vec<(PathBuf, MemberRole)> = Vec::new();
     if let Some(wp) = workspace_project {
@@ -192,10 +203,14 @@ pub fn hydrate_offline_dependencies(
             }
         }
 
-        // 2. Generic Node / NPM CLI shim hydration: node_modules/.bin/*
+        // 2. Generic Node / NPM CLI shim hydration: node_modules/.bin/* and pnpm .modules.yaml
         let package_json = dir.join("package.json");
         if package_json.is_file() {
-            crate::install::mappers::NpmMapper::hydrate_workspace_bin_shims(dir);
+            crate::install::mappers::NpmMapper::hydrate_workspace_bin_shims_with_options(
+                dir,
+                include_dev,
+            );
+            crate::install::mappers::PnpmMapper::ensure_modules_yaml_with_options(dir, include_dev);
         }
 
         // 3. Python folder-scoped configuration
@@ -270,5 +285,15 @@ pub fn hydrate_offline_dependencies(
                 }
             }
         }
+
+        // Always strip/redirect dangling interpreter hints in .vscode/settings.json carried in by the bundle
+        crate::workspace::interpreter::sanitize_vscode_settings_interpreters(dir, workspace_root);
+    }
+
+    if !target_dirs.iter().any(|(d, _)| d == workspace_root) {
+        crate::workspace::interpreter::sanitize_vscode_settings_interpreters(
+            workspace_root,
+            workspace_root,
+        );
     }
 }

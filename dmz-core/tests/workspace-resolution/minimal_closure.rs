@@ -209,7 +209,10 @@ groups = ["dev"]
     )?;
     let poetry_prod = ResolverEngine::resolve_workspace_with_options(
         tmp_poetry.path(),
-        ResolveOptions::default(),
+        ResolveOptions {
+            include_dev: false,
+            ..Default::default()
+        },
     )?;
     let poetry_prod_names: Vec<&str> = poetry_prod
         .packages
@@ -259,8 +262,13 @@ name = "ruff"
 version = "0.4.8"
 "#,
     )?;
-    let uv_prod =
-        ResolverEngine::resolve_workspace_with_options(tmp_uv.path(), ResolveOptions::default())?;
+    let uv_prod = ResolverEngine::resolve_workspace_with_options(
+        tmp_uv.path(),
+        ResolveOptions {
+            include_dev: false,
+            ..Default::default()
+        },
+    )?;
     let uv_prod_names: Vec<&str> = uv_prod.packages.values().map(|p| p.name.as_str()).collect();
     assert!(uv_prod_names.contains(&"uvicorn"));
     assert!(!uv_prod_names.contains(&"ruff"));
@@ -322,7 +330,10 @@ fn test_composer_bundler_and_maven_exclude_dev_by_default() -> Result<(), Box<dy
     )?;
     let composer_prod = ResolverEngine::resolve_workspace_with_options(
         tmp_composer.path(),
-        ResolveOptions::default(),
+        ResolveOptions {
+            include_dev: false,
+            ..Default::default()
+        },
     )?;
     let composer_prod_names: Vec<&str> = composer_prod
         .packages
@@ -359,7 +370,10 @@ end
     )?;
     let bundler_prod = ResolverEngine::resolve_workspace_with_options(
         tmp_bundler.path(),
-        ResolveOptions::default(),
+        ResolveOptions {
+            include_dev: false,
+            ..Default::default()
+        },
     )?;
     let bundler_prod_names: Vec<&str> = bundler_prod
         .packages
@@ -404,7 +418,10 @@ end
     )?;
     let maven_prod = ResolverEngine::resolve_workspace_with_options(
         tmp_maven.path(),
-        ResolveOptions::default(),
+        ResolveOptions {
+            include_dev: false,
+            ..Default::default()
+        },
     )?;
     let maven_prod_names: Vec<&str> = maven_prod
         .packages

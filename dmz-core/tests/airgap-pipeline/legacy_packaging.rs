@@ -21,6 +21,7 @@ fn test_package_builder_anchors_relative_paths() {
             .to_string(),
         packages: BTreeMap::new(),
         target_platform: None,
+        include_dev: None,
         vcs: None,
         workspaces: BTreeMap::new(),
     };
@@ -75,6 +76,7 @@ fn test_packaging_importer_roundtrip_and_zip_slip_rejection() {
         closure_signature,
         packages,
         target_platform: None,
+        include_dev: None,
         vcs: None,
         workspaces: BTreeMap::new(),
     };
@@ -129,6 +131,7 @@ fn test_air_gap_import_and_verification() {
     let lockfile = DmzLockfile {
         version: 1,
         target_platform: None,
+        include_dev: None,
         vcs: None,
         workspaces: BTreeMap::new(),
         closure_signature: "4c378397e78464329d42b543b944d2824cdd9856abac26c0f26e323587289ab6"
