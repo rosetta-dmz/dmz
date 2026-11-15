@@ -1,6 +1,7 @@
 use crate::cli::DEFAULT_STORE_PATH;
 use dmz_sandbox::platform::{
-    run_sandboxed_with_options, SandboxConfig, SandboxIsolationMode, SandboxPolicyOptions,
+    run_sandboxed_with_options, MetadataReadMode, SandboxConfig, SandboxIsolationMode,
+    SandboxPolicyOptions,
 };
 use std::path::PathBuf;
 use tracing::{error, info};
@@ -13,6 +14,7 @@ pub fn run_sandbox(
     closure: PathBuf,
     allow_network: bool,
     strict_kernel: bool,
+    strict_metadata: bool,
     diagnose: bool,
     exec_command: String,
     args: Vec<String>,
@@ -92,8 +94,14 @@ pub fn run_sandbox(
     } else {
         SandboxIsolationMode::BestEffort
     };
+    let metadata_mode = if strict_metadata {
+        MetadataReadMode::StrictAncestors
+    } else {
+        MetadataReadMode::Global
+    };
     let options = SandboxPolicyOptions {
         isolation_mode,
+        metadata_mode,
         ..SandboxPolicyOptions::default()
     };
 

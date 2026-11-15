@@ -26,10 +26,27 @@ pub enum SandboxIsolationMode {
     StrictKernel,
 }
 
+/// Controls how macOS Seatbelt permits filesystem metadata (`stat`/`lstat`/`readlink`) reads
+/// for `getcwd()` and runtime path canonicalization (ignored on Linux/Windows).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MetadataReadMode {
+    /// Bazel pattern: allows `file-read-metadata` globally so `getcwd()`, symlink resolution,
+    /// and Python/Node/Rust runtime canonicalization work reliably (no file content or listing access).
+    #[default]
+    Global,
+    /// Restricts `file-read-metadata` strictly to `(literal "...")` ancestor components of the
+    /// workspace, closure store, IPC socket, and canonical `/tmp`/`/var` paths. Note: on macOS APFS
+    /// firmlinks (`/Users` -> `/System/Volumes/Data/Users`), `getcwd()` (`/bin/pwd`) may still be
+    /// denied even when ancestors are listed.
+    StrictAncestors,
+}
+
 /// Extended policy options for sandboxed workspace and agent execution.
 #[derive(Clone, Debug, Default)]
 pub struct SandboxPolicyOptions {
     pub isolation_mode: SandboxIsolationMode,
+    pub metadata_mode: MetadataReadMode,
     pub proxy_addr: Option<SocketAddr>,
     pub writable_paths: Vec<PathBuf>,
 }
@@ -75,6 +92,21 @@ pub enum PlatformError {
     WindowsError(String),
     PlatformFault(String),
     UnsupportedPlatform(String),
+    /// Wraps an underlying `std::io::Error` while preserving its causal `Error::source()`.
+    Io {
+        context: String,
+        source: std::io::Error,
+    },
+}
+
+impl PlatformError {
+    /// Constructs a [`PlatformError::Io`] preserving the original `std::io::Error`.
+    pub fn io(context: impl Into<String>, source: std::io::Error) -> Self {
+        Self::Io {
+            context: context.into(),
+            source,
+        }
+    }
 }
 
 impl fmt::Display for PlatformError {
@@ -85,11 +117,19 @@ impl fmt::Display for PlatformError {
             PlatformError::WindowsError(msg) => write!(f, "Windows error: {}", msg),
             PlatformError::PlatformFault(msg) => write!(f, "Platform fault: {}", msg),
             PlatformError::UnsupportedPlatform(msg) => write!(f, "Unsupported platform: {}", msg),
+            PlatformError::Io { context, source } => write!(f, "{}: {}", context, source),
         }
     }
 }
 
-impl Error for PlatformError {}
+impl Error for PlatformError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            PlatformError::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 /// Unified interface for OS-native containerless sandbox runners
 pub trait SandboxRunner {

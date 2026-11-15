@@ -19,7 +19,7 @@ license = "MIT"
 tempfile = "3.27"
 git2 = { version = "0.21", default-features = false, features = ["vendored-openssl"] }
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
-nix = { version = "0.31", features = ["process", "mount", "sched", "user"] }
+nix = { version = "0.32", features = ["process", "mount", "sched", "user"] }
 windows-sys = { version = "0.61", features = ["Win32_System_Threading", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Security_Authorization", "Win32_System_JobObjects"] }
 libc = "0.2"
 tar = "0.4"

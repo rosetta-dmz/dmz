@@ -131,6 +131,10 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         strict_kernel: bool,
 
+        /// Restrict macOS Seatbelt metadata (stat/lstat) reads strictly to workspace and store ancestor paths
+        #[arg(long, default_value_t = false)]
+        strict_metadata: bool,
+
         /// Enable automated diagnostic error categorization
         #[arg(long, default_value_t = false)]
         diagnose: bool,
@@ -184,6 +188,10 @@ pub enum Commands {
         /// Disable sandbox isolation and execute directly on the host
         #[arg(long, default_value_t = false)]
         no_sandbox: bool,
+
+        /// Restrict macOS Seatbelt metadata (stat/lstat) reads strictly to workspace and store ancestor paths
+        #[arg(long, default_value_t = false)]
+        strict_metadata: bool,
 
         /// Shell binary or command to execute (defaults to $SHELL or /bin/sh)
         #[arg(short, long)]
@@ -412,6 +420,10 @@ pub struct RunArgs {
     /// Disable sandbox isolation and execute directly on host
     #[arg(long, default_value_t = false)]
     pub no_sandbox: bool,
+
+    /// Restrict macOS Seatbelt metadata (stat/lstat) reads strictly to workspace and store ancestor paths
+    #[arg(long, default_value_t = false)]
+    pub strict_metadata: bool,
 
     /// Custom primary command override (e.g., "npm run tauri dev")
     #[arg(short = 'c', long = "command")]

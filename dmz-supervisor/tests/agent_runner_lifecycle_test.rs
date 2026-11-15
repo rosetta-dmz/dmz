@@ -422,6 +422,7 @@ async fn test_live_seatbelt_confined_connect_tunnel_and_bypass_eperm() {
             proxy_addr: None,
             writable_paths: Vec::new(),
             isolation_mode: dmz_sandbox::platform::SandboxIsolationMode::StrictKernel,
+            ..dmz_sandbox::platform::SandboxPolicyOptions::default()
         },
     )
     .expect("prepare_agent_command(no_network) must succeed");

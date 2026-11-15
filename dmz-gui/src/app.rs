@@ -84,8 +84,7 @@ impl eframe::App for DmzGuiApp {
                         ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                     }
                     if titlebar_response.double_clicked() {
-                        let is_maximized =
-                            ui.input(|i| i.viewport().maximized.unwrap_or(false));
+                        let is_maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
                     }
                     ui.spacing_mut().item_spacing.y = prev_item_spacing_y;

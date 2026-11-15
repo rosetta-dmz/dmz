@@ -2,7 +2,8 @@ use dmz_sandbox::agent::{AgentSandbox, LoopbackAllowlistProxy};
 #[cfg(target_os = "windows")]
 use dmz_sandbox::platform::windows::WindowsJobGuard;
 use dmz_sandbox::platform::{
-    prepare_agent_command, SandboxConfig, SandboxIsolationMode, SandboxPolicyOptions,
+    prepare_agent_command, MetadataReadMode, SandboxConfig, SandboxIsolationMode,
+    SandboxPolicyOptions,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::Entry;
@@ -257,6 +258,9 @@ impl AgentRunner {
         };
         let policy_opts = SandboxPolicyOptions {
             isolation_mode,
+            // AI agents execute untrusted code inside ephemeral scratchpads and keep strict
+            // ancestor-only Seatbelt metadata rules rather than global stat/lstat visibility.
+            metadata_mode: MetadataReadMode::StrictAncestors,
             proxy_addr: proxy.as_ref().map(LoopbackAllowlistProxy::local_addr),
             writable_paths: vec![scratchpad_dir.clone()],
         };

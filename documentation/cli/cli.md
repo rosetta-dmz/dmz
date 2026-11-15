@@ -11,6 +11,7 @@ DMZ provides a robust, self-contained CLI for orchestrating zero-dependency sand
 | [`dmz init`](#workspace-initialization-dmz-init) | Initializes project workspace for DMZ capture and generates `dmz.lock` |
 | [`dmz bundle`](#air-gap-bundling-dmz-bundle) | One-shot resolution, dependency fetching, and export into an air-gap bundle (`.tar.zst`) |
 | [`dmz import`](#importing--verifying-an-air-gap-bundle-dmz-airgap-import) | Cryptographically verifies and unpacks an air-gap archive into target workspace & store |
+| [`dmz run`](#supervised-multi-repo-launch-dmz-run) | Launches dual-repo / companion workspace members under coordinated KEP-753 IPC supervision |
 | [`dmz shell`](#sandboxed-shell-dmz-shell) | Opens an interactive terminal inside a daemonless sandbox in the workspace |
 | [`dmz resolve`](#resolving-dependencies-dmz-resolve) | Scans workspace manifests and generates a deterministic `dmz.lock` closure |
 | [`dmz fetch`](#fetching-dependencies-dmz-fetch) | Downloads and caches locked package artifacts into the local secure store |
@@ -245,7 +246,12 @@ dmz import [OPTIONS] --archive <ARCHIVE>
 * `-t, --to, --workspace <PATH>` — Destination directory for extracted workspace source code and manifests. *(Default: `workspace`)*
 * `--include-dev` — Include development dependencies during post-import toolchain validation. *(Default: `false`)*
 * `--skip-verify` — Skips closure hash verification *(NOT recommended for production environments)*.
+* `--skip-install` — Skips automatic offline dependency installation into the workspace.
+* `--skip-ecosystem-verify` — Skips the automatic post-import sandboxed ecosystem verification check.
+* `--no-sandbox` — Runs post-import ecosystem verification unsandboxed on the host *(NOT recommended)*.
 * `-v, --verbose` — Enable verbose debug logging output.
+
+Upon completion, `dmz import` prints a **Next steps** block tailored to the imported workspace (`dmz run --workspace .` from the host shell and `code <name>.code-workspace` for dual-repo bundles, or `source .dmz/env.sh` / `dmz shell` for single-repo bundles).
 
 #### **Examples**
 
@@ -295,6 +301,8 @@ dmz sandbox [OPTIONS] -- <COMMAND> [ARGS...]
 * `-w, --workspace <PATH>` — Workspace directory context mounted R/W. *(Default: `.`)*
 * `-c, --closure <PATH>` — Dependency closure store mounted R/O. *(Default: `/nix/store`)*
 * `--allow-network` — Permits outbound network connections *(Default: `false` for complete isolation)*.
+* `--strict-kernel` — Fails closed unless OS kernel confinement enforces network policy.
+* `--strict-metadata` — Restricts macOS Seatbelt metadata (`stat`/`lstat`) reads strictly to workspace, store, and IPC ancestor `literal` paths instead of Bazel-style global metadata access.
 * `--diagnose` — Enables automated error classification to differentiate platform faults from user code faults.
 
 #### **Examples**
@@ -324,6 +332,7 @@ dmz shell [OPTIONS] [ARGS...]
 * `-c, --command <CMD>` — Execute a command string in the shell and exit.
 * `--allow-network` — Permits outbound network connections inside the sandbox *(Default: `false` for complete air-gap isolation)*.
 * `--no-sandbox` — Disables sandbox process isolation and executes directly on the host with DMZ environment variables exported.
+* `--strict-metadata` — Restricts macOS Seatbelt metadata (`stat`/`lstat`) reads strictly to workspace, store, and IPC ancestor `literal` paths instead of Bazel-style global metadata access.
 
 #### **Examples**
 
@@ -340,6 +349,26 @@ dmz shell --allow-network
 # Open unsandboxed shell on the host with DMZ environment variables loaded
 dmz shell --no-sandbox
 ```
+
+---
+
+### Supervised Multi-Repo Launch (`dmz run`)
+
+Launches primary and companion sidecar workspace members declared in `dmz-workspace.toml` (or passed via `--sidecar`) under KEP-753 lifecycle supervision with local Unix socket IPC (`DMZ_SIDECAR_SOCK`).
+
+> **Host Shell Requirement:** Always run `dmz run` from your host shell, not nested inside `dmz shell` or `dmz sandbox` (`DMZ_SANDBOX=1`).
+
+```bash
+dmz run [OPTIONS]
+```
+
+#### **Options**
+* `-w, --workspace <PATH>` — Path to project workspace root or umbrella directory. *(Default: `.`)*
+* `--sidecar <PATH>` — Optional companion workspace root override.
+* `--allow-network` — Permits outbound network connections inside member sandboxes.
+* `--no-sandbox` — Disables sandbox isolation and runs members directly on the host under supervision.
+* `--strict-metadata` — Restricts macOS Seatbelt metadata (`stat`/`lstat`) reads strictly to workspace, store, and IPC ancestor `literal` paths instead of Bazel-style global metadata access.
+* `-c, --command <CMD>` — Custom primary command override (e.g. `"npm run tauri dev"`).
 
 ---
 

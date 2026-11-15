@@ -140,18 +140,18 @@ pub fn run_sandboxed_with_options(
     cmd.stdout(Stdio::inherit());
     cmd.stderr(Stdio::inherit());
 
-    let mut child = cmd.spawn().map_err(|err| {
-        PlatformError::WindowsError(format!("Failed to spawn Windows process: {}", err))
-    })?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|err| PlatformError::io("Failed to spawn Windows process", err))?;
 
     if let Err(err) = job.assign_raw_handle(child.as_raw_handle()) {
         let _ = child.kill();
         return Err(err);
     }
 
-    let status = child.wait().map_err(|err| {
-        PlatformError::WindowsError(format!("Failed to wait for Windows process: {}", err))
-    })?;
+    let status = child
+        .wait()
+        .map_err(|err| PlatformError::io("Failed to wait for Windows process", err))?;
 
     Ok(status)
 }
@@ -170,6 +170,7 @@ mod tests {
             isolation_mode: SandboxIsolationMode::StrictKernel,
             proxy_addr: None,
             writable_paths: Vec::new(),
+            ..SandboxPolicyOptions::default()
         };
         assert!(matches!(
             build_command(&config, &strict_opts),
@@ -180,6 +181,7 @@ mod tests {
             isolation_mode: SandboxIsolationMode::BestEffort,
             proxy_addr: None,
             writable_paths: Vec::new(),
+            ..SandboxPolicyOptions::default()
         };
         assert!(build_command(&config, &best_effort_opts).is_ok());
 

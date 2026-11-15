@@ -40,6 +40,7 @@ jobs:
               - 'dmz-*/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'deny.toml'
               - 'rust-toolchain.toml'
               - 'Makefile'
               - 'scripts/**'
@@ -78,6 +79,27 @@ jobs:
       - name: Run Strict Clippy Gate (Production Targets)
         run: cargo clippy --workspace --lib --bins -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::undocumented_unsafe_blocks -D clippy::indexing_slicing -D clippy::cast_possible_truncation -D clippy::cast_sign_loss -D clippy::fallible_impl_from
 
+  security-and-policy:
+    name: Security & License Policy Check
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v5
+
+      - name: Install Advisory & Policy Tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+
+      - name: Run Cargo Audit
+        run: cargo audit
+
+      - name: Run Cargo Deny Check
+        run: cargo deny check --hide-inclusion-graph
+
   test:
     name: Test Workspace (${{ matrix.os }})
     needs: changes
@@ -110,7 +132,7 @@ jobs:
 
   ci-gate:
     name: Continuous Integration
-    needs: [changes, lint-and-format, test]
+    needs: [changes, lint-and-format, security-and-policy, test]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

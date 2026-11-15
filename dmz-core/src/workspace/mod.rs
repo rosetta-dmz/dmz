@@ -22,3 +22,4 @@ pub use config::{
 };
 pub use diagnostics::{analyze_sidecar_abi, check_socket_path_length, SidecarAbiReport};
 pub use inference::WorkspaceError;
+pub use schema::WorkspaceManifestError;

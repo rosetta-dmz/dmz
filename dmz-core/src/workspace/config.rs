@@ -20,8 +20,8 @@ pub use super::layout::{
     sanitize_folder_name, should_skip_workspace_artifact_dir,
 };
 pub use super::schema::{
-    normalize_member_path, IpcBridgeConfig, MemberRole, ResolvedMemberLayout, WorkspaceMember,
-    WorkspaceProjectConfig,
+    normalize_member_path, IpcBridgeConfig, MemberRole, ResolvedMemberLayout,
+    WorkspaceManifestError, WorkspaceMember, WorkspaceProjectConfig,
 };
 pub use super::socket::{cleanup_stale_socket, safe_socket_path};
 

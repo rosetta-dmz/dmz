@@ -2,7 +2,7 @@
 // Climbs parent directories to locate `dmz-workspace.toml` or reconstructs
 // multi-workspace member configurations from `dmz.lock` metadata.
 
-use super::schema::{MemberRole, WorkspaceMember, WorkspaceProjectConfig};
+use super::schema::{MemberRole, WorkspaceManifestError, WorkspaceMember, WorkspaceProjectConfig};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 /// Returns an error if a manifest file exists but cannot be read or parsed.
 pub fn discover_workspace_manifest_checked(
     start_dir: &Path,
-) -> Result<Option<(WorkspaceProjectConfig, PathBuf)>, anyhow::Error> {
+) -> Result<Option<(WorkspaceProjectConfig, PathBuf)>, WorkspaceManifestError> {
     let abs_start = if start_dir.is_relative() {
         std::env::current_dir()
             .map(|cwd| cwd.join(start_dir))
@@ -61,7 +61,7 @@ pub fn discover_workspace_manifest(start_dir: &Path) -> Option<(WorkspaceProject
 /// Prevents a standalone child project from accidentally pulling in an unrelated ancestor umbrella.
 pub fn discover_workspace_manifest_scoped_checked(
     selected_root: &Path,
-) -> Result<Option<(WorkspaceProjectConfig, PathBuf)>, anyhow::Error> {
+) -> Result<Option<(WorkspaceProjectConfig, PathBuf)>, WorkspaceManifestError> {
     let abs_start = if selected_root.is_relative() {
         std::env::current_dir()
             .map(|cwd| cwd.join(selected_root))
@@ -190,7 +190,7 @@ impl WorkspaceProjectConfig {
 
     pub fn discover_workspace_manifest_checked(
         start_dir: &Path,
-    ) -> Result<Option<(Self, PathBuf)>, anyhow::Error> {
+    ) -> Result<Option<(Self, PathBuf)>, WorkspaceManifestError> {
         discover_workspace_manifest_checked(start_dir)
     }
 
@@ -200,7 +200,7 @@ impl WorkspaceProjectConfig {
 
     pub fn discover_workspace_manifest_scoped_checked(
         selected_root: &Path,
-    ) -> Result<Option<(Self, PathBuf)>, anyhow::Error> {
+    ) -> Result<Option<(Self, PathBuf)>, WorkspaceManifestError> {
         discover_workspace_manifest_scoped_checked(selected_root)
     }
 

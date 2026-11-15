@@ -482,6 +482,7 @@ pub(super) fn show(
                                     workspace_root: root,
                                     project: project_config,
                                     allow_network: false,
+                                    ..dmz_supervisor::SidecarPairConfig::default()
                                 };
 
                                 if let Some(err) = preflight_err {

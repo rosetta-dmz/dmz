@@ -184,6 +184,7 @@ pub async fn dispatch_request(req: IpcRequest, ctx: &DispatchContext) -> IpcResp
                             workspace_root: root,
                             project,
                             allow_network,
+                            ..SidecarPairConfig::default()
                         };
                         match ctx.orchestrator.start_pair(pair_config).await {
                             Ok(sock) => IpcResponse::ok_with_data(
@@ -283,6 +284,7 @@ pub async fn execute_sandboxed_request(
         isolation_mode,
         proxy_addr: None,
         writable_paths: Vec::new(),
+        ..SandboxPolicyOptions::default()
     };
     let exec_res =
         tokio::task::spawn_blocking(move || run_sandboxed_with_options(&config, &opts)).await;

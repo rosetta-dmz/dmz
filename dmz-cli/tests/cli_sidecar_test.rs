@@ -480,3 +480,136 @@ ecosystem = "python"
 
     Ok(())
 }
+
+#[test]
+fn test_cli_strict_metadata_flag_parsing() -> Result<(), Box<dyn std::error::Error>> {
+    let sb_default = Cli::try_parse_from(["dmz", "sandbox"])?;
+    if let Commands::Sandbox {
+        strict_metadata, ..
+    } = sb_default.command
+    {
+        assert!(!strict_metadata);
+    } else {
+        return Err("Expected Commands::Sandbox".into());
+    }
+
+    let sb_strict = Cli::try_parse_from(["dmz", "sandbox", "--strict-metadata"])?;
+    if let Commands::Sandbox {
+        strict_metadata, ..
+    } = sb_strict.command
+    {
+        assert!(strict_metadata);
+    } else {
+        return Err("Expected Commands::Sandbox".into());
+    }
+
+    let sh_default = Cli::try_parse_from(["dmz", "shell"])?;
+    if let Commands::Shell {
+        strict_metadata, ..
+    } = sh_default.command
+    {
+        assert!(!strict_metadata);
+    } else {
+        return Err("Expected Commands::Shell".into());
+    }
+
+    let sh_strict = Cli::try_parse_from(["dmz", "shell", "--strict-metadata"])?;
+    if let Commands::Shell {
+        strict_metadata, ..
+    } = sh_strict.command
+    {
+        assert!(strict_metadata);
+    } else {
+        return Err("Expected Commands::Shell".into());
+    }
+
+    let run_strict = Cli::try_parse_from(["dmz", "run", "--strict-metadata"])?;
+    if let Commands::Run(run_args) = run_strict.command {
+        assert!(run_args.strict_metadata);
+    } else {
+        return Err("Expected Commands::Run".into());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_cli_run_nested_sandbox_guard() {
+    let ws = Path::new("./project");
+    assert!(dmz_cli::commands::run::nested_sandbox_error(None, None, ws).is_none());
+    assert!(dmz_cli::commands::run::nested_sandbox_error(Some("0"), Some("/tmp/ws"), ws).is_none());
+
+    let msg = dmz_cli::commands::run::nested_sandbox_error(Some("1"), Some("/tmp/ws"), ws);
+    assert!(msg.is_some());
+    if let Some(text) = msg {
+        assert!(text.contains("cannot be nested"));
+        assert!(text.contains("DMZ_WORKSPACE=/tmp/ws"));
+        assert!(text.contains("exit"));
+        assert!(text.contains("dmz run --workspace ./project"));
+    }
+}
+
+#[test]
+fn test_cli_import_next_steps_dual_vs_single_repo() -> Result<(), Box<dyn std::error::Error>> {
+    use dmz_core::archive::ImportResult;
+    use dmz_core::workspace::{MemberRole, WorkspaceMember, WorkspaceProjectConfig};
+
+    let tmp = tempfile::tempdir()?;
+    let target = Path::new("./imported-dual");
+
+    let dual_project = WorkspaceProjectConfig::new(
+        "desktop-ai-suite",
+        vec![
+            WorkspaceMember::new("client", "workspaces/client", MemberRole::Primary),
+            WorkspaceMember::new("backend", "workspaces/backend", MemberRole::Sidecar),
+        ],
+    );
+    let dual_result = ImportResult {
+        imported_packages: 10,
+        installed_packages: 10,
+        install_warning: None,
+        closure_signature: "abc123".to_string(),
+        store_path: tmp.path().join(".dmz/store"),
+        workspace_path: tmp.path().to_path_buf(),
+        is_delta: false,
+        has_git_history: false,
+        has_toolchains: true,
+        workspace_project: Some(dual_project),
+        vcs: None,
+    };
+    let dual_steps = dmz_cli::commands::import::format_import_next_steps(target, &dual_result);
+    assert!(dual_steps.contains("cd ./imported-dual"));
+    assert!(dual_steps.contains("dmz run --workspace ."));
+    assert!(dual_steps.contains("host shell"));
+    assert!(dual_steps.contains("code desktop-ai-suite.code-workspace"));
+
+    // Verify shell-quoting for paths containing spaces and read_dir fallback when proj.name differs from disk
+    std::fs::write(tmp.path().join("actual-on-disk.code-workspace"), "{}")?;
+    let spaced_steps = dmz_cli::commands::import::format_import_next_steps(
+        Path::new("/tmp/my imported ws"),
+        &dual_result,
+    );
+    if cfg!(windows) {
+        assert!(spaced_steps.contains("cd \"/tmp/my imported ws\""));
+    } else {
+        assert!(spaced_steps.contains("cd '/tmp/my imported ws'"));
+    }
+    assert!(spaced_steps.contains("code actual-on-disk.code-workspace"));
+
+    let single_result = ImportResult {
+        workspace_project: None,
+        ..dual_result
+    };
+    let single_steps =
+        dmz_cli::commands::import::format_import_next_steps(Path::new("./single"), &single_result);
+    assert!(single_steps.contains("cd ./single"));
+    assert!(single_steps.contains("dmz shell"));
+    if cfg!(windows) {
+        assert!(single_steps.contains(r".dmz\env.bat"));
+    } else {
+        assert!(single_steps.contains("source .dmz/env.sh"));
+    }
+    assert!(!single_steps.contains("dmz run --workspace ."));
+
+    Ok(())
+}

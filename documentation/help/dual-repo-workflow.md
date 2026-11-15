@@ -173,18 +173,20 @@ The exported umbrella archive preserves original repository directory names and 
 On target air-gapped systems with zero pre-installed runtimes:
 
 ```bash
-# Unpack the umbrella bundle
-dmz import --archive dist/project_closure.tar.zst --workspace ./project
+# Unpack the umbrella bundle (on macOS, prefer a neutral folder like ~/workspaces/ over ~/Documents)
+dmz import --archive dist/project_closure.tar.zst --to ~/workspaces/project
 
 # Enter the hermetic environment
-cd project
+cd ~/workspaces/project
 
 # Open the multi-root workspace in VS Code or Cursor:
 code my-desktop-suite.code-workspace
 
-# Or run directly via the DMZ supervisor:
+# Or run directly via the DMZ supervisor (from your host shell, NOT inside `dmz shell`):
 dmz run --workspace .
 ```
+
+> **Host Shell Rule:** `dmz import` prints a **Next steps** summary upon completion. Always invoke `dmz run` from your host shell rather than nesting it inside `dmz shell` (`DMZ_SANDBOX=1`), because `dmz run` orchestrates per-member processes and IPC sockets across multiple directories.
 
 #### Automatic Dependency Hydration:
 Upon import, DMZ automatically hydrates:
@@ -258,6 +260,8 @@ For developers using the visual desktop interface (`dmz-gui`), the multi-repo wo
 
 | Recommendation | Reason |
 | :--- | :--- |
+| **Run `dmz run` from the Host Shell** | `dmz run` orchestrates per-member lifecycle and IPC sockets; nesting it inside `dmz shell` (`DMZ_SANDBOX=1`) is blocked so you don't hit sandbox path restrictions. |
+| **Use Neutral Paths on macOS** | Store imported workspaces under `~/workspaces/` rather than `~/Documents`, `~/Desktop`, or `~/Downloads` to avoid macOS TCC `Operation not permitted` prompts. |
 | **Rely on `dmz run` for Unified Local Dev** | Automatically coordinates process startup order, verifies socket readiness, multiplexes logs, and guarantees zero orphaned zombie processes on exit. |
 | **Prefer Static Companion Binaries (`musl`)** | When compiling companion backends in Rust or Go, compile against `musl` (`x86_64-unknown-linux-musl`) to eliminate host dynamic library (`glibc`) mismatches on air-gapped target machines. |
 | **Never Use TCP Loopback for Local IPC** | Loopback networking (`127.0.0.1`) opens sandbox attack surfaces and risks port collisions. Always use Unix domain sockets or Windows Named Pipes. |

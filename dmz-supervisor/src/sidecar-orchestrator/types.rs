@@ -72,6 +72,9 @@ pub enum SidecarOrchestratorError {
     #[error("Watchdog channel closed before primary exit")]
     WatchdogChannelClosed,
 
+    #[error("Sandbox platform failure: {0}")]
+    Platform(#[from] dmz_sandbox::platform::PlatformError),
+
     #[error("{0}")]
     Generic(String),
 }
@@ -105,11 +108,15 @@ pub enum SidecarLifecycleState {
     Failed,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SidecarPairConfig {
     pub workspace_root: PathBuf,
     pub project: WorkspaceProjectConfig,
     pub allow_network: bool,
+    /// When true, skips OS sandbox confinement (`sandbox-exec` / Linux namespaces) and runs members on the host.
+    pub no_sandbox: bool,
+    /// macOS Seatbelt filesystem metadata policy when sandboxing is active.
+    pub metadata_mode: dmz_sandbox::platform::MetadataReadMode,
 }
 
 pub struct ActivePair {

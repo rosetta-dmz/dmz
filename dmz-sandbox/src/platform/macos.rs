@@ -1,7 +1,9 @@
-use crate::platform::{PlatformError, SandboxConfig, SandboxPolicyOptions};
+use crate::platform::{MetadataReadMode, PlatformError, SandboxConfig, SandboxPolicyOptions};
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 
 pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError> {
@@ -17,9 +19,9 @@ pub fn run_sandboxed_with_options(
     cmd.stdout(Stdio::inherit());
     cmd.stderr(Stdio::inherit());
 
-    let status = cmd.status().map_err(|err| {
-        PlatformError::SeatbeltError(format!("Failed to execute sandbox-exec: {}", err))
-    })?;
+    let status = cmd
+        .status()
+        .map_err(|err| PlatformError::io("Failed to execute sandbox-exec", err))?;
 
     Ok(status)
 }
@@ -225,6 +227,8 @@ pub fn generate_seatbelt_profile_with_options(
         ));
     }
 
+    let metadata_rule = build_metadata_read_rule(config, &canonical_workspace, options);
+
     format!(
         r#"
 (version 1)
@@ -235,6 +239,7 @@ pub fn generate_seatbelt_profile_with_options(
 (allow signal (target self))
 (allow mach-lookup)
 (allow ipc-posix*)
+{}
 {}
 
 (allow file-read*
@@ -263,6 +268,7 @@ pub fn generate_seatbelt_profile_with_options(
 {}{}{}
 "#,
         network_rule,
+        metadata_rule,
         user_toolchain_rules,
         private_tmp_escaped,
         workspace,
@@ -270,6 +276,106 @@ pub fn generate_seatbelt_profile_with_options(
         ipc_socket_rules,
         extra_writable_rules
     )
+}
+
+fn collect_ancestor_literals(path: &Path, out: &mut BTreeSet<String>) {
+    let mut curr = Some(path);
+    while let Some(p) = curr {
+        let s = p.to_string_lossy();
+        if !s.is_empty() && s != "." {
+            out.insert(escape_seatbelt_path(p));
+        }
+        curr = p.parent();
+    }
+}
+
+/// Canonicalizes `path` if it exists, or canonicalizes its nearest existing ancestor and re-appends
+/// non-existent trailing components (essential for unbound IPC socket paths under symlinked `/var` or `/tmp`).
+fn canonicalize_existing_ancestor(path: &Path) -> Option<std::path::PathBuf> {
+    if let Ok(canon) = fs::canonicalize(path) {
+        return Some(canon);
+    }
+
+    let mut suffix_rev = Vec::new();
+    let mut curr = path.parent()?;
+    if let Some(name) = path.file_name() {
+        suffix_rev.push(name.to_os_string());
+    }
+
+    loop {
+        if let Ok(mut base) = fs::canonicalize(curr) {
+            for comp in suffix_rev.into_iter().rev() {
+                base.push(comp);
+            }
+            return Some(base);
+        }
+        if let Some(name) = curr.file_name() {
+            suffix_rev.push(name.to_os_string());
+        }
+        curr = curr.parent()?;
+    }
+}
+
+fn collect_with_canonical(path: &Path, out: &mut BTreeSet<String>) {
+    if path.as_os_str().is_empty() {
+        return;
+    }
+    collect_ancestor_literals(path, out);
+    if let Some(canon) = canonicalize_existing_ancestor(path) {
+        collect_ancestor_literals(&canon, out);
+    }
+}
+
+fn build_metadata_read_rule(
+    config: &SandboxConfig,
+    canonical_workspace: &Path,
+    options: &SandboxPolicyOptions,
+) -> String {
+    match options.metadata_mode {
+        MetadataReadMode::Global => {
+            // Bazel pattern: permit stat/lstat/readlink metadata checks so getcwd() and runtime
+            // canonicalization succeed without granting file-read-data or directory listings.
+            "(allow file-read-metadata)".to_string()
+        }
+        MetadataReadMode::StrictAncestors => {
+            let mut literals = BTreeSet::new();
+            collect_ancestor_literals(&config.workspace_path, &mut literals);
+            collect_ancestor_literals(canonical_workspace, &mut literals);
+
+            collect_with_canonical(&config.closure_path, &mut literals);
+
+            if let Some(ref sock_path) = config.ipc_socket_path {
+                collect_with_canonical(sock_path, &mut literals);
+            }
+
+            for extra in &options.writable_paths {
+                collect_with_canonical(extra, &mut literals);
+            }
+
+            // Standard macOS symlink traversal parents (/tmp -> /private/tmp, /var -> /private/var, /etc -> /private/etc)
+            for sys_ancestor in [
+                Path::new("/tmp"),
+                Path::new("/private/tmp"),
+                Path::new("/var"),
+                Path::new("/private/var"),
+                Path::new("/etc"),
+                Path::new("/private/etc"),
+            ] {
+                collect_ancestor_literals(sys_ancestor, &mut literals);
+            }
+
+            if literals.is_empty() {
+                "(allow file-read-metadata (literal \"/\"))".to_string()
+            } else {
+                let mut rule = String::from("(allow file-read-metadata");
+                for lit in literals {
+                    rule.push_str(&format!("\n    (literal \"{}\")", lit));
+                }
+                rule.push(')');
+                rule
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -342,6 +448,7 @@ mod tests {
             isolation_mode: crate::platform::SandboxIsolationMode::StrictKernel,
             proxy_addr: Some("127.0.0.1:41234".parse().unwrap()),
             writable_paths: vec![PathBuf::from("/tmp/dmz_scratch")],
+            ..SandboxPolicyOptions::default()
         };
 
         let profile = generate_seatbelt_profile_with_options(&config, &options);

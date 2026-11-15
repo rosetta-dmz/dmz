@@ -18,10 +18,10 @@ pub fn run_sandboxed_with_options(
     cmd.stderr(Stdio::inherit());
 
     let status = cmd.status().map_err(|err| {
-        PlatformError::NamespaceError(format!(
-            "Failed to execute sandboxed process in Linux namespace: {}. Ensure unprivileged user namespaces are enabled or run with --no-sandbox.",
-            err
-        ))
+        PlatformError::io(
+            "Failed to execute sandboxed process in Linux namespace (ensure unprivileged user namespaces are enabled or use host mode)",
+            err,
+        )
     })?;
 
     Ok(status)
@@ -158,6 +158,7 @@ mod tests {
             isolation_mode: SandboxIsolationMode::StrictKernel,
             proxy_addr: Some("127.0.0.1:41234".parse().unwrap()),
             writable_paths: Vec::new(),
+            ..SandboxPolicyOptions::default()
         };
         let strict_res = build_command(&config, &proxy_opts);
         assert!(matches!(
@@ -169,6 +170,7 @@ mod tests {
             isolation_mode: SandboxIsolationMode::BestEffort,
             proxy_addr: Some("127.0.0.1:41234".parse().unwrap()),
             writable_paths: Vec::new(),
+            ..SandboxPolicyOptions::default()
         };
         let (_, proxy_posture) = build_command(&config, &best_effort_opts).unwrap();
         assert_eq!(proxy_posture, "linux-userns-proxy");
@@ -177,6 +179,7 @@ mod tests {
             isolation_mode: SandboxIsolationMode::StrictKernel,
             proxy_addr: None,
             writable_paths: Vec::new(),
+            ..SandboxPolicyOptions::default()
         };
         let (_, netns_posture) = build_command(&config, &netns_opts).unwrap();
         assert_eq!(netns_posture, "kernel-netns");

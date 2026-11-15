@@ -196,10 +196,41 @@ impl DiagnosticError {
                     ),
                 };
             }
+            if let Some(manifest_err) = e.downcast_ref::<crate::workspace::WorkspaceManifestError>()
+            {
+                if matches!(
+                    manifest_err,
+                    crate::workspace::WorkspaceManifestError::Parse { .. }
+                ) {
+                    return Self {
+                        category: ErrorCategory::UserCodeFault,
+                        message: manifest_err.to_string(),
+                        remediation: String::from(
+                            "Verify dmz-workspace.toml TOML syntax and member configuration fields.",
+                        ),
+                    };
+                }
+            }
             curr = e.source();
         }
 
         Self::classify_from_chain(err)
+    }
+
+    /// Returns true if the current process is executing inside an active DMZ sandbox (`DMZ_SANDBOX=1`).
+    pub fn is_in_dmz_sandbox() -> bool {
+        std::env::var("DMZ_SANDBOX").as_deref() == Ok("1")
+    }
+
+    /// Canonical, frontend-neutral remediation guidance for OS `EPERM` (`os error 1`) denials.
+    pub fn eperm_remediation(in_sandbox: bool) -> &'static str {
+        if in_sandbox {
+            "This process is running inside an active DMZ sandbox (DMZ_SANDBOX=1). Exit the outer sandbox session and run host orchestration from an unsandboxed host session."
+        } else if cfg!(target_os = "macos") {
+            "Operation not permitted (EPERM). If running inside a sandbox, exit to the host session; on macOS, check System Settings -> Privacy & Security -> Files and Folders (common for ~/Documents, ~/Desktop, ~/Downloads), clear `com.apple.quarantine` attributes, or place workspaces under a neutral path such as ~/workspaces/."
+        } else {
+            "Operation not permitted (EPERM). Ensure you are running from an unsandboxed host session with read/execute permissions and compatible OS isolation policies."
+        }
     }
 
     /// Fallback classifier for non-static dynamic errors.
@@ -208,6 +239,16 @@ impl DiagnosticError {
     }
 
     fn from_io_error(io_err: &std::io::Error, root: &(dyn Error + 'static)) -> Self {
+        #[cfg(unix)]
+        if io_err.raw_os_error() == Some(libc::EPERM) {
+            let remediation = Self::eperm_remediation(Self::is_in_dmz_sandbox());
+            return Self {
+                category: ErrorCategory::PermissionDenied,
+                message: format!("OS permission denied (errno {}): {}", libc::EPERM, root),
+                remediation: String::from(remediation),
+            };
+        }
+
         match io_err.kind() {
             std::io::ErrorKind::PermissionDenied => Self {
                 category: ErrorCategory::PermissionDenied,
@@ -233,7 +274,7 @@ impl DiagnosticError {
             _ => {
                 #[cfg(unix)]
                 if let Some(raw_os_err) = io_err.raw_os_error() {
-                    if raw_os_err == libc::EPERM || raw_os_err == libc::EACCES {
+                    if raw_os_err == libc::EACCES {
                         return Self {
                             category: ErrorCategory::PermissionDenied,
                             message: format!("OS permission denied (errno {}): {}", raw_os_err, root),
@@ -273,7 +314,19 @@ impl DiagnosticError {
         let combined_msg = full_chain.join(" -> ");
         let normalized = combined_msg.to_lowercase();
 
-        // 1. Evaluate platform & kernel isolation signatures
+        // 1. Evaluate EPERM string signatures from non-`unshare` execution layers (e.g. Seatbelt denials)
+        if !normalized.contains("unshare")
+            && (normalized.contains("operation not permitted")
+                || normalized.contains("os error 1)"))
+        {
+            return Self {
+                category: ErrorCategory::PermissionDenied,
+                message: format!("OS permission denied (EPERM): {}", combined_msg),
+                remediation: String::from(Self::eperm_remediation(Self::is_in_dmz_sandbox())),
+            };
+        }
+
+        // 2. Evaluate platform & kernel isolation signatures
         if normalized.contains("unshare")
             || normalized.contains("seatbelt")
             || normalized.contains("job object")
@@ -485,6 +538,18 @@ mod tests {
         assert!(diag.remediation.contains("permissions"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_classify_io_eperm_remediation() {
+        let err = io::Error::from_raw_os_error(libc::EPERM);
+        let diag = DiagnosticError::classify(&err);
+        assert_eq!(diag.category, ErrorCategory::PermissionDenied);
+        assert!(diag.remediation.contains("EPERM"));
+        if cfg!(target_os = "macos") {
+            assert!(diag.remediation.contains("Privacy & Security"));
+        }
+    }
+
     #[test]
     fn test_classify_io_not_found_as_toolchain_fault() {
         let err = io::Error::new(io::ErrorKind::NotFound, "cargo binary not found");
@@ -547,6 +612,23 @@ mod tests {
         let diag = DiagnosticError::classify(&err);
         assert_eq!(diag.category, ErrorCategory::PlatformFault);
         assert!(diag.message.contains("Seatbelt error"));
+
+        #[cfg(unix)]
+        {
+            let eperm_wrapped = dmz_sandbox::platform::PlatformError::io(
+                "Failed to execute sandbox-exec",
+                io::Error::from_raw_os_error(libc::EPERM),
+            );
+            let eperm_diag = DiagnosticError::classify(&eperm_wrapped);
+            assert_eq!(eperm_diag.category, ErrorCategory::PermissionDenied);
+            assert!(eperm_diag.remediation.contains("EPERM"));
+
+            let stringified = dmz_sandbox::platform::PlatformError::SeatbeltError(
+                "Failed to execute sandbox-exec: Operation not permitted (os error 1)".into(),
+            );
+            let str_diag = DiagnosticError::classify(&stringified);
+            assert_eq!(str_diag.category, ErrorCategory::PermissionDenied);
+        }
     }
 
     #[test]

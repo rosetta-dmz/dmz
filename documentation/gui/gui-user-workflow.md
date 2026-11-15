@@ -63,6 +63,7 @@ DMZ uses a shared active workspace concept across all operations:
 
 1. On the isolated or target machine, launch `dmz-gui` and select **Air-Gap Manager**.
 2. Set **Workspace directory** to your destination folder where you want the project unpacked.
+   > **macOS Tip:** Prefer a neutral directory such as `~/workspaces/<project>` rather than macOS TCC-protected folders (`~/Documents`, `~/Desktop`, `~/Downloads`) to avoid `Operation not permitted (os error 1)` denials.
 3. In **Bundle Archive**, enter or **Browse...** to select the `.tar.zst` file to import.
 4. Toggles:
    - Enable **Install offline dependencies into workspace** to automatically link locked prod/dev packages from `dmz.lock` into `node_modules`, `.cargo`, or single-copy `.dmz/venv` (linked via `.venv/.../dmz_store.pth`).
@@ -75,5 +76,5 @@ DMZ uses a shared active workspace concept across all operations:
 ## Isolated Sandbox Testing (Workspace Sandbox Tab)
 
 1. Select the **Workspace Sandbox** tab.
-2. Confirm **Workspace directory** and toggle **Sandbox Process Isolation** or network access.
-3. Enter your test command (e.g. `cargo check --offline` or `npm test`) and click **Execute in Sandbox**, or click **Launch isolated terminal shell session** to inspect the workspace in an interactive shell.
+2. Confirm **Workspace directory** and toggle **Sandbox Process Isolation**, **Outbound Network Access**, **Automated Error Diagnostics**, **Strict Kernel Isolation Mode**, or **Strict Ancestor Metadata Rules** (restricts macOS Seatbelt metadata reads strictly to workspace and store ancestor paths; off by default to use Bazel-style global metadata reads for reliable `getcwd()` and path canonicalization).
+3. Enter your test command (e.g. `cargo check --offline` or `npm test`) and click **Execute Command in Sandbox**, or click **Launch Interactive Shell** to inspect the workspace in an interactive shell.

@@ -48,6 +48,31 @@ pub use run::run_run;
 pub use sandbox::run_sandbox;
 pub use shell::run_shell;
 
+/// Formats a path or argument safely for copy-pasteable shell snippets and error hints.
+pub fn quote_shell_arg(arg: &str) -> String {
+    if arg.is_empty() {
+        return if cfg!(windows) {
+            "\"\"".to_string()
+        } else {
+            "''".to_string()
+        };
+    }
+
+    let is_safe_unquoted = arg.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '.' | '_' | '-' | '/' | ':' | '@' | '+' | '=' | ',' | '~')
+    });
+    if is_safe_unquoted {
+        return arg.to_string();
+    }
+
+    if cfg!(windows) {
+        format!("\"{}\"", arg.replace('"', "\\\""))
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
+}
+
 /// Prints target host prerequisite notes (such as macOS Apple CLT/Xcode) after air-gap export.
 pub fn notify_export_host_prerequisites(
     workspace_canon: &Path,
@@ -97,6 +122,7 @@ pub fn dispatch(command: Commands) -> anyhow::Result<i32> {
             closure,
             allow_network,
             strict_kernel,
+            strict_metadata,
             diagnose,
             exec_command,
             args,
@@ -106,6 +132,7 @@ pub fn dispatch(command: Commands) -> anyhow::Result<i32> {
             closure,
             allow_network,
             strict_kernel,
+            strict_metadata,
             diagnose,
             exec_command,
             args,
@@ -129,6 +156,7 @@ pub fn dispatch(command: Commands) -> anyhow::Result<i32> {
             closure,
             allow_network,
             no_sandbox,
+            strict_metadata,
             shell,
             command,
             args,
@@ -138,6 +166,7 @@ pub fn dispatch(command: Commands) -> anyhow::Result<i32> {
             closure,
             allow_network,
             no_sandbox,
+            strict_metadata,
             shell,
             command,
             args,
