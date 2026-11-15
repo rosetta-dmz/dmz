@@ -67,9 +67,16 @@ pub fn fetch_single_package(
     })?;
 
     // Fast-path: check if a verified artifact already exists in the store cache
-    if let Some(cached) = check_cached_artifact(&pkg_dir, &safe_pkg_name, &clean_version, &map_key)
+    if let Some((cached_key, mut cached_pkg)) =
+        check_cached_artifact(&pkg_dir, &safe_pkg_name, &clean_version, &map_key)
     {
-        return Ok(Some(cached));
+        if pkg.member_id.is_some() {
+            cached_pkg.member_id = pkg.member_id.clone();
+        }
+        if cached_pkg.dependencies.is_empty() && !pkg.dependencies.is_empty() {
+            cached_pkg.dependencies = pkg.dependencies.clone();
+        }
+        return Ok(Some((cached_key, cached_pkg)));
     }
 
     let resolved = resolve_download_url(

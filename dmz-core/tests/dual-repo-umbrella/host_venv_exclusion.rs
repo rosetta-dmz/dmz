@@ -187,15 +187,26 @@ fn test_host_venv_excluded_and_target_venv_and_vscode_settings_materialized_offl
         "Single-copy .venv layout must not duplicate unpacked packages under .venv/lib/"
     );
 
-    // 3. Python member .vscode/settings.json has ${workspaceFolder}/.venv/bin/python or Windows equivalent
+    // 3. Python member .vscode/settings.json must NOT emit unlabeled ${workspaceFolder}/.venv/...
+    // (which causes VS Code multi-root ambiguity errors); instead the root `.code-workspace` scopes
+    // the interpreter with `${workspaceFolder:py-service}/.venv/...`.
     let py_vscode =
         fs::read_to_string(target_dir.join("workspaces/py-service/.vscode/settings.json"))
             .expect("py-service .vscode/settings.json should exist");
+    let py_vscode_json: serde_json::Value = serde_json::from_str(&py_vscode).unwrap();
     assert!(
-        py_vscode.contains("${workspaceFolder}/.venv/bin/python")
-            || py_vscode.contains("${workspaceFolder}/.venv/Scripts/python.exe"),
-        "Expected scoped .venv interpreter path in py-service settings, got:\n{}",
+        py_vscode_json.get("python.defaultInterpreterPath").is_none(),
+        "Umbrella member .vscode/settings.json must not emit unlabeled python.defaultInterpreterPath, got:\n{}",
         py_vscode
+    );
+    assert_eq!(py_vscode_json["python.terminal.activateEnvironment"], true);
+
+    let cw_raw = fs::read_to_string(target_dir.join("hermetic-dual-suite.code-workspace")).unwrap();
+    assert!(
+        cw_raw.contains("${workspaceFolder:py-service}/.venv/bin/python")
+            || cw_raw.contains("${workspaceFolder:py-service}/.venv/Scripts/python.exe"),
+        "Expected label-scoped .venv interpreter path in .code-workspace, got:\n{}",
+        cw_raw
     );
 
     // 4. Tauri companion member must NOT have python.defaultInterpreterPath in its .vscode/settings.json

@@ -210,6 +210,7 @@ pub fn hydrate_offline_dependencies_with_options(
                 dir,
                 include_dev,
             );
+            crate::install::mappers::NpmMapper::hydrate_npm_workspace_members(dir, include_dev);
             crate::install::mappers::PnpmMapper::ensure_modules_yaml_with_options(dir, include_dev);
         }
 
@@ -220,7 +221,9 @@ pub fn hydrate_offline_dependencies_with_options(
             workspace_project.is_some() || workspace_root.join("dmz-workspace.toml").exists();
         if has_python {
             let member_venv = dir.join(".venv");
-            if member_venv.is_dir() {
+            if member_venv.is_dir()
+                || crate::install::mappers::PyPiMapper::has_available_base_python(dir)
+            {
                 let py_ver = crate::install::mappers::PyPiMapper::detect_python_version(dir);
                 if let Err(e) = crate::install::mappers::PyPiMapper::hydrate_venv_environment(
                     dir,
@@ -245,31 +248,12 @@ pub fn hydrate_offline_dependencies_with_options(
                     serde_json::Map::new()
                 };
 
-                // Only reference interpreters that exist on disk; otherwise drop any stale value
-                // carried in from the bundle so VS Code can auto-discover (no dangling path error).
-                let bundled_py = workspace_root.join(".dmz/toolchains/python");
-                let venv_interpreter =
-                    crate::workspace::interpreter::venv_interpreter_rel(&member_venv);
-                let bundled_interpreter =
-                    crate::workspace::interpreter::bundled_interpreter_rel(&bundled_py);
-
-                if let Some(rel) = venv_interpreter {
-                    settings_map.insert(
-                        "python.defaultInterpreterPath".into(),
-                        serde_json::Value::String(format!("${{workspaceFolder}}/.venv/{}", rel)),
-                    );
-                } else if let Some(rel) = bundled_interpreter {
-                    let rel_py = relative_path_between(dir, &bundled_py);
-                    settings_map.insert(
-                        "python.defaultInterpreterPath".into(),
-                        serde_json::Value::String(format!(
-                            "${{workspaceFolder}}/{}/{}",
-                            rel_py, rel
-                        )),
-                    );
-                } else {
-                    settings_map.remove("python.defaultInterpreterPath");
-                }
+                // Multi-root `.code-workspace` configures each folder's interpreter via
+                // `${workspaceFolder:<label>}/.venv/...`. Keep folder-level `.vscode/settings.json`
+                // free of unlabeled `${workspaceFolder}/...` interpreter paths to avoid VS Code
+                // multi-root resolution ambiguity errors.
+                settings_map.remove("python.defaultInterpreterPath");
+                settings_map.remove("python.pythonPath");
                 settings_map.insert(
                     "python.terminal.activateEnvironment".into(),
                     serde_json::Value::Bool(true),

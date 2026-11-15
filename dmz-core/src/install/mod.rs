@@ -382,9 +382,11 @@ impl InstallerEngine {
             warn!(error = %e, "Failed to generate environment activator scripts during post-install");
         }
 
-        // 4. Wire transitive pnpm dependency symlinks inside `.pnpm/` virtual store and ensure .modules.yaml
+        // 4. Wire transitive pnpm dependency symlinks inside `.pnpm/` virtual store,
+        //    hydrate workspace sub-package `node_modules` + `.bin/*` shims, and ensure .modules.yaml
         for dir in &target_dirs {
             mappers::PnpmMapper::wire_pnpm_dependency_links(dir, lockfile)?;
+            mappers::NpmMapper::hydrate_npm_workspace_members(dir, include_dev);
             mappers::PnpmMapper::ensure_modules_yaml_with_options(dir, include_dev);
         }
 

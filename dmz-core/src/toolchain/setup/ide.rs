@@ -299,7 +299,7 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), ToolchainError
         let bundled_rel =
             crate::workspace::interpreter::bundled_interpreter_rel(&toolchains_dir.join("python"));
 
-        if !is_umbrella && (!is_umbrella_member || has_python_project || venv_rel.is_some()) {
+        if !is_umbrella && !is_umbrella_member {
             if let Some(rel) = venv_rel {
                 settings.insert(
                     "python.defaultInterpreterPath".into(),
@@ -321,9 +321,19 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), ToolchainError
                 settings.remove("python.defaultInterpreterPath");
                 settings.remove("python.pythonPath");
             }
-        } else if is_umbrella {
+        } else {
+            // Umbrella roots and multi-root members must never set an unlabeled
+            // `${workspaceFolder}/...` `python.defaultInterpreterPath` in folder-level
+            // `.vscode/settings.json`; multi-root `.code-workspace` configures each
+            // member via `${workspaceFolder:<label>}/.venv/...`.
             settings.remove("python.defaultInterpreterPath");
             settings.remove("python.pythonPath");
+            if is_umbrella_member && (has_python_project || venv_rel.is_some()) {
+                settings.insert(
+                    "python.terminal.activateEnvironment".into(),
+                    serde_json::Value::Bool(true),
+                );
+            }
         }
 
         if !is_umbrella
@@ -455,6 +465,22 @@ pub(crate) fn build_multi_root_workspace_doc(
         if is_node {
             node_bin_unix.push(format!("{}/node_modules/.bin", folder_var));
             node_bin_win.push(format!("{}\\node_modules\\.bin", folder_var));
+            for sub_dir in
+                crate::resolver::manifest::npm::NpmManifestScanner::discover_npm_workspace_package_dirs(
+                    m.fs_dir,
+                )
+            {
+                if let Ok(rel) = sub_dir.strip_prefix(m.fs_dir) {
+                    let rel_unix = rel.to_string_lossy().replace('\\', "/");
+                    let rel_win = rel_unix.replace('/', "\\");
+                    if !rel_unix.is_empty() && rel_unix != "." {
+                        node_bin_unix
+                            .push(format!("{}/{}/node_modules/.bin", folder_var, rel_unix));
+                        node_bin_win
+                            .push(format!("{}\\{}\\node_modules\\.bin", folder_var, rel_win));
+                    }
+                }
+            }
         }
 
         let mut folder_entry = serde_json::json!({

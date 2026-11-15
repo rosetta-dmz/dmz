@@ -525,6 +525,17 @@ export PATH
         None
     }
 
+    /// Returns `true` when either a bundled Python toolchain or a host Python interpreter
+    /// outside any workspace `.venv` is available to hydrate a virtual environment.
+    pub fn has_available_base_python(workspace_path: &Path) -> bool {
+        Self::resolve_base_python_with_path(
+            workspace_path,
+            &workspace_path.join(".venv"),
+            std::env::var_os("PATH").as_deref(),
+        )
+        .is_some()
+    }
+
     fn normalize_lexical(path: &Path) -> PathBuf {
         let mut out = PathBuf::new();
         for comp in path.components() {

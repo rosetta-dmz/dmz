@@ -23,6 +23,16 @@ impl DependencyFetcher {
         lockfile_path: &Path,
         store_path: &Path,
     ) -> Result<usize, ResolverError> {
+        let npm_base = std::env::var("DMZ_REGISTRY_NPM")
+            .unwrap_or_else(|_| "https://registry.npmjs.org".to_string());
+        Self::fetch_dependencies_with_npm_base(lockfile_path, store_path, &npm_base)
+    }
+
+    pub(crate) fn fetch_dependencies_with_npm_base(
+        lockfile_path: &Path,
+        store_path: &Path,
+        npm_base: &str,
+    ) -> Result<usize, ResolverError> {
         info!(path = ?lockfile_path, "Reading lockfile to fetch real dependency artifacts into store...");
 
         if !lockfile_path.exists() {
@@ -52,8 +62,7 @@ impl DependencyFetcher {
             .unwrap_or_else(|_| "https://crates.io/api/v1/crates".to_string());
         let crates_dl_base = std::env::var("DMZ_REGISTRY_CRATES_DL")
             .unwrap_or_else(|_| "https://static.crates.io/crates".to_string());
-        let npm_base = std::env::var("DMZ_REGISTRY_NPM")
-            .unwrap_or_else(|_| "https://registry.npmjs.org".to_string());
+        let npm_base = npm_base.to_string();
         let pypi_base = std::env::var("DMZ_REGISTRY_PYPI")
             .unwrap_or_else(|_| "https://pypi.org/pypi".to_string());
         let golang_proxy_base = std::env::var("DMZ_REGISTRY_GOLANG")
@@ -105,6 +114,12 @@ impl DependencyFetcher {
             .values()
             .filter(|p| p.ecosystem == Ecosystem::PyPI)
             .map(|p| ManifestScanner::normalize_pypi_name(&p.name))
+            .collect();
+        let mut seen_npm: std::collections::HashSet<(Option<String>, String)> = lockfile
+            .packages
+            .values()
+            .filter(|p| p.ecosystem == Ecosystem::Npm)
+            .map(|p| (p.member_id.clone(), p.name.clone()))
             .collect();
 
         let num_workers = std::thread::available_parallelism()
@@ -221,6 +236,51 @@ impl DependencyFetcher {
                                         },
                                     ));
                                 }
+                            }
+                        }
+                    } else if updated_pkg.ecosystem == Ecosystem::Npm {
+                        for dep_str in &updated_pkg.dependencies {
+                            let trimmed = dep_str.trim();
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+                            let (dep_name, dep_ver) = match trimmed.rsplit_once('@') {
+                                Some((name, ver)) if !name.is_empty() => {
+                                    (name.trim().to_string(), ver.trim().to_string())
+                                }
+                                _ => (trimmed.to_string(), "*".to_string()),
+                            };
+                            if dep_name.is_empty()
+                                || dep_ver.starts_with("file:")
+                                || dep_ver.starts_with("workspace:")
+                                || dep_ver.starts_with("link:")
+                                || dep_ver.starts_with("git+")
+                                || dep_ver.contains("://")
+                                || !ManifestScanner::is_compatible_npm_platform_pkg_for_target(
+                                    &dep_name,
+                                    target_platform.as_deref(),
+                                )
+                            {
+                                continue;
+                            }
+                            if seen_npm.insert((updated_pkg.member_id.clone(), dep_name.clone())) {
+                                let dummy_hash = DmzLockfile::hash_bytes(
+                                    format!("{}:{}:{:?}", dep_name, dep_ver, Ecosystem::Npm)
+                                        .as_bytes(),
+                                );
+                                let dep_key = format!("{}:{}", dep_name, dep_ver);
+                                next_wave.push((
+                                    dep_key,
+                                    LockedPackage {
+                                        name: dep_name,
+                                        version: dep_ver,
+                                        ecosystem: Ecosystem::Npm,
+                                        sha256: dummy_hash,
+                                        source_url: None,
+                                        dependencies: Vec::new(),
+                                        member_id: updated_pkg.member_id.clone(),
+                                    },
+                                ));
                             }
                         }
                     }
@@ -769,5 +829,183 @@ mod tests {
         assert!(!reloaded_dirty
             .packages
             .contains_key("dirty_pkg>=1.0:path:local_pkg"));
+    }
+
+    #[test]
+    fn test_fetch_dependencies_npm_transitive_semver_and_cache_preserves_member_id() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{}", addr);
+
+        let vite_tgz = b"mock-vite-tarball-bytes".to_vec();
+        let esbuild_tgz = b"mock-esbuild-tarball-bytes".to_vec();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_srv = Arc::clone(&stop);
+        let base_for_srv = base_url.clone();
+        let server_handle = std::thread::spawn(move || {
+            listener.set_nonblocking(true).ok();
+            while !stop_srv.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buf = [0u8; 4096];
+                        let n = stream.read(&mut buf).unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        let path = req
+                            .lines()
+                            .next()
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .unwrap_or("/");
+                        let (status, ctype, body): (&str, &str, Vec<u8>) = match path {
+                            "/vite" => {
+                                let json = format!(
+                                    r#"{{
+                                        "dist-tags": {{"latest": "6.0.11"}},
+                                        "versions": {{
+                                            "5.4.0": {{
+                                                "dist": {{"tarball": "{base}/vite/-/vite-5.4.0.tgz"}}
+                                            }},
+                                            "6.0.11": {{
+                                                "dependencies": {{"esbuild": "^0.24.0"}},
+                                                "optionalDependencies": {{"fsevents-win32-only-nonexistent-win32-x64": "1.0.0"}},
+                                                "dist": {{"tarball": "{base}/vite/-/vite-6.0.11.tgz"}}
+                                            }},
+                                            "7.0.0-alpha.1": {{
+                                                "dist": {{"tarball": "{base}/vite/-/vite-7.0.0-alpha.1.tgz"}}
+                                            }}
+                                        }}
+                                    }}"#,
+                                    base = base_for_srv
+                                );
+                                ("200 OK", "application/json", json.into_bytes())
+                            }
+                            "/esbuild" => {
+                                let json = format!(
+                                    r#"{{
+                                        "dist-tags": {{"latest": "0.25.0"}},
+                                        "versions": {{
+                                            "0.24.2": {{
+                                                "dist": {{"tarball": "{base}/esbuild/-/esbuild-0.24.2.tgz"}}
+                                            }},
+                                            "0.25.0": {{
+                                                "dist": {{"tarball": "{base}/esbuild/-/esbuild-0.25.0.tgz"}}
+                                            }}
+                                        }}
+                                    }}"#,
+                                    base = base_for_srv
+                                );
+                                ("200 OK", "application/json", json.into_bytes())
+                            }
+                            "/vite/-/vite-6.0.11.tgz" => {
+                                ("200 OK", "application/octet-stream", vite_tgz.clone())
+                            }
+                            "/esbuild/-/esbuild-0.24.2.tgz" => {
+                                ("200 OK", "application/octet-stream", esbuild_tgz.clone())
+                            }
+                            _ => ("404 Not Found", "text/plain", b"not found".to_vec()),
+                        };
+                        let header = format!(
+                            "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            status,
+                            ctype,
+                            body.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes());
+                        let _ = stream.write_all(&body);
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let temp = tempdir().unwrap();
+        let store_path = temp.path().join("store");
+
+        // Run 1: Member A fetches vite@^6.0.0 -> resolves 6.0.11 and transitively fetches esbuild@^0.24.0 -> 0.24.2 (not 0.25.0)
+        let lock_a = temp.path().join("dmz_a.lock");
+        let pkg_a = LockedPackage {
+            name: "vite".to_string(),
+            version: "^6.0.0".to_string(),
+            ecosystem: Ecosystem::Npm,
+            sha256: DmzLockfile::hash_bytes(b"vite:^6.0.0:Npm"),
+            source_url: None,
+            dependencies: Vec::new(),
+            member_id: Some("member-a".to_string()),
+        };
+        DmzLockfile::new(vec![pkg_a]).save(&lock_a).unwrap();
+
+        let count_a =
+            DependencyFetcher::fetch_dependencies_with_npm_base(&lock_a, &store_path, &base_url)
+                .expect("fetch run A");
+        assert_eq!(count_a, 2, "Should fetch vite and transitive esbuild");
+
+        let reloaded_a = DmzLockfile::load_and_verify(&lock_a).unwrap();
+        let vite_a = reloaded_a
+            .packages
+            .values()
+            .find(|p| p.name == "vite")
+            .expect("vite in lockfile A");
+        assert_eq!(vite_a.version, "6.0.11");
+        assert_eq!(vite_a.member_id.as_deref(), Some("member-a"));
+
+        let esbuild_a = reloaded_a
+            .packages
+            .values()
+            .find(|p| p.name == "esbuild")
+            .expect("transitive esbuild in lockfile A");
+        assert_eq!(
+            esbuild_a.version, "0.24.2",
+            "^0.24.0 must match 0.24.2, not 0.25.0"
+        );
+        assert_eq!(esbuild_a.member_id.as_deref(), Some("member-a"));
+
+        // Run 2: Member B resolves exact vite@6.0.11 from store cache and must keep member_id = "member-b"
+        let lock_b = temp.path().join("dmz_b.lock");
+        let pkg_b = LockedPackage {
+            name: "vite".to_string(),
+            version: "6.0.11".to_string(),
+            ecosystem: Ecosystem::Npm,
+            sha256: vite_a.sha256.clone(),
+            source_url: None,
+            dependencies: Vec::new(),
+            member_id: Some("member-b".to_string()),
+        };
+        DmzLockfile::new(vec![pkg_b]).save(&lock_b).unwrap();
+
+        let count_b =
+            DependencyFetcher::fetch_dependencies_with_npm_base(&lock_b, &store_path, &base_url)
+                .expect("fetch run B");
+        assert_eq!(count_b, 2, "Cache hit on vite should still expand esbuild");
+
+        let reloaded_b = DmzLockfile::load_and_verify(&lock_b).unwrap();
+        let vite_b = reloaded_b
+            .packages
+            .values()
+            .find(|p| p.name == "vite")
+            .expect("vite in lockfile B");
+        assert_eq!(
+            vite_b.member_id.as_deref(),
+            Some("member-b"),
+            "Store cache hit must preserve caller's member_id instead of cached member-a"
+        );
+        let esbuild_b = reloaded_b
+            .packages
+            .values()
+            .find(|p| p.name == "esbuild")
+            .expect("esbuild in lockfile B");
+        assert_eq!(esbuild_b.member_id.as_deref(), Some("member-b"));
+
+        stop.store(true, Ordering::Relaxed);
+        let _ = server_handle.join();
     }
 }

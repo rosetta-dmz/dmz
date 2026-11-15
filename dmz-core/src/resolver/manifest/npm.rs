@@ -1,7 +1,7 @@
 use super::types::{DependencySpec, Ecosystem, ManifestError, ManifestInfo};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct NpmManifestScanner;
 
@@ -16,13 +16,49 @@ impl NpmManifestScanner {
         include_dev: bool,
         results: &mut Vec<ManifestInfo>,
     ) -> Result<(), ManifestError> {
+        let mut visited_manifests = HashSet::new();
         let package_json_path = root_path.join("package.json");
         if package_json_path.exists() {
-            results.extend(Self::parse_package_json_with_options(
+            Self::parse_package_json_with_options_visited(
                 &package_json_path,
                 target_platform,
                 include_dev,
-            )?);
+                &mut visited_manifests,
+                results,
+            )?;
+        } else {
+            // Handle pnpm workspaces / monorepos that omit a root package.json
+            let workspace_dirs = Self::discover_npm_workspace_package_dirs(root_path);
+            for sub_dir in workspace_dirs {
+                let sub_pkg_json = sub_dir.join("package.json");
+                if sub_pkg_json.is_file() {
+                    Self::parse_package_json_with_options_visited(
+                        &sub_pkg_json,
+                        target_platform,
+                        include_dev,
+                        &mut visited_manifests,
+                        results,
+                    )?;
+                }
+            }
+            let pnpm_lock = root_path.join("pnpm-lock.yaml");
+            if pnpm_lock.is_file() {
+                let empty = HashSet::new();
+                let locked = Self::parse_pnpm_lock_with_options(
+                    &pnpm_lock,
+                    target_platform,
+                    include_dev,
+                    &empty,
+                    &empty,
+                );
+                if !locked.is_empty() {
+                    results.push(ManifestInfo {
+                        ecosystem: Ecosystem::Npm,
+                        path: pnpm_lock,
+                        dependencies: locked,
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -64,6 +100,29 @@ impl NpmManifestScanner {
         include_dev: bool,
     ) -> Result<Vec<ManifestInfo>, ManifestError> {
         let mut results = Vec::new();
+        let mut visited = HashSet::new();
+        Self::parse_package_json_with_options_visited(
+            path,
+            target_platform,
+            include_dev,
+            &mut visited,
+            &mut results,
+        )?;
+        Ok(results)
+    }
+
+    fn parse_package_json_with_options_visited(
+        path: &Path,
+        target_platform: Option<&str>,
+        include_dev: bool,
+        visited_manifests: &mut HashSet<PathBuf>,
+        results: &mut Vec<ManifestInfo>,
+    ) -> Result<(), ManifestError> {
+        let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if !visited_manifests.insert(canonical) {
+            return Ok(());
+        }
+
         let content = fs::read_to_string(path)
             .map_err(|e| ManifestError::IoError(format!("Failed to read package.json: {}", e)))?;
 
@@ -113,15 +172,15 @@ impl NpmManifestScanner {
             dependencies,
         });
 
-        Self::collect_npm_workspace_members(
-            &value,
+        Self::collect_npm_workspace_members_visited(
             root_dir,
             target_platform,
             include_dev,
-            &mut results,
+            visited_manifests,
+            results,
         );
 
-        Ok(results)
+        Ok(())
     }
 
     fn collect_pkg_json_deps(
@@ -173,49 +232,204 @@ impl NpmManifestScanner {
         (dependencies, prod_roots, dev_roots)
     }
 
-    fn collect_npm_workspace_members(
-        value: &serde_json::Value,
-        root_dir: &Path,
-        target_platform: Option<&str>,
-        include_dev: bool,
-        results: &mut Vec<ManifestInfo>,
-    ) {
-        let workspaces_array = value
-            .get("workspaces")
-            .and_then(|w| w.as_array())
-            .or_else(|| {
-                value
-                    .get("workspaces")
-                    .and_then(|w| w.get("packages"))
-                    .and_then(|p| p.as_array())
-            });
+    /// Discovers npm/yarn/pnpm workspace sub-package directories declared in
+    /// `package.json` (`workspaces`) or `pnpm-workspace.yaml` (`packages`).
+    pub fn discover_npm_workspace_package_dirs(root_dir: &Path) -> Vec<PathBuf> {
+        let mut patterns = Vec::new();
 
-        let Some(patterns) = workspaces_array else {
-            return;
-        };
-
-        for pattern in patterns {
-            let Some(pat_str) = pattern.as_str() else {
-                continue;
-            };
-            let clean_pat = pat_str.trim_end_matches("/*").trim_end_matches('*');
-            let target_dir = root_dir.join(clean_pat);
-            if !target_dir.exists() || !target_dir.is_dir() {
-                continue;
-            }
-            if let Ok(entries) = fs::read_dir(target_dir) {
-                for entry in entries.flatten() {
-                    let sub_pkg_json = entry.path().join("package.json");
-                    if sub_pkg_json.exists() {
-                        if let Ok(sub_manifests) = Self::parse_package_json_with_options(
-                            &sub_pkg_json,
-                            target_platform,
-                            include_dev,
-                        ) {
-                            results.extend(sub_manifests);
+        let pkg_json_path = root_dir.join("package.json");
+        if let Ok(content) = fs::read_to_string(&pkg_json_path) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
+                let workspaces_array =
+                    value
+                        .get("workspaces")
+                        .and_then(|w| w.as_array())
+                        .or_else(|| {
+                            value
+                                .get("workspaces")
+                                .and_then(|w| w.get("packages"))
+                                .and_then(|p| p.as_array())
+                        });
+                if let Some(arr) = workspaces_array {
+                    for pat in arr {
+                        if let Some(s) = pat.as_str() {
+                            patterns.push(s.trim().to_string());
                         }
                     }
                 }
+            }
+        }
+
+        let pnpm_ws_path = root_dir.join("pnpm-workspace.yaml");
+        if let Ok(content) = fs::read_to_string(&pnpm_ws_path) {
+            patterns.extend(Self::parse_pnpm_workspace_yaml_patterns(&content));
+        }
+
+        let mut included = BTreeSet::new();
+        let mut excluded = HashSet::new();
+        let root_canon = fs::canonicalize(root_dir).unwrap_or_else(|_| root_dir.to_path_buf());
+
+        for raw_pat in patterns {
+            let pat = raw_pat.trim().trim_matches('\'').trim_matches('"');
+            if pat.is_empty() {
+                continue;
+            }
+            let (is_negated, clean) = if let Some(rest) = pat.strip_prefix('!') {
+                (true, rest.trim())
+            } else {
+                (false, pat)
+            };
+            let clean = clean.trim_start_matches("./").trim_end_matches('/');
+            if clean.is_empty() || clean == "." {
+                continue;
+            }
+
+            let mut matched = Vec::new();
+            Self::expand_workspace_pattern(root_dir, clean, &mut matched);
+            for dir in matched {
+                let canon = fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+                if !canon.starts_with(&root_canon) || canon == root_canon {
+                    continue;
+                }
+                if is_negated {
+                    excluded.insert(canon);
+                } else {
+                    included.insert((canon, dir));
+                }
+            }
+        }
+
+        included
+            .into_iter()
+            .filter(|(canon, _)| !excluded.contains(canon))
+            .map(|(_, dir)| dir)
+            .collect()
+    }
+
+    fn parse_pnpm_workspace_yaml_patterns(content: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut in_packages = false;
+        let mut packages_indent = 0usize;
+
+        for line in content.lines() {
+            let trimmed_end = line.trim_end();
+            let trimmed = trimmed_end.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let indent = trimmed_end.len() - trimmed_end.trim_start().len();
+            if trimmed == "packages:" {
+                in_packages = true;
+                packages_indent = indent;
+                continue;
+            }
+            if !in_packages {
+                continue;
+            }
+            if indent <= packages_indent && !trimmed.starts_with('-') {
+                in_packages = false;
+                continue;
+            }
+            if let Some(item) = trimmed.strip_prefix('-') {
+                let clean = item
+                    .split('#')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_matches('\'')
+                    .trim_matches('"')
+                    .to_string();
+                if !clean.is_empty() {
+                    out.push(clean);
+                }
+            }
+        }
+        out
+    }
+
+    fn expand_workspace_pattern(root_dir: &Path, pattern: &str, out: &mut Vec<PathBuf>) {
+        if pattern.contains("**") {
+            let base = pattern
+                .split("**")
+                .next()
+                .unwrap_or("")
+                .trim_end_matches('/');
+            let start = if base.is_empty() {
+                root_dir.to_path_buf()
+            } else {
+                root_dir.join(base)
+            };
+            Self::collect_recursive_package_dirs(&start, 0, out);
+            return;
+        }
+
+        if let Some(prefix) = pattern
+            .strip_suffix("/*")
+            .or_else(|| pattern.strip_suffix('*'))
+        {
+            let base_dir = if prefix.is_empty() {
+                root_dir.to_path_buf()
+            } else {
+                root_dir.join(prefix.trim_end_matches('/'))
+            };
+            if let Ok(entries) = fs::read_dir(base_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() && path.join("package.json").is_file() {
+                        out.push(path);
+                    }
+                }
+            }
+            return;
+        }
+
+        let exact_dir = root_dir.join(pattern);
+        if exact_dir.is_dir() && exact_dir.join("package.json").is_file() {
+            out.push(exact_dir);
+        }
+    }
+
+    fn collect_recursive_package_dirs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        if depth > 6 || !dir.is_dir() {
+            return;
+        }
+        if depth > 0 && dir.join("package.json").is_file() {
+            out.push(dir.to_path_buf());
+        }
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if crate::workspace::should_skip_workspace_artifact_dir(&path, &name_str, None) {
+                continue;
+            }
+            Self::collect_recursive_package_dirs(&path, depth + 1, out);
+        }
+    }
+
+    fn collect_npm_workspace_members_visited(
+        root_dir: &Path,
+        target_platform: Option<&str>,
+        include_dev: bool,
+        visited_manifests: &mut HashSet<PathBuf>,
+        results: &mut Vec<ManifestInfo>,
+    ) {
+        for sub_dir in Self::discover_npm_workspace_package_dirs(root_dir) {
+            let sub_pkg_json = sub_dir.join("package.json");
+            if sub_pkg_json.is_file() {
+                let _ = Self::parse_package_json_with_options_visited(
+                    &sub_pkg_json,
+                    target_platform,
+                    include_dev,
+                    visited_manifests,
+                    results,
+                );
             }
         }
     }
@@ -480,10 +694,11 @@ impl NpmManifestScanner {
             return None;
         }
         // Strip peer dependency suffix such as `pkg@1.0.0(react@18.0.0)` or `pkg@1.0.0_react@18.0.0`
+        // AFTER isolating `name` from `version`, so underscores inside package names (e.g. `lodash_es`)
+        // are preserved.
         let base = key.split('(').next().unwrap_or(key);
-        let base = base.split('_').next().unwrap_or(base);
 
-        let (name, ver) = if let Some(rest) = base.strip_prefix('@') {
+        let (name, raw_ver) = if let Some(rest) = base.strip_prefix('@') {
             let slash_idx = rest.find('/')?;
             let after_scope = &rest[slash_idx + 1..];
             if let Some(at_idx) = after_scope.find('@') {
@@ -503,6 +718,7 @@ impl NpmManifestScanner {
             (&base[..slash_idx], &base[slash_idx + 1..])
         };
 
+        let ver = raw_ver.split('_').next().unwrap_or(raw_ver);
         if name.is_empty() || !ver.chars().next().is_some_and(|c| c.is_ascii_digit()) {
             return None;
         }

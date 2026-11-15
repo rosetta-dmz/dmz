@@ -11,6 +11,7 @@
 mod generic_sibling_roundtrip;
 mod host_venv_exclusion;
 mod manifest_scanner;
+mod primary_python_sidecar_pnpm_vite_tauri;
 mod primary_python_sidecar_tauri;
 mod primary_tauri_sidecar_python;
 

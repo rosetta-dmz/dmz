@@ -536,7 +536,13 @@ impl ResolverEngine {
                 let dummy_hash = DmzLockfile::hash_bytes(
                     format!("{}:{}:{:?}", companion_name, pkg.version, Ecosystem::Npm).as_bytes(),
                 );
-                if !locked_packages.iter().any(|p| p.name == companion_name) {
+                if !locked_packages
+                    .iter()
+                    .any(|p| p.name == companion_name && p.member_id == pkg.member_id)
+                    && !companion_pkgs.iter().any(|p: &LockedPackage| {
+                        p.name == companion_name && p.member_id == pkg.member_id
+                    })
+                {
                     companion_pkgs.push(LockedPackage {
                         name: companion_name,
                         version: pkg.version.clone(),

@@ -89,46 +89,53 @@ pub fn sanitize_vscode_settings_interpreters(dir: &Path, workspace_root: &Path) 
     };
 
     let mut changed = obj.remove("python.pythonPath").is_some();
+    let is_umbrella_member =
+        dir != workspace_root && workspace_root.join("dmz-workspace.toml").is_file();
 
     if let Some(current) = obj
         .get(SETTING_KEY)
         .and_then(|v| v.as_str())
         .map(String::from)
     {
-        let expanded = expand_folder_vars(&current, dir, None);
-        let expanded_path = Path::new(&expanded);
-        let exists = if expanded_path.is_absolute() {
-            expanded_path.is_file()
-        } else {
-            dir.join(expanded_path).is_file()
-        };
-
-        if !exists {
-            let member_venv = dir.join(".venv");
-            let bundled_dir = workspace_root.join(".dmz/toolchains/python");
-            if let Some(rel) = venv_interpreter_rel(&member_venv) {
-                obj.insert(
-                    SETTING_KEY.to_string(),
-                    serde_json::Value::String(format!("${{workspaceFolder}}/.venv/{}", rel)),
-                );
-            } else if let Some(rel) = bundled_interpreter_rel(&bundled_dir) {
-                let rel_member = dir
-                    .strip_prefix(workspace_root)
-                    .unwrap_or_else(|_| Path::new("."));
-                let prefix = relative_root_prefix(rel_member);
-                let target = if prefix == "." {
-                    format!("${{workspaceFolder}}/.dmz/toolchains/python/{}", rel)
-                } else {
-                    format!(
-                        "${{workspaceFolder}}/{}/.dmz/toolchains/python/{}",
-                        prefix, rel
-                    )
-                };
-                obj.insert(SETTING_KEY.to_string(), serde_json::Value::String(target));
-            } else {
-                obj.remove(SETTING_KEY);
-            }
+        if is_umbrella_member && current.starts_with("${workspaceFolder}/") {
+            obj.remove(SETTING_KEY);
             changed = true;
+        } else {
+            let expanded = expand_folder_vars(&current, dir, None);
+            let expanded_path = Path::new(&expanded);
+            let exists = if expanded_path.is_absolute() {
+                expanded_path.is_file()
+            } else {
+                dir.join(expanded_path).is_file()
+            };
+
+            if !exists {
+                let member_venv = dir.join(".venv");
+                let bundled_dir = workspace_root.join(".dmz/toolchains/python");
+                if let Some(rel) = venv_interpreter_rel(&member_venv) {
+                    obj.insert(
+                        SETTING_KEY.to_string(),
+                        serde_json::Value::String(format!("${{workspaceFolder}}/.venv/{}", rel)),
+                    );
+                } else if let Some(rel) = bundled_interpreter_rel(&bundled_dir) {
+                    let rel_member = dir
+                        .strip_prefix(workspace_root)
+                        .unwrap_or_else(|_| Path::new("."));
+                    let prefix = relative_root_prefix(rel_member);
+                    let target = if prefix == "." {
+                        format!("${{workspaceFolder}}/.dmz/toolchains/python/{}", rel)
+                    } else {
+                        format!(
+                            "${{workspaceFolder}}/{}/.dmz/toolchains/python/{}",
+                            prefix, rel
+                        )
+                    };
+                    obj.insert(SETTING_KEY.to_string(), serde_json::Value::String(target));
+                } else {
+                    obj.remove(SETTING_KEY);
+                }
+                changed = true;
+            }
         }
     }
 
@@ -426,6 +433,25 @@ mod tests {
         assert_eq!(
             after_keep["python.defaultInterpreterPath"],
             "${workspaceFolder}/.venv/bin/python"
+        );
+
+        // In an umbrella workspace, member `.vscode/settings.json` must drop unlabeled
+        // `${workspaceFolder}/...` interpreter paths even when `.venv/bin/python` exists.
+        fs::write(
+            tmp.path().join("dmz-workspace.toml"),
+            "[workspace]\nname = \"u\"\n",
+        )
+        .unwrap();
+        sanitize_vscode_settings_interpreters(&member, tmp.path());
+        let after_umbrella_strip: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(member.join(".vscode/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            after_umbrella_strip
+                .get("python.defaultInterpreterPath")
+                .is_none(),
+            "umbrella member settings.json must strip unlabeled ${{workspaceFolder}}/ path"
         );
     }
 }
