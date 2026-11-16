@@ -63,7 +63,7 @@ fi
 # Locate Apple SDK root from explicit SDKROOT or host macOS CLT/Xcode prerequisite
 _SDK="${SDKROOT}"
 if [ -z "$_SDK" ] || [ ! -d "$_SDK" ]; then
-    if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ -x /usr/bin/xcrun ]; then
+    if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ -x /usr/bin/xcrun ] && { [ -d /Library/Developer/CommandLineTools/SDKs ] || [ -L /var/db/xcode_select_link ] || [ -n "${DEVELOPER_DIR:-}" ]; }; then
         _HOST_SDK="$(/usr/bin/xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
         if [ -n "$_HOST_SDK" ] && [ -d "$_HOST_SDK" ]; then
             _SDK="$_HOST_SDK"

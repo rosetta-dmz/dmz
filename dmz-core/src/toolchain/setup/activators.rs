@@ -224,7 +224,7 @@ fi
     {
         env_sh_content.push_str(
             r#"
-if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ -z "${SDKROOT:-}" ] && [ -x /usr/bin/xcrun ]; then
+if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ -z "${SDKROOT:-}" ] && [ -x /usr/bin/xcrun ] && { [ -d /Library/Developer/CommandLineTools/SDKs ] || [ -L /var/db/xcode_select_link ] || [ -n "${DEVELOPER_DIR:-}" ]; }; then
     _DMZ_HOST_SDK="$(/usr/bin/xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
     if [ -n "$_DMZ_HOST_SDK" ] && [ -d "$_DMZ_HOST_SDK" ]; then
         export SDKROOT="$_DMZ_HOST_SDK"

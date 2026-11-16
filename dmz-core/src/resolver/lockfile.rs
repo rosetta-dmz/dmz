@@ -171,6 +171,83 @@ impl DmzLockfile {
         }
     }
 
+    /// Returns `true` when this lockfile is stale for the requested options OR when declared Node
+    /// manifests in `workspace_root` / `multi_workspace` have external dependencies not yet covered.
+    pub fn is_stale_for_workspace(
+        &self,
+        workspace_root: &Path,
+        target_platform: Option<&str>,
+        include_dev: bool,
+        multi_workspace: Option<&crate::workspace::WorkspaceProjectConfig>,
+    ) -> bool {
+        if self.is_stale_for_bundle(target_platform, include_dev, multi_workspace) {
+            return true;
+        }
+
+        let check_dir_needs_npm = |dir: &Path, member_id: Option<&str>| -> bool {
+            if !dir.is_dir() {
+                return false;
+            }
+            let has_npm_in_lock = self.packages.values().any(|p| {
+                p.ecosystem == Ecosystem::Npm
+                    && match member_id {
+                        Some(mid) => p.member_id.as_deref() == Some(mid) || p.member_id.is_none(),
+                        None => true,
+                    }
+            });
+            if has_npm_in_lock {
+                return false;
+            }
+            let mut manifests = Vec::new();
+            let _ = crate::resolver::manifest::npm::NpmManifestScanner::scan_with_options(
+                dir,
+                target_platform,
+                include_dev,
+                &mut manifests,
+            );
+            manifests.iter().any(|m| !m.dependencies.is_empty())
+        };
+
+        if let Some(mws) = multi_workspace {
+            for member in &mws.members {
+                let member_dir = if member.path.is_absolute() {
+                    member.path.clone()
+                } else {
+                    workspace_root.join(&member.path)
+                };
+                if check_dir_needs_npm(&member_dir, Some(member.id.as_str())) {
+                    return true;
+                }
+            }
+        } else if check_dir_needs_npm(workspace_root, None) {
+            return true;
+        }
+
+        false
+    }
+
+    /// Workspace-aware lockfile refresh check verifying both metadata options and uncovered manifests.
+    pub fn file_needs_refresh_for_workspace(
+        lockfile_path: &Path,
+        workspace_root: &Path,
+        target_platform: Option<&str>,
+        include_dev: bool,
+        multi_workspace: Option<&crate::workspace::WorkspaceProjectConfig>,
+    ) -> bool {
+        if !lockfile_path.exists() {
+            return true;
+        }
+        match Self::load_and_verify(lockfile_path) {
+            Ok(existing) => existing.is_stale_for_workspace(
+                workspace_root,
+                target_platform,
+                include_dev,
+                multi_workspace,
+            ),
+            Err(_) => true,
+        }
+    }
+
     /// Inserts `pkg` into `packages` using the canonical `name:version` key
     /// (disambiguated as `member_id@name:version` when another workspace member
     /// already holds the base key).
@@ -444,6 +521,22 @@ mod tests {
             Some("darwin-arm64"),
             true,
             Some(&ws_cfg)
+        ));
+
+        // Stale if workspace has Node manifests with deps yet dmz.lock holds 0 npm packages.
+        let ws_dir = temp.path().join("node-ws");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        std::fs::write(
+            ws_dir.join("package.json"),
+            r#"{"name":"web","devDependencies":{"vite":"^6.0.0"}}"#,
+        )
+        .unwrap();
+        assert!(DmzLockfile::file_needs_refresh_for_workspace(
+            &path,
+            &ws_dir,
+            Some("darwin-arm64"),
+            true,
+            None
         ));
     }
 }

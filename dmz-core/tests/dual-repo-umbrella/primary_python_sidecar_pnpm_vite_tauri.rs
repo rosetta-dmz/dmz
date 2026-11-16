@@ -790,3 +790,158 @@ snapshots:
         "Expected nested fallback install to materialize node_modules/.bin/vite when member_id is None"
     );
 }
+
+#[test]
+fn test_dual_repo_root_plus_nested_frontend_and_code_only_store_reuse_import() {
+    let temp = tempdir().unwrap();
+    let base = temp.path();
+
+    let primary_dir = base.join("api-primary");
+    fs::create_dir_all(&primary_dir).unwrap();
+    fs::write(
+        primary_dir.join("pyproject.toml"),
+        "[project]\nname = \"api-primary\"\nversion = \"0.1.0\"\ndependencies = []\n",
+    )
+    .unwrap();
+
+    // Sidecar has BOTH root wrapper package.json (without `"workspaces"`) AND nested `frontend/`
+    let sidecar_dir = base.join("hybrid-ui");
+    let frontend_dir = sidecar_dir.join("frontend");
+    fs::create_dir_all(frontend_dir.join("src-tauri/src")).unwrap();
+    fs::write(
+        sidecar_dir.join("package.json"),
+        r#"{"name":"root-wrapper","scripts":{"dev":"pnpm --dir frontend dev"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        frontend_dir.join("package.json"),
+        r#"{"name":"frontend-app","devDependencies":{"vite":"^6.0.11"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        frontend_dir.join("pnpm-lock.yaml"),
+        r#"lockfileVersion: '9.0'
+importers:
+  .:
+    devDependencies:
+      vite:
+        specifier: ^6.0.11
+        version: 6.0.11
+packages:
+  vite@6.0.11:
+    resolution: {integrity: sha512-ddd}
+    hasBin: true
+snapshots:
+  vite@6.0.11: {}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        frontend_dir.join("src-tauri/Cargo.toml"),
+        "[package]\nname = \"hybrid-tauri\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(frontend_dir.join("src-tauri/src/main.rs"), "fn main() {}").unwrap();
+
+    let manifest = WorkspaceProjectConfig::new(
+        "wrapper-plus-frontend",
+        vec![
+            WorkspaceMember::new("api", Path::new("."), MemberRole::Primary),
+            WorkspaceMember::new("ui", Path::new("../hybrid-ui"), MemberRole::Sidecar),
+        ],
+    );
+
+    let mut lockfile = ResolverEngine::resolve_multi_workspace_with_options(
+        &primary_dir,
+        &manifest,
+        None,
+        &ResolveOptions {
+            target_platform: None,
+            include_dev: true,
+        },
+    )
+    .expect("resolve wrapper + nested frontend");
+    assert!(
+        lockfile.packages.values().any(|p| p.name == "vite"),
+        "Expected vite inside undeclared nested frontend/ to resolve even when root package.json exists"
+    );
+
+    let store_dir = primary_dir.join(".dmz/store");
+    fs::create_dir_all(&store_dir).unwrap();
+    populate_store_for_lockfile(&store_dir, &mut lockfile);
+    let lockfile_path = primary_dir.join("dmz.lock");
+    lockfile.save(&lockfile_path).unwrap();
+
+    // First import Unified bundle to populate target store
+    let unified_archive = primary_dir.join("dist/unified.tar.zst");
+    AirGapExporter::export(&ExportConfig {
+        workspace_path: primary_dir.clone(),
+        lockfile_path: lockfile_path.clone(),
+        store_dir: store_dir.clone(),
+        output_path: unified_archive.clone(),
+        zstd_level: 1,
+        mode: ExportMode::Unified,
+        include_dev: true,
+        multi_workspace: Some(manifest.clone()),
+        ..Default::default()
+    })
+    .expect("export unified");
+
+    let target_dir = base.join("imported-wrapper");
+    AirGapImporter::import(&ImportConfig {
+        archive_path: unified_archive,
+        target_store_dir: target_dir.join(".dmz/store"),
+        target_workspace_dir: target_dir.clone(),
+        verify_closure_hash: true,
+        include_dev: true,
+        install_dependencies: true,
+    })
+    .expect("import unified");
+
+    let imported_fe = target_dir.join("workspaces/ui/frontend");
+    assert!(
+        imported_fe.join("node_modules/.bin/vite").is_file(),
+        "Expected undeclared nested frontend/node_modules/.bin/vite"
+    );
+
+    // Re-importing a CodeOnly bundle when `.dmz/store` already exists must still install node_modules
+    fs::remove_dir_all(imported_fe.join("node_modules")).unwrap();
+    let code_archive = primary_dir.join("dist/code_only.tar.zst");
+    AirGapExporter::export(&ExportConfig {
+        workspace_path: primary_dir,
+        lockfile_path,
+        store_dir,
+        output_path: code_archive.clone(),
+        zstd_level: 1,
+        mode: ExportMode::CodeOnly,
+        include_dev: true,
+        multi_workspace: Some(manifest),
+        ..Default::default()
+    })
+    .expect("export code_only");
+
+    AirGapImporter::import(&ImportConfig {
+        archive_path: code_archive,
+        target_store_dir: target_dir.join(".dmz/store"),
+        target_workspace_dir: target_dir.clone(),
+        verify_closure_hash: true,
+        include_dev: true,
+        install_dependencies: true,
+    })
+    .expect("import code_only with existing store");
+
+    assert!(
+        imported_fe.join("node_modules/.bin/vite").is_file(),
+        "Expected CodeOnly import with cached store to materialize frontend/node_modules/.bin/vite"
+    );
+
+    // Generated env.sh must guard /usr/bin/xcrun behind filesystem CLT checks so it never triggers GUI popups
+    dmz_core::toolchain::ToolchainSetup::generate_activator_scripts(&target_dir).unwrap();
+    let env_sh = fs::read_to_string(target_dir.join(".dmz/env.sh")).unwrap();
+    if env_sh.contains("/usr/bin/xcrun") {
+        assert!(
+            env_sh.contains("/var/db/xcode_select_link"),
+            "Expected env.sh to guard /usr/bin/xcrun with filesystem CLT check"
+        );
+    }
+}

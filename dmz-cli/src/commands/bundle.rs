@@ -82,8 +82,9 @@ pub fn run_bundle(args: BundleArgs) -> anyhow::Result<i32> {
 
     // Resolve manifests if lockfile is missing, stale, or refresh_lock is requested
     let should_resolve = args.refresh_lock
-        || dmz_core::resolver::lockfile::DmzLockfile::file_needs_refresh(
+        || dmz_core::resolver::lockfile::DmzLockfile::file_needs_refresh_for_workspace(
             &effective_lockfile,
+            &ws_canon,
             args.target.as_deref(),
             include_dev,
             multi_workspace.as_ref(),

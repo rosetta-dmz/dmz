@@ -118,9 +118,71 @@ pub(crate) fn target_is_macos(target_platform: Option<&str>) -> bool {
     }
 }
 
-/// Returns `true` when running on macOS and active Apple CLT / Xcode provides `tool` via `xcrun`.
+fn has_real_apple_compiler(dev_dir: &Path) -> bool {
+    dev_dir.join("usr/bin/clang").is_file()
+        || dev_dir
+            .join("Toolchains/XcodeDefault.xctoolchain/usr/bin/clang")
+            .is_file()
+}
+
+/// Discovers an installed Apple Command Line Tools / Xcode developer directory using pure
+/// filesystem checks (`DEVELOPER_DIR`, `/var/db/xcode_select_link`, `/Library/Developer/CommandLineTools`,
+/// `/Applications/Xcode*.app/Contents/Developer`) without spawning `/usr/bin/xcrun` or `/usr/bin/xcode-select`.
+pub fn discover_filesystem_developer_dir() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(dev_env) = std::env::var_os("DEVELOPER_DIR").filter(|v| !v.is_empty()) {
+        candidates.push(PathBuf::from(dev_env));
+    }
+    if let Ok(link_target) = std::fs::read_link("/var/db/xcode_select_link") {
+        candidates.push(link_target);
+    }
+    candidates.push(PathBuf::from("/Library/Developer/CommandLineTools"));
+    candidates.push(PathBuf::from("/Applications/Xcode.app/Contents/Developer"));
+
+    if let Ok(apps) = std::fs::read_dir("/Applications") {
+        for entry in apps.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("Xcode") && name_str.ends_with(".app") {
+                candidates.push(entry.path().join("Contents/Developer"));
+            }
+        }
+    }
+
+    candidates
+        .into_iter()
+        .find(|cand| cand.is_dir() && cand != Path::new("/") && has_real_apple_compiler(cand))
+}
+
+/// Resolves a real Apple Developer binary (`install_name_tool`, `otool`, `clang`, etc.) directly
+/// inside a verified developer directory without invoking `/usr/bin/*` GUI prompt stubs.
+pub fn resolve_real_apple_developer_tool(tool: &str) -> Option<PathBuf> {
+    let dev_dir = discover_filesystem_developer_dir()?;
+    for rel in [
+        Path::new("usr/bin").join(tool),
+        Path::new("Toolchains/XcodeDefault.xctoolchain/usr/bin").join(tool),
+    ] {
+        let candidate = dev_dir.join(rel);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Returns `true` when running on macOS and active Apple CLT / Xcode provides `tool`.
 pub(crate) fn host_apple_clt_provides(tool: &str) -> bool {
     if !cfg!(target_os = "macos") {
+        return false;
+    }
+    if resolve_real_apple_developer_tool(tool).is_some() {
+        return true;
+    }
+    if discover_filesystem_developer_dir().is_none() {
         return false;
     }
     run_apple_tool_trimmed("/usr/bin/xcrun", &["--find", tool]).is_ok()
@@ -245,19 +307,26 @@ fn run_apple_tool_trimmed(tool_path: &str, args: &[&str]) -> Result<String, Stri
     }
 }
 
-/// Probes host Apple Command Line Tools / Xcode installation and license acceptance on macOS.
+/// Probes host Apple Command Line Tools / Xcode installation and license acceptance on macOS
+/// without triggering the `/usr/bin/xcrun` GUI installer popup when developer tools are absent.
 pub fn check_apple_developer_tools() -> ApplePrereqStatus {
-    let dev_out = match run_apple_tool_trimmed("/usr/bin/xcode-select", &["-p"]) {
-        Ok(out) => out,
-        Err(err) => return classify_xcrun_failure(&err, None),
+    let Some(developer_dir) = discover_filesystem_developer_dir() else {
+        return ApplePrereqStatus::NotInstalled {
+            reason: "no active Apple Command Line Tools or Xcode directory found on disk"
+                .to_string(),
+        };
     };
 
-    let developer_dir = PathBuf::from(&dev_out);
-    if !developer_dir.is_dir() || developer_dir == Path::new("/") {
+    let dev_out = match run_apple_tool_trimmed("/usr/bin/xcode-select", &["-p"]) {
+        Ok(out) => PathBuf::from(out),
+        Err(_) => developer_dir,
+    };
+
+    if !dev_out.is_dir() || dev_out == Path::new("/") {
         return ApplePrereqStatus::NotInstalled {
             reason: format!(
                 "active developer directory does not exist: {}",
-                redact_home_prefix(&developer_dir)
+                redact_home_prefix(&dev_out)
             ),
         };
     }
@@ -265,7 +334,7 @@ pub fn check_apple_developer_tools() -> ApplePrereqStatus {
     let sdk_out =
         match run_apple_tool_trimmed("/usr/bin/xcrun", &["--sdk", "macosx", "--show-sdk-path"]) {
             Ok(out) => out,
-            Err(err) => return classify_xcrun_failure(&err, Some(developer_dir)),
+            Err(err) => return classify_xcrun_failure(&err, Some(dev_out)),
         };
 
     let sdk_path = PathBuf::from(&sdk_out);
@@ -282,24 +351,32 @@ pub fn check_apple_developer_tools() -> ApplePrereqStatus {
     if let Err(err) =
         run_apple_tool_trimmed("/usr/bin/xcrun", &["--sdk", "macosx", "--find", "clang"])
     {
-        return classify_xcrun_failure(&err, Some(developer_dir));
+        return classify_xcrun_failure(&err, Some(dev_out));
     }
 
     let sdk_version =
         run_apple_tool_trimmed("/usr/bin/xcrun", &["--sdk", "macosx", "--show-sdk-version"]).ok();
 
     ApplePrereqStatus::Ready {
-        developer_dir,
+        developer_dir: dev_out,
         sdk_path,
         sdk_version,
     }
 }
 
-/// Resolves the active host macOS SDK root path via `/usr/bin/xcrun`, if ready.
+/// Resolves the active host macOS SDK root path from `SDKROOT` or verified Apple CLT/Xcode
+/// without spawning `/usr/bin/xcrun` when CLT/Xcode is missing.
 pub fn resolve_host_macos_sdk_path() -> Option<PathBuf> {
     if !cfg!(target_os = "macos") {
         return None;
     }
+    if let Some(sdkroot) = std::env::var_os("SDKROOT").filter(|v| !v.is_empty()) {
+        let p = PathBuf::from(sdkroot);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    discover_filesystem_developer_dir()?;
     let sdk_out =
         run_apple_tool_trimmed("/usr/bin/xcrun", &["--sdk", "macosx", "--show-sdk-path"]).ok()?;
     let sdk_path = PathBuf::from(sdk_out);
@@ -308,6 +385,27 @@ pub fn resolve_host_macos_sdk_path() -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+/// Returns `true` when Apple CLT is ready OR an explicit `SDKROOT` pairs with a bundled/standalone C compiler.
+pub fn has_usable_apple_sdk_or_clt(workspace_root: &Path) -> bool {
+    if !cfg!(target_os = "macos") {
+        return true;
+    }
+    if let Some(sdkroot) = std::env::var_os("SDKROOT").filter(|v| !v.is_empty()) {
+        let sdk_dir = PathBuf::from(sdkroot);
+        if sdk_dir.is_dir()
+            && (crate::toolchain::ToolchainEnv::find_binary(
+                &workspace_root.join(".dmz/toolchains/cc"),
+                "bin/clang",
+            )
+            .is_some()
+                || super::discovery::find_standalone_bin_in_path("clang", true).is_some())
+        {
+            return true;
+        }
+    }
+    check_apple_developer_tools().is_ready()
 }
 
 /// Verifies macOS Apple CLT/Xcode prerequisites when required by `ecosystems`.
@@ -464,5 +562,13 @@ mod tests {
         assert!(!target_is_macos(Some("linux-x86_64")));
         assert!(!target_is_macos(Some("windows-x86_64")));
         assert_eq!(target_is_macos(None), cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn test_real_developer_tool_resolver_never_returns_usr_bin_stub() {
+        if let Some(tool) = resolve_real_apple_developer_tool("install_name_tool") {
+            assert_ne!(tool.parent(), Some(Path::new("/usr/bin")));
+            assert!(tool.is_file());
+        }
     }
 }

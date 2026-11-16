@@ -16,8 +16,10 @@ pub use discovery::{
 pub use env::ToolchainEnv;
 pub use packager::ToolchainArchivePackager;
 pub use preflight::{
-    check_apple_developer_tools, ecosystems_use_native_or_apple_tooling, export_apple_prereq_note,
+    check_apple_developer_tools, discover_filesystem_developer_dir,
+    ecosystems_use_native_or_apple_tooling, export_apple_prereq_note,
     export_apple_prereq_note_for_ecosystems, export_apple_prereq_note_from_lockfile,
+    has_usable_apple_sdk_or_clt, resolve_real_apple_developer_tool,
     verify_apple_prereq_for_ecosystems, verify_apple_prereq_for_workspace,
     workspace_requires_apple_clt, ApplePrereqStatus,
 };

@@ -582,11 +582,6 @@ impl AirGapImporter {
             }
         }
 
-        // Enforce host OS baseline prerequisites on target machines (e.g., macOS Apple CLT/Xcode)
-        if let Err(e) = crate::toolchain::verify_apple_prereq_for_ecosystems(&declared_ecosystems) {
-            return Err(ImportError::VerificationFailed(e.to_string()));
-        }
-
         // Automatically discover workspace project manifest if not already populated from airgap_manifest.json
         if workspace_project.is_none() {
             if let Some((discovered, _)) =
@@ -599,20 +594,20 @@ impl AirGapImporter {
         }
 
         // Materialize offline dependencies (.venv, node_modules, .cargo/vendor) from the local store
-        // BEFORE generating final IDE settings and hydrating workspace configurations.
+        // BEFORE generating final IDE settings, hydrating workspace configurations, or checking optional host SDKs.
         let lockfile_path = effective_workspace.join("dmz.lock");
         let mut installed_packages = 0usize;
         let mut install_warning = None;
-        if install_dependencies
-            && lockfile_path.is_file()
-            && effective_store.is_dir()
-            && imported_count > 0
-        {
-            let has_installable_packages = parsed_lockfile
+        if install_dependencies && lockfile_path.is_file() && effective_store.is_dir() {
+            let installable_pkgs: Vec<&crate::resolver::lockfile::LockedPackage> = parsed_lockfile
                 .as_ref()
-                .map(|l| l.packages.values().any(|p| !p.is_local_path()))
-                .unwrap_or(false);
-            if has_installable_packages {
+                .map(|l| l.packages.values().filter(|p| !p.is_local_path()).collect())
+                .unwrap_or_default();
+            let store_has_cached = imported_count > 0
+                || installable_pkgs.iter().any(|pkg| {
+                    crate::install::locate_locked_store_artifact(effective_store, pkg).is_ok()
+                });
+            if !installable_pkgs.is_empty() && store_has_cached {
                 let install_cfg = crate::install::InstallConfig {
                     workspace_path: effective_workspace.to_path_buf(),
                     lockfile_path,
@@ -651,6 +646,21 @@ impl AirGapImporter {
             workspace_project.as_ref(),
             resolved_include_dev,
         );
+
+        // Non-blocking macOS host SDK/CLT check (zero GUI popup): import and node_modules/.venv
+        // materialization never abort on missing CLT; surface advisory only when native build tools are absent.
+        if !crate::toolchain::has_usable_apple_sdk_or_clt(effective_workspace) {
+            if let Err(e) =
+                crate::toolchain::verify_apple_prereq_for_ecosystems(&declared_ecosystems)
+            {
+                let note = e.to_string();
+                warn!(warning = %note, "macOS host prerequisite notice after import");
+                install_warning = Some(match install_warning {
+                    Some(prev) => format!("{prev}; {note}"),
+                    None => note,
+                });
+            }
+        }
 
         // Re-synchronize IDE settings and .code-workspace after .venv and node_modules are materialized
         if let Err(e) = crate::toolchain::ToolchainSetup::generate_ide_settings(effective_workspace)

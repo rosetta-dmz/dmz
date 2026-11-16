@@ -26,18 +26,16 @@ impl NpmManifestScanner {
             results,
         )?;
 
-        if results.iter().all(|m| m.ecosystem != Ecosystem::Npm) {
-            for nested_root in crate::workspace::discover_node_project_roots(root_path) {
-                if nested_root != root_path {
-                    Self::scan_node_dir_with_options(
-                        &nested_root,
-                        None,
-                        target_platform,
-                        include_dev,
-                        &mut visited_manifests,
-                        results,
-                    )?;
-                }
+        for nested_root in crate::workspace::discover_node_project_roots(root_path) {
+            if nested_root != root_path {
+                Self::scan_node_dir_with_options(
+                    &nested_root,
+                    None,
+                    target_platform,
+                    include_dev,
+                    &mut visited_manifests,
+                    results,
+                )?;
             }
         }
         Ok(())

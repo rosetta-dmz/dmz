@@ -85,11 +85,6 @@ fn resolve_multi_workspace_for_session(
     sidecar_role: &str,
     persist_manifest: bool,
 ) -> Option<dmz_core::workspace::WorkspaceProjectConfig> {
-    if let Some(cfg) = dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile_scoped(
-        ws_canon, lockfile,
-    ) {
-        return Some(cfg);
-    }
     if is_dual_repo && !sidecar_path.trim().is_empty() {
         let cfg =
             super::build_dual_repo_project_config(ws_canon, sidecar_path, sidecar_id, sidecar_role);
@@ -105,7 +100,9 @@ fn resolve_multi_workspace_for_session(
         }
         return Some(cfg);
     }
-    None
+    dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile_scoped(
+        ws_canon, lockfile,
+    )
 }
 
 fn collect_missing_node_modules_dirs(
@@ -405,8 +402,9 @@ pub(super) fn show(
                             true,
                         );
 
-                        if dmz_core::resolver::lockfile::DmzLockfile::file_needs_refresh(
+                        if dmz_core::resolver::lockfile::DmzLockfile::file_needs_refresh_for_workspace(
                             &lockfile,
+                            &ws_canon,
                             target_opt.as_deref(),
                             include_dev,
                             multi_workspace.as_ref(),

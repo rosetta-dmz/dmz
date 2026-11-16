@@ -19,22 +19,37 @@ pub fn has_node_project_manifest(dir: &Path) -> bool {
         || dir.join("yarn.lock").is_file()
 }
 
-/// Discovers Node project roots inside `member_dir`: returns `[member_dir]` when the root
-/// itself holds a Node manifest/lockfile, otherwise performs a bounded, symlink-safe walk
-/// (`depth <= 4`, entry cap `<= 512`) to find nested Node roots (e.g., `frontend/`, `apps/desktop/`).
+/// Discovers Node project roots inside `member_dir`: includes `member_dir` if it holds a
+/// Node manifest/lockfile AND performs a bounded, symlink-safe walk (`depth <= 4`, cap `<= 512`)
+/// to locate any independent nested Node roots (e.g., `frontend/`) outside declared workspace globs.
 pub fn discover_node_project_roots(member_dir: &Path) -> Vec<PathBuf> {
     if !member_dir.is_dir() {
         return Vec::new();
     }
-    if has_node_project_manifest(member_dir) {
-        return vec![member_dir.to_path_buf()];
-    }
     let Ok(canon_root) = fs::canonicalize(member_dir) else {
         return Vec::new();
     };
+    let mut roots = Vec::new();
+    if has_node_project_manifest(member_dir) {
+        roots.push(member_dir.to_path_buf());
+    }
+
+    let declared_ws_dirs: HashSet<PathBuf> = if member_dir.join("package.json").is_file()
+        || member_dir.join("pnpm-workspace.yaml").is_file()
+    {
+        crate::resolver::manifest::npm::NpmManifestScanner::discover_npm_workspace_package_dirs(
+            member_dir,
+        )
+        .into_iter()
+        .map(|d| fs::canonicalize(&d).unwrap_or(d))
+        .collect()
+    } else {
+        HashSet::new()
+    };
+
     let mut visited = HashSet::new();
     visited.insert(canon_root.clone());
-    let mut roots = Vec::new();
+    let mut nested = Vec::new();
     let mut scanned = 0usize;
     collect_nested_project_roots(
         member_dir,
@@ -42,11 +57,20 @@ pub fn discover_node_project_roots(member_dir: &Path) -> Vec<PathBuf> {
         0,
         &mut scanned,
         &mut visited,
-        &mut roots,
+        &mut nested,
         &|dir| has_node_project_manifest(dir),
         true,
     );
-    roots.sort();
+    nested.sort();
+    for dir in nested {
+        let canon = fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        let is_declared_ws_pkg = declared_ws_dirs
+            .iter()
+            .any(|ws_dir| canon == *ws_dir || canon.starts_with(ws_dir));
+        if !is_declared_ws_pkg && !roots.contains(&dir) {
+            roots.push(dir);
+        }
+    }
     roots
 }
 
@@ -542,6 +566,30 @@ role = "sidecar"
 
         let cargo_dirs = discover_tauri_cargo_dirs(&member);
         assert_eq!(cargo_dirs, vec![frontend.join("src-tauri")]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_discover_node_roots_includes_root_plus_undeclared_frontend_and_excludes_monorepo_globs(
+    ) -> Result<(), Box<dyn Error>> {
+        let tmp = tempdir()?;
+        let root = tmp.path();
+        let ws_pkg = root.join("packages/ui");
+        let standalone_fe = root.join("frontend");
+        fs::create_dir_all(&ws_pkg)?;
+        fs::create_dir_all(&standalone_fe)?;
+
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"wrapper","workspaces":["packages/*"]}"#,
+        )?;
+        fs::write(ws_pkg.join("package.json"), r#"{"name":"ui"}"#)?;
+        fs::write(standalone_fe.join("package.json"), r#"{"name":"frontend"}"#)?;
+
+        let roots = discover_node_project_roots(root);
+        assert!(roots.contains(&root.to_path_buf()));
+        assert!(roots.contains(&standalone_fe));
+        assert!(!roots.contains(&ws_pkg));
         Ok(())
     }
 }

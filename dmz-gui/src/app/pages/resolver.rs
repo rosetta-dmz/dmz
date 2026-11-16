@@ -534,15 +534,12 @@ pub(super) fn show(
                     state.active_task = Some(("Verifying ecosystem toolchains...".to_string(), rx));
 
                     thread::spawn(move || {
-                        if let Err(e) =
-                            dmz_core::toolchain::verify_apple_prereq_for_workspace(&workspace, None)
-                        {
-                            let _ = tx.send(ResolverTaskOutcome::StatusOnly(format!(
-                                "Toolchain verification blocked: {}",
-                                e
-                            )));
-                            ctx.request_repaint();
-                            return;
+                        if !dmz_core::toolchain::has_usable_apple_sdk_or_clt(&workspace) {
+                            if let Err(e) = dmz_core::toolchain::verify_apple_prereq_for_workspace(
+                                &workspace, None,
+                            ) {
+                                tracing::warn!(warning = %e, "Apple host prerequisite advisory");
+                            }
                         }
                         let registry = EcosystemRegistry::new();
                         let active_pairs = registry.discover_active_with_roots(&workspace);

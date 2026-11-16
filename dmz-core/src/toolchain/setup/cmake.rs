@@ -41,7 +41,7 @@ if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin" OR DEFINED ENV{SDKROOT})
     if(NOT DEFINED CMAKE_OSX_SYSROOT OR CMAKE_OSX_SYSROOT STREQUAL "")
         if(DEFINED ENV{SDKROOT} AND EXISTS "$ENV{SDKROOT}")
             set(CMAKE_OSX_SYSROOT "$ENV{SDKROOT}" CACHE PATH "Apple SDK Root" FORCE)
-        elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin" AND EXISTS "/usr/bin/xcrun")
+        elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin" AND EXISTS "/usr/bin/xcrun" AND (EXISTS "/Library/Developer/CommandLineTools/SDKs" OR EXISTS "/var/db/xcode_select_link" OR DEFINED ENV{DEVELOPER_DIR}))
             execute_process(
                 COMMAND /usr/bin/xcrun --sdk macosx --show-sdk-path
                 OUTPUT_VARIABLE _DMZ_HOST_SDKROOT

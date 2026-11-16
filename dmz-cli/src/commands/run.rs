@@ -144,11 +144,12 @@ pub fn run_run(args: RunArgs) -> anyhow::Result<i32> {
         }
     }
 
-    if let Err(e) =
-        dmz_core::toolchain::verify_apple_prereq_for_workspace(&effective_workspace_root, None)
-    {
-        error!("{}", e);
-        return Ok(1);
+    if !dmz_core::toolchain::has_usable_apple_sdk_or_clt(&effective_workspace_root) {
+        if let Err(e) =
+            dmz_core::toolchain::verify_apple_prereq_for_workspace(&effective_workspace_root, None)
+        {
+            warn!("{}", e);
+        }
     }
 
     let orchestrator = dmz_supervisor::SidecarOrchestrator::new();

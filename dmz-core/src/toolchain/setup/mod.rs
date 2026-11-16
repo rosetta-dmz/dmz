@@ -3,6 +3,7 @@
 pub mod activators;
 pub mod cmake;
 pub mod ide;
+pub mod macho;
 pub mod permissions;
 pub mod relocate;
 pub mod wrappers;
