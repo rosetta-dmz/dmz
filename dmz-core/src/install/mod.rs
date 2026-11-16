@@ -79,8 +79,8 @@ impl InstallerEngine {
                 continue;
             }
 
-            // Resolve target workspace (root or member directory)
-            let target_workspace = Self::resolve_target_workspace(
+            // Resolve target workspace(s) (root, member directory, or nested frontend root)
+            let target_workspaces = Self::resolve_target_workspaces(
                 &config.workspace_path,
                 pkg,
                 workspace_manifest.as_ref(),
@@ -93,12 +93,14 @@ impl InstallerEngine {
             Self::verify_artifact_integrity(&archive_path, pkg)?;
 
             // Ecosystem-specific deterministic linkage
-            Self::dispatch_package_mapper(
-                &target_workspace,
-                &config.workspace_path,
-                pkg,
-                &archive_path,
-            )?;
+            for target_workspace in &target_workspaces {
+                Self::dispatch_package_mapper(
+                    target_workspace,
+                    &config.workspace_path,
+                    pkg,
+                    &archive_path,
+                )?;
+            }
 
             installed_count += 1;
             info!(name = %pkg.name, version = %pkg.version, "Successfully installed package offline");
@@ -178,14 +180,45 @@ impl InstallerEngine {
         fs::canonicalize(&candidate).unwrap_or(candidate)
     }
 
-    /// Resolves target workspace directory for a package (routing to appropriate member or root)
-    fn resolve_target_workspace(
+    fn expand_ecosystem_target_dirs(dir: &Path, ecosystem: &Ecosystem) -> Vec<PathBuf> {
+        if *ecosystem == Ecosystem::Npm {
+            let roots = crate::workspace::discover_node_project_roots(dir);
+            if !roots.is_empty() {
+                return roots;
+            }
+        }
+        vec![dir.to_path_buf()]
+    }
+
+    fn member_matches_ecosystem(m_dir: &Path, ecosystem: &Ecosystem) -> bool {
+        match ecosystem {
+            Ecosystem::Npm => !crate::workspace::discover_node_project_roots(m_dir).is_empty(),
+            Ecosystem::Cargo => !crate::workspace::discover_tauri_cargo_dirs(m_dir).is_empty(),
+            Ecosystem::PyPI => {
+                m_dir.join("requirements.txt").is_file() || m_dir.join("pyproject.toml").is_file()
+            }
+            Ecosystem::Go => m_dir.join("go.mod").is_file(),
+            Ecosystem::Composer => m_dir.join("composer.json").is_file(),
+            Ecosystem::Bundler => {
+                m_dir.join("Gemfile").is_file() || m_dir.join("Gemfile.lock").is_file()
+            }
+            Ecosystem::MavenGradle => {
+                m_dir.join("pom.xml").is_file()
+                    || m_dir.join("build.gradle").is_file()
+                    || m_dir.join("build.gradle.kts").is_file()
+            }
+            _ => false,
+        }
+    }
+
+    /// Resolves all target directories for a package (member root, nested Node root, or all matching members)
+    fn resolve_target_workspaces(
         workspace_path: &Path,
         pkg: &LockedPackage,
         workspace_manifest: Option<&WorkspaceProjectConfig>,
-    ) -> PathBuf {
+    ) -> Vec<PathBuf> {
         let Some(manifest) = workspace_manifest else {
-            return workspace_path.to_path_buf();
+            return Self::expand_ecosystem_target_dirs(workspace_path, &pkg.ecosystem);
         };
 
         // 1. Try matching by member ID or role alias
@@ -213,44 +246,43 @@ impl InstallerEngine {
         if let Some(member) = member_opt {
             let member_dir = Self::resolve_member_path(workspace_path, &member.path);
             if member_dir.is_dir() {
-                return member_dir;
+                return Self::expand_ecosystem_target_dirs(&member_dir, &pkg.ecosystem);
             }
-            return workspace_path.to_path_buf();
+            return Self::expand_ecosystem_target_dirs(workspace_path, &pkg.ecosystem);
         }
 
         // 2. Intelligent Ecosystem Fallback:
-        // Route package to workspace member owning the matching ecosystem manifest
-        let ecosystem_match = manifest.members.iter().find(|m| {
-            let m_dir = Self::resolve_member_path(workspace_path, &m.path);
-            match pkg.ecosystem {
-                Ecosystem::Npm => m_dir.join("package.json").is_file(),
-                Ecosystem::Cargo => {
-                    m_dir.join("Cargo.toml").is_file()
-                        || m_dir.join("src-tauri/Cargo.toml").is_file()
+        // Route package to all workspace members owning a matching ecosystem manifest
+        let mut targets = Vec::new();
+        for member in &manifest.members {
+            let m_dir = Self::resolve_member_path(workspace_path, &member.path);
+            if Self::member_matches_ecosystem(&m_dir, &pkg.ecosystem) {
+                for dir in Self::expand_ecosystem_target_dirs(&m_dir, &pkg.ecosystem) {
+                    if !targets.contains(&dir) {
+                        targets.push(dir);
+                    }
                 }
-                Ecosystem::PyPI => {
-                    m_dir.join("requirements.txt").is_file()
-                        || m_dir.join("pyproject.toml").is_file()
-                }
-                Ecosystem::Go => m_dir.join("go.mod").is_file(),
-                Ecosystem::Composer => m_dir.join("composer.json").is_file(),
-                Ecosystem::Bundler => {
-                    m_dir.join("Gemfile").is_file() || m_dir.join("Gemfile.lock").is_file()
-                }
-                Ecosystem::MavenGradle => {
-                    m_dir.join("pom.xml").is_file()
-                        || m_dir.join("build.gradle").is_file()
-                        || m_dir.join("build.gradle.kts").is_file()
-                }
-                _ => false,
             }
-        });
-
-        if let Some(member) = ecosystem_match {
-            Self::resolve_member_path(workspace_path, &member.path)
-        } else {
-            workspace_path.to_path_buf()
         }
+
+        if targets.is_empty() {
+            Self::expand_ecosystem_target_dirs(workspace_path, &pkg.ecosystem)
+        } else {
+            targets
+        }
+    }
+
+    /// Resolves primary target workspace directory for a package (routing to appropriate member or root)
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn resolve_target_workspace(
+        workspace_path: &Path,
+        pkg: &LockedPackage,
+        workspace_manifest: Option<&WorkspaceProjectConfig>,
+    ) -> PathBuf {
+        Self::resolve_target_workspaces(workspace_path, pkg, workspace_manifest)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| workspace_path.to_path_buf())
     }
 
     /// Resolves and locates the package archive file within the store directory
@@ -350,13 +382,22 @@ impl InstallerEngine {
         lockfile: &DmzLockfile,
         workspace_manifest: Option<&WorkspaceProjectConfig>,
     ) -> Result<(), InstallError> {
-        // Collect all distinct workspace directories (root + valid members)
+        // Collect all distinct workspace directories (root + valid members + nested Node roots)
         let mut target_dirs = vec![config.workspace_path.clone()];
         if let Some(manifest) = workspace_manifest {
             for member in &manifest.members {
                 let member_dir = Self::resolve_member_path(&config.workspace_path, &member.path);
                 if member_dir.is_dir() && !target_dirs.contains(&member_dir) {
                     target_dirs.push(member_dir);
+                }
+            }
+        }
+
+        let mut node_target_dirs = target_dirs.clone();
+        for dir in &target_dirs {
+            for node_root in crate::workspace::discover_node_project_roots(dir) {
+                if node_root.is_dir() && !node_target_dirs.contains(&node_root) {
+                    node_target_dirs.push(node_root);
                 }
             }
         }
@@ -371,7 +412,7 @@ impl InstallerEngine {
         let include_dev = lockfile.include_dev.unwrap_or(true);
 
         // 2. Hydrate CLI binary shims (e.g. node_modules/.bin/tauri)
-        for dir in &target_dirs {
+        for dir in &node_target_dirs {
             mappers::NpmMapper::hydrate_workspace_bin_shims_with_options(dir, include_dev);
         }
 
@@ -384,7 +425,7 @@ impl InstallerEngine {
 
         // 4. Wire transitive pnpm dependency symlinks inside `.pnpm/` virtual store,
         //    hydrate workspace sub-package `node_modules` + `.bin/*` shims, and ensure .modules.yaml
-        for dir in &target_dirs {
+        for dir in &node_target_dirs {
             mappers::PnpmMapper::wire_pnpm_dependency_links(dir, lockfile)?;
             mappers::NpmMapper::hydrate_npm_workspace_members(dir, include_dev);
             mappers::PnpmMapper::ensure_modules_yaml_with_options(dir, include_dev);

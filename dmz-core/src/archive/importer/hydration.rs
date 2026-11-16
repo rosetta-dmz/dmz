@@ -148,45 +148,24 @@ pub fn hydrate_offline_dependencies_with_options(
             }
         }
 
-        // 1. Cargo vendoring configuration: .cargo/config.toml
+        // 1. Cargo vendoring configuration: .cargo/config.toml (root, src-tauri, and nested Tauri subprojects)
         // Per Cargo's config-relative-paths specification, `directory` in `.cargo/config.toml`
         // is resolved relative to the parent directory of `.cargo`.
-        let cargo_toml = dir.join("Cargo.toml");
-        let tauri_cargo_toml = dir.join("src-tauri/Cargo.toml");
         let member_vendor = dir.join(".cargo/vendor");
         let root_vendor = workspace_root.join(".cargo/vendor");
-
-        let (vendor_dir_root, vendor_dir_tauri, force_overwrite) = if member_vendor.is_dir() {
-            (
-                ".cargo/vendor".to_string(),
-                "../.cargo/vendor".to_string(),
-                true,
-            )
+        let (vendor_abs_opt, force_overwrite) = if member_vendor.is_dir() {
+            (Some(&member_vendor), true)
         } else if root_vendor.is_dir() {
-            (
-                relative_path_between(dir, &root_vendor),
-                relative_path_between(&dir.join("src-tauri"), &root_vendor),
-                true,
-            )
+            (Some(&root_vendor), true)
         } else {
-            (
-                relative_path_between(dir, &effective_target_store),
-                relative_path_between(&dir.join("src-tauri"), &effective_target_store),
-                false,
-            )
+            (None, false)
         };
+        let vendor_target = vendor_abs_opt.unwrap_or(&effective_target_store);
 
-        let cargo_targets = [
-            (cargo_toml.is_file(), dir.join(".cargo"), vendor_dir_root),
-            (
-                tauri_cargo_toml.is_file(),
-                dir.join("src-tauri/.cargo"),
-                vendor_dir_tauri,
-            ),
-        ];
-
-        for (exists, cargo_dir, rel_vendor) in cargo_targets {
-            if exists && fs::create_dir_all(&cargo_dir).is_ok() {
+        for cargo_manifest_dir in crate::workspace::discover_tauri_cargo_dirs(dir) {
+            let cargo_dir = cargo_manifest_dir.join(".cargo");
+            let rel_vendor = relative_path_between(&cargo_manifest_dir, vendor_target);
+            if fs::create_dir_all(&cargo_dir).is_ok() {
                 let config_path = cargo_dir.join("config.toml");
                 if force_overwrite || !config_path.exists() {
                     let cargo_config_content = format!(
@@ -204,14 +183,21 @@ pub fn hydrate_offline_dependencies_with_options(
         }
 
         // 2. Generic Node / NPM CLI shim hydration: node_modules/.bin/* and pnpm .modules.yaml
-        let package_json = dir.join("package.json");
-        if package_json.is_file() {
-            crate::install::mappers::NpmMapper::hydrate_workspace_bin_shims_with_options(
-                dir,
-                include_dev,
-            );
-            crate::install::mappers::NpmMapper::hydrate_npm_workspace_members(dir, include_dev);
-            crate::install::mappers::PnpmMapper::ensure_modules_yaml_with_options(dir, include_dev);
+        for node_root in crate::workspace::discover_node_project_roots(dir) {
+            if node_root.join("package.json").is_file() || node_root.join("node_modules").is_dir() {
+                crate::install::mappers::NpmMapper::hydrate_workspace_bin_shims_with_options(
+                    &node_root,
+                    include_dev,
+                );
+                crate::install::mappers::NpmMapper::hydrate_npm_workspace_members(
+                    &node_root,
+                    include_dev,
+                );
+                crate::install::mappers::PnpmMapper::ensure_modules_yaml_with_options(
+                    &node_root,
+                    include_dev,
+                );
+            }
         }
 
         // 3. Python folder-scoped configuration

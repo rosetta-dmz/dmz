@@ -393,9 +393,10 @@ impl AirGapExporter {
         let mut toolchain_manifest_entries = Vec::new();
         if config.with_toolchain {
             info!("Initiating host toolchain discovery and packaging");
-            match crate::toolchain::ToolchainPackager::package_toolchains_with_options(
+            match crate::toolchain::ToolchainPackager::package_toolchains_with_options_and_project(
                 &workspace_root,
                 Some(&lockfile),
+                ws_project_opt.as_ref(),
                 &mut tar_builder,
                 deterministic_epoch,
                 crate::toolchain::ToolchainDetectOptions {

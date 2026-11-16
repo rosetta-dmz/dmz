@@ -247,19 +247,17 @@ impl ResolverEngine {
 
         let mut locked_packages = Vec::new();
 
-        // Native Cargo Auto-Resolution (Root Cargo.toml or nested src-tauri/Cargo.toml)
-        let cargo_toml_path = workspace_dir.join("Cargo.toml");
-        let tauri_cargo_path = workspace_dir.join("src-tauri/Cargo.toml");
-        let effective_cargo_dir = if cargo_toml_path.exists() {
-            Some(workspace_dir.to_path_buf())
-        } else if tauri_cargo_path.exists() {
-            Some(workspace_dir.join("src-tauri"))
-        } else {
-            None
-        };
-
-        if let Some(ref cargo_dir) = effective_cargo_dir {
-            locked_packages.extend(Self::resolve_cargo_graph(cargo_dir, options)?);
+        // Native Cargo Auto-Resolution (Root Cargo.toml, src-tauri/Cargo.toml, and nested Tauri subprojects)
+        let cargo_dirs = crate::workspace::discover_tauri_cargo_dirs(workspace_dir);
+        let has_cargo_graph = !cargo_dirs.is_empty();
+        for cargo_dir in &cargo_dirs {
+            for pkg in Self::resolve_cargo_graph(cargo_dir, options)? {
+                if !locked_packages.iter().any(|p: &LockedPackage| {
+                    p.name == pkg.name && p.version == pkg.version && p.ecosystem == pkg.ecosystem
+                }) {
+                    locked_packages.push(pkg);
+                }
+            }
         }
 
         // Scan remaining non-Cargo ecosystems using options-aware ManifestScanner
@@ -273,7 +271,7 @@ impl ResolverEngine {
             // When `cargo metadata` already resolved the Cargo graph, do not re-inject
             // unpinned workspace/Cargo.toml ranges (which cause duplicate serde:1.0 entries)
             // or dev-dependencies excluded from the graph.
-            if manifest.ecosystem == Ecosystem::Cargo && effective_cargo_dir.is_some() {
+            if manifest.ecosystem == Ecosystem::Cargo && has_cargo_graph {
                 continue;
             }
             info!(ecosystem = ?manifest.ecosystem, path = ?manifest.path, "Processing manifest");

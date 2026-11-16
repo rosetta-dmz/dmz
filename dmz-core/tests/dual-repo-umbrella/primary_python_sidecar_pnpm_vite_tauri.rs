@@ -587,3 +587,206 @@ snapshots:
         );
     }
 }
+
+#[test]
+fn test_dual_repo_nested_frontend_and_toolchain_minimal_pnpm_bundle() {
+    let temp = tempdir().unwrap();
+    let base = temp.path();
+
+    // Primary: Python Repo
+    let primary_dir = base.join("api-primary");
+    fs::create_dir_all(&primary_dir).unwrap();
+    fs::write(
+        primary_dir.join("pyproject.toml"),
+        "[project]\nname = \"api-primary\"\nversion = \"0.1.0\"\ndependencies = []\n",
+    )
+    .unwrap();
+
+    // Sidecar: Nested `frontend/` + `frontend/src-tauri/` container repo
+    let sidecar_dir = base.join("desktop-shell");
+    let frontend_dir = sidecar_dir.join("frontend");
+    let tauri_dir = frontend_dir.join("src-tauri/src");
+    fs::create_dir_all(&tauri_dir).unwrap();
+    fs::write(
+        frontend_dir.join("package.json"),
+        r#"{
+  "name": "desktop-frontend",
+  "version": "1.0.0",
+  "scripts": { "dev": "vite", "tauri": "tauri" },
+  "devDependencies": { "vite": "^6.0.11" }
+}"#,
+    )
+    .unwrap();
+    fs::write(
+        frontend_dir.join("pnpm-lock.yaml"),
+        r#"lockfileVersion: '9.0'
+importers:
+  .:
+    devDependencies:
+      vite:
+        specifier: ^6.0.11
+        version: 6.0.11
+packages:
+  vite@6.0.11:
+    resolution: {integrity: sha512-ddd}
+    hasBin: true
+snapshots:
+  vite@6.0.11: {}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        frontend_dir.join("src-tauri/Cargo.toml"),
+        "[package]\nname = \"nested-tauri\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(tauri_dir.join("main.rs"), "fn main() {}").unwrap();
+
+    let manifest = WorkspaceProjectConfig::new(
+        "nested-dual",
+        vec![
+            WorkspaceMember::new("api", Path::new("."), MemberRole::Primary),
+            WorkspaceMember::new("shell", Path::new("../desktop-shell"), MemberRole::Sidecar),
+        ],
+    );
+
+    // 1. Minimal profile toolchain discovery must still detect Node/pnpm from sidecar member root!
+    let discovered_tc =
+        dmz_core::toolchain::ToolchainProvider::discover_for_workspace_with_project_and_options(
+            &primary_dir,
+            None,
+            Some(&manifest),
+            dmz_core::toolchain::ToolchainDetectOptions { include_dev: true },
+            dmz_core::toolchain::ToolchainProfile::Minimal,
+            None,
+        );
+    if let Some(node_tc) = discovered_tc
+        .iter()
+        .find(|tc| tc.ecosystem == dmz_core::toolchain::ToolchainEcosystem::Node)
+    {
+        if which::which("pnpm").is_ok() {
+            assert!(
+                node_tc.bin_files.iter().any(|(_, rel)| rel.contains("pnpm")),
+                "Expected Minimal Node toolchain for dual-repo to include pnpm when host has pnpm: {:?}",
+                node_tc.bin_files
+            );
+        }
+    }
+
+    // 2. Multi-workspace resolve + export + import roundtrip with nested frontend/
+    let mut lockfile = ResolverEngine::resolve_multi_workspace_with_options(
+        &primary_dir,
+        &manifest,
+        None,
+        &ResolveOptions {
+            target_platform: None,
+            include_dev: true,
+        },
+    )
+    .expect("resolve nested dual-repo");
+    assert!(
+        lockfile.packages.values().any(|p| p.name == "vite"),
+        "Expected vite inside nested frontend/ to be resolved"
+    );
+
+    let store_dir = primary_dir.join(".dmz/store");
+    fs::create_dir_all(&store_dir).unwrap();
+    populate_store_for_lockfile(&store_dir, &mut lockfile);
+
+    let lockfile_path = primary_dir.join("dmz.lock");
+    lockfile.save(&lockfile_path).unwrap();
+
+    let archive_path = primary_dir.join("dist/nested.tar.zst");
+    AirGapExporter::export(&ExportConfig {
+        workspace_path: primary_dir.clone(),
+        lockfile_path,
+        store_dir,
+        output_path: archive_path.clone(),
+        zstd_level: 1,
+        mode: ExportMode::Unified,
+        include_dev: true,
+        multi_workspace: Some(manifest),
+        ..Default::default()
+    })
+    .expect("export nested dual-repo");
+
+    let target_dir = base.join("imported-nested");
+    AirGapImporter::import(&ImportConfig {
+        archive_path,
+        target_store_dir: target_dir.join(".dmz/store"),
+        target_workspace_dir: target_dir.clone(),
+        verify_closure_hash: true,
+        include_dev: true,
+        install_dependencies: true,
+    })
+    .expect("import nested dual-repo");
+
+    let imported_frontend = target_dir.join("workspaces/shell/frontend");
+    assert!(
+        imported_frontend.join("node_modules/.bin/vite").is_file(),
+        "Expected nested workspaces/shell/frontend/node_modules/.bin/vite shim"
+    );
+    assert!(
+        imported_frontend
+            .join("node_modules/.modules.yaml")
+            .is_file(),
+        "Expected nested workspaces/shell/frontend/node_modules/.modules.yaml"
+    );
+
+    // Execute the offline `vite` shim via node if host has `node` available
+    if which::which("node").is_ok() {
+        let out = std::process::Command::new(imported_frontend.join("node_modules/.bin/vite"))
+            .current_dir(&imported_frontend)
+            .output()
+            .expect("run offline vite shim");
+        assert!(
+            out.status.success(),
+            "Expected offline vite shim to run cleanly: stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("vite"),
+            "Expected offline vite shim stdout to contain 'vite', got '{}'",
+            stdout
+        );
+    }
+
+    // 3. Test InstallerEngine fallback when member_id is None on lockfile packages
+    let no_member_packages: Vec<_> = lockfile
+        .packages
+        .values()
+        .cloned()
+        .map(|mut pkg| {
+            pkg.member_id = None;
+            pkg
+        })
+        .collect();
+    let no_member_lock = dmz_core::resolver::lockfile::DmzLockfile::new(no_member_packages);
+    let fallback_ws = base.join("fallback-install");
+    let fallback_frontend = fallback_ws.join("frontend");
+    fs::create_dir_all(&fallback_frontend).unwrap();
+    fs::write(
+        fallback_frontend.join("package.json"),
+        r#"{"name":"fb","devDependencies":{"vite":"^6.0.11"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        fallback_frontend.join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\n",
+    )
+    .unwrap();
+    let no_member_lock_path = fallback_ws.join("dmz.lock");
+    no_member_lock.save(&no_member_lock_path).unwrap();
+
+    dmz_core::install::InstallerEngine::install(&dmz_core::install::InstallConfig {
+        workspace_path: fallback_ws,
+        lockfile_path: no_member_lock_path,
+        store_dir: target_dir.join(".dmz/store"),
+    })
+    .expect("fallback install with member_id=None");
+    assert!(
+        fallback_frontend.join("node_modules/.bin/vite").is_file(),
+        "Expected nested fallback install to materialize node_modules/.bin/vite when member_id is None"
+    );
+}

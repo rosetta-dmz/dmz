@@ -1,6 +1,34 @@
 use super::{CommandSpec, EcosystemError, EcosystemHandler};
 use std::path::{Path, PathBuf};
 
+fn first_nested_cargo_manifest_rel(root: &Path) -> Option<String> {
+    if root.join("Cargo.toml").exists() {
+        return None;
+    }
+    crate::workspace::discover_tauri_cargo_dirs(root)
+        .into_iter()
+        .find_map(|dir| {
+            let rel = dir.strip_prefix(root).ok()?;
+            Some(rel.join("Cargo.toml").to_string_lossy().into_owned())
+        })
+}
+
+fn first_nested_node_dir_rel(root: &Path, marker: Option<&str>) -> Option<String> {
+    if root.join("package.json").exists() {
+        return None;
+    }
+    let dirs = crate::workspace::discover_node_project_roots(root);
+    let chosen = marker
+        .and_then(|file| dirs.iter().find(|d| d.join(file).exists()))
+        .or_else(|| dirs.first())?;
+    let rel = chosen.strip_prefix(root).ok()?;
+    if rel.as_os_str().is_empty() {
+        None
+    } else {
+        Some(rel.to_string_lossy().into_owned())
+    }
+}
+
 pub struct RustEcosystem;
 impl EcosystemHandler for RustEcosystem {
     fn name(&self) -> &str {
@@ -8,16 +36,18 @@ impl EcosystemHandler for RustEcosystem {
     }
 
     fn detect(&self, root: &Path) -> bool {
-        root.join("Cargo.toml").exists() || root.join("src-tauri/Cargo.toml").exists()
+        !crate::workspace::discover_tauri_cargo_dirs(root).is_empty()
     }
 
     fn cache_paths(&self, root: &Path) -> Vec<PathBuf> {
-        vec![
-            root.join(".cargo"),
-            root.join("target"),
-            root.join("src-tauri/.cargo"),
-            root.join("src-tauri/target"),
-        ]
+        let mut paths = vec![root.join(".cargo"), root.join("target")];
+        for dir in crate::workspace::discover_tauri_cargo_dirs(root) {
+            if dir != root {
+                paths.push(dir.join(".cargo"));
+                paths.push(dir.join("target"));
+            }
+        }
+        paths
     }
 
     fn resolution_command(&self) -> Option<CommandSpec> {
@@ -28,17 +58,11 @@ impl EcosystemHandler for RustEcosystem {
     }
 
     fn resolution_command_for_workspace(&self, root: &Path) -> Option<CommandSpec> {
-        let args =
-            if !root.join("Cargo.toml").exists() && root.join("src-tauri/Cargo.toml").exists() {
-                vec![
-                    "generate-lockfile".into(),
-                    "--offline".into(),
-                    "--manifest-path".into(),
-                    "src-tauri/Cargo.toml".into(),
-                ]
-            } else {
-                vec!["generate-lockfile".into(), "--offline".into()]
-            };
+        let mut args = vec!["generate-lockfile".into(), "--offline".into()];
+        if let Some(rel_manifest) = first_nested_cargo_manifest_rel(root) {
+            args.push("--manifest-path".into());
+            args.push(rel_manifest);
+        }
         Some(
             CommandSpec {
                 program: "cargo".into(),
@@ -49,17 +73,11 @@ impl EcosystemHandler for RustEcosystem {
     }
 
     fn verification_command(&self, root: &Path) -> Option<CommandSpec> {
-        let args =
-            if !root.join("Cargo.toml").exists() && root.join("src-tauri/Cargo.toml").exists() {
-                vec![
-                    "check".into(),
-                    "--offline".into(),
-                    "--manifest-path".into(),
-                    "src-tauri/Cargo.toml".into(),
-                ]
-            } else {
-                vec!["check".into(), "--offline".into()]
-            };
+        let mut args = vec!["check".into(), "--offline".into()];
+        if let Some(rel_manifest) = first_nested_cargo_manifest_rel(root) {
+            args.push("--manifest-path".into());
+            args.push(rel_manifest);
+        }
         Some(
             CommandSpec {
                 program: "cargo".into(),
@@ -99,15 +117,19 @@ impl EcosystemHandler for PnpmEcosystem {
     }
 
     fn detect(&self, root: &Path) -> bool {
-        root.join("pnpm-lock.yaml").exists()
-            || root.join("pnpm-workspace.yaml").exists()
-            || root.join("node_modules/.pnpm").is_dir()
-            || (root.join("package.json").exists() && {
-                if let Ok(c) = std::fs::read_to_string(root.join("package.json")) {
-                    c.contains("\"pnpm\"")
-                } else {
-                    false
-                }
+        crate::workspace::discover_node_project_roots(root)
+            .iter()
+            .any(|node_root| {
+                node_root.join("pnpm-lock.yaml").exists()
+                    || node_root.join("pnpm-workspace.yaml").exists()
+                    || node_root.join("node_modules/.pnpm").is_dir()
+                    || (node_root.join("package.json").exists() && {
+                        if let Ok(c) = std::fs::read_to_string(node_root.join("package.json")) {
+                            c.contains("\"pnpm\"")
+                        } else {
+                            false
+                        }
+                    })
             })
     }
 
@@ -127,10 +149,17 @@ impl EcosystemHandler for PnpmEcosystem {
     }
 
     fn verification_command(&self, root: &Path) -> Option<CommandSpec> {
+        let mut args = Vec::new();
+        if let Some(rel_dir) = first_nested_node_dir_rel(root, Some("pnpm-lock.yaml")) {
+            args.push("-C".into());
+            args.push(rel_dir);
+        }
+        args.push("ls".into());
+        args.push("--offline".into());
         Some(
             CommandSpec {
                 program: "pnpm".into(),
-                args: vec!["ls".into(), "--offline".into()],
+                args,
             }
             .resolve_in_workspace(root),
         )
@@ -144,15 +173,19 @@ impl EcosystemHandler for YarnEcosystem {
     }
 
     fn detect(&self, root: &Path) -> bool {
-        let is_yarn_project = root.join("yarn.lock").exists()
-            || root.join(".yarnrc.yml").exists()
-            || root.join(".yarnrc").exists()
-            || (root.join("package.json").exists() && {
-                if let Ok(c) = std::fs::read_to_string(root.join("package.json")) {
-                    c.contains("\"yarn\"")
-                } else {
-                    false
-                }
+        let is_yarn_project = crate::workspace::discover_node_project_roots(root)
+            .iter()
+            .any(|node_root| {
+                node_root.join("yarn.lock").exists()
+                    || node_root.join(".yarnrc.yml").exists()
+                    || node_root.join(".yarnrc").exists()
+                    || (node_root.join("package.json").exists() && {
+                        if let Ok(c) = std::fs::read_to_string(node_root.join("package.json")) {
+                            c.contains("\"yarn\"")
+                        } else {
+                            false
+                        }
+                    })
             });
 
         is_yarn_project && !PnpmEcosystem.detect(root)
@@ -174,10 +207,18 @@ impl EcosystemHandler for YarnEcosystem {
     }
 
     fn verification_command(&self, root: &Path) -> Option<CommandSpec> {
+        let mut args = Vec::new();
+        if let Some(rel_dir) = first_nested_node_dir_rel(root, Some("yarn.lock")) {
+            args.push("--cwd".into());
+            args.push(rel_dir);
+        }
+        args.push("list".into());
+        args.push("--offline".into());
+        args.push("--depth=0".into());
         Some(
             CommandSpec {
                 program: "yarn".into(),
-                args: vec!["list".into(), "--offline".into(), "--depth=0".into()],
+                args,
             }
             .resolve_in_workspace(root),
         )
@@ -191,7 +232,9 @@ impl EcosystemHandler for NpmEcosystem {
     }
 
     fn detect(&self, root: &Path) -> bool {
-        root.join("package.json").exists()
+        crate::workspace::discover_node_project_roots(root)
+            .iter()
+            .any(|node_root| node_root.join("package.json").exists())
             && !PnpmEcosystem.detect(root)
             && !YarnEcosystem.detect(root)
     }
@@ -208,10 +251,15 @@ impl EcosystemHandler for NpmEcosystem {
     }
 
     fn verification_command(&self, root: &Path) -> Option<CommandSpec> {
+        let mut args = vec!["ls".into(), "--offline".into()];
+        if let Some(rel_dir) = first_nested_node_dir_rel(root, None) {
+            args.push("--prefix".into());
+            args.push(rel_dir);
+        }
         Some(
             CommandSpec {
                 program: "npm".into(),
-                args: vec!["ls".into(), "--offline".into()],
+                args,
             }
             .resolve_in_workspace(root),
         )

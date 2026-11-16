@@ -53,10 +53,12 @@ impl ToolchainDiscoverer for NodeDiscoverer {
         );
 
         let selected_managers = select_node_managers(ctx);
+        let lib_managers = expand_managers_with_corepack(&node_bin, &selected_managers);
         let include_headers = should_include_node_headers(ctx);
         let bin_files = collect_node_binaries_for(&node_bin, &selected_managers);
-        let lib_files =
-            collect_node_libs_for(&node_root, ctx.profile, &selected_managers, include_headers);
+        let mut lib_files =
+            collect_node_libs_for(&node_root, ctx.profile, &lib_managers, include_headers);
+        collect_external_manager_libs(&bin_files, &node_root, &selected_managers, &mut lib_files);
 
         Ok(Some(DiscoveredToolchain {
             ecosystem: ToolchainEcosystem::Node,
@@ -68,13 +70,43 @@ impl ToolchainDiscoverer for NodeDiscoverer {
     }
 }
 
+fn collect_context_node_roots(ctx: &ToolchainDiscoveryContext) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let push_unique = |roots: &mut Vec<PathBuf>, p: PathBuf| {
+        if p.is_dir() && !roots.iter().any(|existing| existing == &p) {
+            roots.push(p);
+        }
+    };
+    for root in &ctx.member_roots {
+        push_unique(&mut roots, root.clone());
+    }
+    if let Some(ws) = ctx.workspace_root.as_deref() {
+        push_unique(&mut roots, ws.to_path_buf());
+    }
+    let base_roots = roots.clone();
+    for base in base_roots {
+        for node_dir in crate::workspace::discover_node_project_roots(&base) {
+            push_unique(&mut roots, node_dir);
+        }
+    }
+    roots
+}
+
+fn read_package_manager_field(dir: &Path) -> Option<String> {
+    let pkg_json = dir.join("package.json");
+    let content = fs::read_to_string(pkg_json).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&content).ok()?;
+    val.get("packageManager")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
 fn should_include_node_headers(ctx: &ToolchainDiscoveryContext) -> bool {
     ctx.profile == ToolchainProfile::Full
         || ctx.ecosystems.contains(&ToolchainEcosystem::Cc)
-        || ctx
-            .workspace_root
-            .as_deref()
-            .is_some_and(|w| w.join("binding.gyp").is_file())
+        || collect_context_node_roots(ctx)
+            .iter()
+            .any(|w| w.join("binding.gyp").is_file())
 }
 
 fn select_node_managers(ctx: &ToolchainDiscoveryContext) -> Vec<&'static str> {
@@ -82,13 +114,42 @@ fn select_node_managers(ctx: &ToolchainDiscoveryContext) -> Vec<&'static str> {
         return NODE_MANAGERS.to_vec();
     }
 
-    let Some(ws) = ctx.workspace_root.as_deref() else {
+    let roots = collect_context_node_roots(ctx);
+    if roots.is_empty() {
         return vec!["npm", "npx"];
-    };
+    }
 
-    let uses_pnpm = ws.join("pnpm-lock.yaml").is_file() || ws.join("pnpm-workspace.yaml").is_file();
-    let uses_yarn = ws.join("yarn.lock").is_file();
-    let uses_npm = ws.join("package-lock.json").is_file() || (!uses_pnpm && !uses_yarn);
+    let mut uses_pnpm = false;
+    let mut uses_yarn = false;
+    let mut uses_npm = false;
+
+    for root in &roots {
+        let pm_spec = read_package_manager_field(root);
+        let pm_name = pm_spec
+            .as_deref()
+            .and_then(|s| s.split('@').next())
+            .unwrap_or("");
+        if root.join("pnpm-lock.yaml").is_file()
+            || root.join("pnpm-workspace.yaml").is_file()
+            || pm_name == "pnpm"
+        {
+            uses_pnpm = true;
+        }
+        if root.join("yarn.lock").is_file()
+            || root.join(".yarnrc.yml").is_file()
+            || root.join(".yarnrc").is_file()
+            || pm_name == "yarn"
+        {
+            uses_yarn = true;
+        }
+        if root.join("package-lock.json").is_file() || pm_name == "npm" {
+            uses_npm = true;
+        }
+    }
+
+    if !uses_pnpm && !uses_yarn {
+        uses_npm = true;
+    }
 
     let mut managers = Vec::new();
     if uses_npm {
@@ -102,6 +163,39 @@ fn select_node_managers(ctx: &ToolchainDiscoveryContext) -> Vec<&'static str> {
         managers.push("yarn");
     }
     managers
+}
+
+fn path_targets_corepack(path: &Path) -> bool {
+    let inspect_target = |candidate: &Path| -> bool {
+        candidate
+            .components()
+            .any(|c| c.as_os_str() == std::ffi::OsStr::new("corepack"))
+    };
+    if let Ok(link_target) = fs::read_link(path) {
+        if inspect_target(&link_target) {
+            return true;
+        }
+    }
+    if let Ok(canon) = fs::canonicalize(path) {
+        if inspect_target(&canon) {
+            return true;
+        }
+    }
+    false
+}
+
+fn expand_managers_with_corepack<'a>(node_bin: &Path, selected: &[&'a str]) -> Vec<&'a str> {
+    let mut expanded: Vec<&'a str> = selected.to_vec();
+    let Some(bin_dir) = node_bin.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return expanded;
+    };
+    let needs_corepack = selected
+        .iter()
+        .any(|mgr| path_targets_corepack(&bin_dir.join(mgr)));
+    if needs_corepack && !expanded.contains(&"corepack") {
+        expanded.push("corepack");
+    }
+    expanded
 }
 
 fn collect_node_candidates() -> Vec<PathBuf> {
@@ -164,8 +258,14 @@ fn collect_node_binaries_for(node_bin: &Path, managers: &[&str]) -> Vec<(PathBuf
         if let Some(dir) = bin_dir {
             let cp = dir.join(mgr);
             if cp.is_file() {
-                bin_files.push((cp, format!("bin/{}", mgr)));
-                continue;
+                let resolved = fs::canonicalize(&cp).unwrap_or_else(|_| cp.clone());
+                if !is_non_standalone_path(&resolved)
+                    || resolved.starts_with(dir.parent().unwrap_or(dir))
+                {
+                    bin_files.push((cp, format!("bin/{}", mgr)));
+                    continue;
+                }
+                emit_non_relocatable_notice(&resolved);
             }
             if cfg!(windows) {
                 let cmd_cp = dir.join(format!("{}.cmd", mgr));
@@ -176,23 +276,70 @@ fn collect_node_binaries_for(node_bin: &Path, managers: &[&str]) -> Vec<(PathBuf
             }
         }
         if let Ok(found) = which::which(mgr) {
-            if is_non_standalone_path(&found) {
+            let resolved = fs::canonicalize(&found).unwrap_or_else(|_| found.clone());
+            if is_non_standalone_path(&found) || is_non_standalone_path(&resolved) {
                 emit_non_relocatable_notice(&found);
                 continue;
             }
-            if is_macos_usr_bin_stub(&found) {
+            if is_macos_usr_bin_stub(&found) || is_macos_usr_bin_stub(&resolved) {
                 continue;
             }
+            let redacted = redact_home_prefix(&resolved);
+            info!(
+                manager = %mgr,
+                path = %redacted,
+                "Discovered standalone host Node package manager binary"
+            );
             let name = found
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or(mgr)
                 .to_string();
-            bin_files.push((found, format!("bin/{}", name)));
+            bin_files.push((resolved, format!("bin/{}", name)));
         }
     }
 
     bin_files
+}
+
+fn collect_external_manager_libs(
+    bin_files: &[(PathBuf, String)],
+    node_root: &Path,
+    selected_managers: &[&str],
+    lib_files: &mut Vec<(PathBuf, String)>,
+) {
+    let mut seen_rel: HashSet<String> = lib_files.iter().map(|(_, rel)| rel.clone()).collect();
+    for (host_path, _) in bin_files {
+        let canon = fs::canonicalize(host_path).unwrap_or_else(|_| host_path.clone());
+        if canon.starts_with(node_root) {
+            continue;
+        }
+        // If an external package manager shim resolves inside a standalone `lib/node_modules/<mgr>/`
+        // (e.g., global pnpm or corepack install), include that module directory if allowed.
+        for ancestor in canon.ancestors() {
+            let Some(dir_name) = ancestor.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let is_allowed_mod = selected_managers.contains(&dir_name) || dir_name == "corepack";
+            let in_node_modules = ancestor
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                == Some("node_modules");
+            if is_allowed_mod && in_node_modules {
+                if let Some(nm_parent) = ancestor.parent() {
+                    let mut extra = Vec::new();
+                    collect_files_recursive(ancestor, nm_parent, &mut extra, "lib/node_modules");
+                    for (src, rel) in extra {
+                        if seen_rel.insert(rel.clone()) {
+                            lib_files.push((src, rel));
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
 }
 
 fn collect_node_libs_for(
@@ -376,6 +523,61 @@ mod tests {
 
         fs::write(ws_plain.join("binding.gyp"), "{}")?;
         assert!(should_include_node_headers(&ctx_plain));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_select_node_managers_scans_member_roots_and_corepack(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let py_root = temp.path().join("backend-py");
+        let sidecar_root = temp.path().join("desktop-shell");
+        let frontend_root = sidecar_root.join("frontend");
+        fs::create_dir_all(&py_root)?;
+        fs::create_dir_all(&frontend_root)?;
+        fs::write(py_root.join("pyproject.toml"), "[project]\nname = \"py\"\n")?;
+        fs::write(frontend_root.join("package.json"), "{\"name\":\"ui\"}")?;
+        fs::write(
+            frontend_root.join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
+        )?;
+
+        let ctx = ToolchainDiscoveryContext {
+            profile: ToolchainProfile::Minimal,
+            workspace_root: Some(py_root),
+            member_roots: vec![sidecar_root],
+            ..ToolchainDiscoveryContext::default()
+        };
+        let managers = select_node_managers(&ctx);
+        assert!(
+            managers.contains(&"pnpm"),
+            "Expected minimal profile to select pnpm from nested sidecar member root: {:?}",
+            managers
+        );
+
+        #[cfg(unix)]
+        {
+            let node_root = temp.path().join("node_corepack");
+            let bin = node_root.join("bin");
+            let corepack_dist = node_root.join("lib/node_modules/corepack/dist");
+            fs::create_dir_all(&bin)?;
+            fs::create_dir_all(&corepack_dist)?;
+            let node_bin = bin.join("node");
+            fs::write(&node_bin, "#!/bin/sh\n")?;
+            fs::write(corepack_dist.join("pnpm.js"), "#!/usr/bin/env node\n")?;
+            std::os::unix::fs::symlink(
+                "../lib/node_modules/corepack/dist/pnpm.js",
+                bin.join("pnpm"),
+            )?;
+
+            let expanded = expand_managers_with_corepack(&node_bin, &["pnpm"]);
+            assert!(
+                expanded.contains(&"corepack"),
+                "Expected Corepack-linked pnpm to include corepack module: {:?}",
+                expanded
+            );
+        }
 
         Ok(())
     }

@@ -445,19 +445,25 @@ pub(crate) fn build_multi_root_workspace_doc(
             || m.fs_dir.join("requirements.txt").exists()
             || m.fs_dir.join("pyproject.toml").exists();
 
-        let is_rust = is_ecosystem_member(m.ecosystem, &["rust", "cargo"])
-            || m.fs_dir.join("Cargo.toml").exists()
-            || m.fs_dir.join("src-tauri/Cargo.toml").exists();
+        let cargo_dirs = crate::workspace::discover_tauri_cargo_dirs(m.fs_dir);
+        let node_dirs = crate::workspace::discover_node_project_roots(m.fs_dir);
 
-        let is_node = is_ecosystem_member(m.ecosystem, &["node", "npm"])
-            || m.fs_dir.join("package.json").exists();
+        let is_rust =
+            is_ecosystem_member(m.ecosystem, &["rust", "cargo"]) || !cargo_dirs.is_empty();
+
+        let is_node = is_ecosystem_member(m.ecosystem, &["node", "npm"]) || !node_dirs.is_empty();
 
         if is_rust {
-            if m.fs_dir.join("Cargo.toml").exists() {
-                linked_rust_projects.push(format!("{}/Cargo.toml", m.folder_path));
-            }
-            if m.fs_dir.join("src-tauri/Cargo.toml").exists() {
-                linked_rust_projects.push(format!("{}/src-tauri/Cargo.toml", m.folder_path));
+            for cargo_dir in cargo_dirs {
+                if let Ok(rel) = cargo_dir.strip_prefix(m.fs_dir) {
+                    let rel_unix = rel.to_string_lossy().replace('\\', "/");
+                    if rel_unix.is_empty() || rel_unix == "." {
+                        linked_rust_projects.push(format!("{}/Cargo.toml", m.folder_path));
+                    } else {
+                        linked_rust_projects
+                            .push(format!("{}/{}/Cargo.toml", m.folder_path, rel_unix));
+                    }
+                }
             }
         }
 
@@ -465,12 +471,8 @@ pub(crate) fn build_multi_root_workspace_doc(
         if is_node {
             node_bin_unix.push(format!("{}/node_modules/.bin", folder_var));
             node_bin_win.push(format!("{}\\node_modules\\.bin", folder_var));
-            for sub_dir in
-                crate::resolver::manifest::npm::NpmManifestScanner::discover_npm_workspace_package_dirs(
-                    m.fs_dir,
-                )
-            {
-                if let Ok(rel) = sub_dir.strip_prefix(m.fs_dir) {
+            for node_dir in node_dirs {
+                if let Ok(rel) = node_dir.strip_prefix(m.fs_dir) {
                     let rel_unix = rel.to_string_lossy().replace('\\', "/");
                     let rel_win = rel_unix.replace('/', "\\");
                     if !rel_unix.is_empty() && rel_unix != "." {
@@ -478,6 +480,22 @@ pub(crate) fn build_multi_root_workspace_doc(
                             .push(format!("{}/{}/node_modules/.bin", folder_var, rel_unix));
                         node_bin_win
                             .push(format!("{}\\{}\\node_modules\\.bin", folder_var, rel_win));
+                    }
+                }
+                for sub_dir in
+                    crate::resolver::manifest::npm::NpmManifestScanner::discover_npm_workspace_package_dirs(
+                        &node_dir,
+                    )
+                {
+                    if let Ok(rel) = sub_dir.strip_prefix(m.fs_dir) {
+                        let rel_unix = rel.to_string_lossy().replace('\\', "/");
+                        let rel_win = rel_unix.replace('/', "\\");
+                        if !rel_unix.is_empty() && rel_unix != "." {
+                            node_bin_unix
+                                .push(format!("{}/{}/node_modules/.bin", folder_var, rel_unix));
+                            node_bin_win
+                                .push(format!("{}\\{}\\node_modules\\.bin", folder_var, rel_win));
+                        }
                     }
                 }
             }

@@ -17,16 +17,56 @@ impl NpmManifestScanner {
         results: &mut Vec<ManifestInfo>,
     ) -> Result<(), ManifestError> {
         let mut visited_manifests = HashSet::new();
+        Self::scan_node_dir_with_options(
+            root_path,
+            None,
+            target_platform,
+            include_dev,
+            &mut visited_manifests,
+            results,
+        )?;
+
+        if results.iter().all(|m| m.ecosystem != Ecosystem::Npm) {
+            for nested_root in crate::workspace::discover_node_project_roots(root_path) {
+                if nested_root != root_path {
+                    Self::scan_node_dir_with_options(
+                        &nested_root,
+                        None,
+                        target_platform,
+                        include_dev,
+                        &mut visited_manifests,
+                        results,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn scan_node_dir_with_options(
+        root_path: &Path,
+        ancestor_lock_dir: Option<&Path>,
+        target_platform: Option<&str>,
+        include_dev: bool,
+        visited_manifests: &mut HashSet<PathBuf>,
+        results: &mut Vec<ManifestInfo>,
+    ) -> Result<(), ManifestError> {
         let package_json_path = root_path.join("package.json");
         if package_json_path.exists() {
             Self::parse_package_json_with_options_visited(
                 &package_json_path,
+                ancestor_lock_dir,
                 target_platform,
                 include_dev,
-                &mut visited_manifests,
+                visited_manifests,
                 results,
             )?;
         } else {
+            let effective_lock_dir = if Self::has_npm_lockfile(root_path) {
+                Some(root_path)
+            } else {
+                ancestor_lock_dir
+            };
             // Handle pnpm workspaces / monorepos that omit a root package.json
             let workspace_dirs = Self::discover_npm_workspace_package_dirs(root_path);
             for sub_dir in workspace_dirs {
@@ -34,9 +74,10 @@ impl NpmManifestScanner {
                 if sub_pkg_json.is_file() {
                     Self::parse_package_json_with_options_visited(
                         &sub_pkg_json,
+                        effective_lock_dir,
                         target_platform,
                         include_dev,
-                        &mut visited_manifests,
+                        visited_manifests,
                         results,
                     )?;
                 }
@@ -61,6 +102,12 @@ impl NpmManifestScanner {
             }
         }
         Ok(())
+    }
+
+    fn has_npm_lockfile(dir: &Path) -> bool {
+        dir.join("pnpm-lock.yaml").is_file()
+            || dir.join("package-lock.json").is_file()
+            || dir.join("yarn.lock").is_file()
     }
 
     pub fn sanitize_npm_version(raw: &str) -> String {
@@ -103,6 +150,7 @@ impl NpmManifestScanner {
         let mut visited = HashSet::new();
         Self::parse_package_json_with_options_visited(
             path,
+            None,
             target_platform,
             include_dev,
             &mut visited,
@@ -113,6 +161,7 @@ impl NpmManifestScanner {
 
     fn parse_package_json_with_options_visited(
         path: &Path,
+        ancestor_lock_dir: Option<&Path>,
         target_platform: Option<&str>,
         include_dev: bool,
         visited_manifests: &mut HashSet<PathBuf>,
@@ -133,9 +182,14 @@ impl NpmManifestScanner {
             Self::collect_pkg_json_deps(&value, target_platform, include_dev);
 
         let root_dir = path.parent().unwrap_or(path);
-        let pnpm_lock = root_dir.join("pnpm-lock.yaml");
-        let npm_lock = root_dir.join("package-lock.json");
-        let yarn_lock = root_dir.join("yarn.lock");
+        let lock_search_dir = if Self::has_npm_lockfile(root_dir) {
+            root_dir
+        } else {
+            ancestor_lock_dir.unwrap_or(root_dir)
+        };
+        let pnpm_lock = lock_search_dir.join("pnpm-lock.yaml");
+        let npm_lock = lock_search_dir.join("package-lock.json");
+        let yarn_lock = lock_search_dir.join("yarn.lock");
 
         let locked_npm_deps = if pnpm_lock.is_file() {
             Self::parse_pnpm_lock_with_options(
@@ -160,7 +214,25 @@ impl NpmManifestScanner {
         };
 
         if !locked_npm_deps.is_empty() {
-            super::merge_locked_dependencies(&mut dependencies, locked_npm_deps);
+            // When inheriting an ancestor workspace lockfile, upgrade direct deps to exact locked
+            // versions rather than re-appending the entire lockfile's transitive graph per member.
+            if lock_search_dir != root_dir {
+                let mut upgraded = Vec::new();
+                for mut dep in dependencies {
+                    if let Some(matched) = locked_npm_deps.iter().find(|l| l.name == dep.name) {
+                        if !matched.version_req.is_empty() && matched.version_req != "*" {
+                            dep.version_req = matched.version_req.clone();
+                        }
+                        if !matched.dependencies.is_empty() {
+                            dep.dependencies = matched.dependencies.clone();
+                        }
+                    }
+                    upgraded.push(dep);
+                }
+                dependencies = upgraded;
+            } else {
+                super::merge_locked_dependencies(&mut dependencies, locked_npm_deps);
+            }
         }
         if !include_dev {
             dependencies.retain(|d| !d.is_dev);
@@ -174,6 +246,7 @@ impl NpmManifestScanner {
 
         Self::collect_npm_workspace_members_visited(
             root_dir,
+            Some(lock_search_dir),
             target_platform,
             include_dev,
             visited_manifests,
@@ -181,6 +254,10 @@ impl NpmManifestScanner {
         );
 
         Ok(())
+    }
+
+    fn is_local_workspace_spec(ver: &str) -> bool {
+        ver.starts_with("workspace:") || ver.starts_with("file:") || ver.starts_with("link:")
     }
 
     fn collect_pkg_json_deps(
@@ -201,6 +278,9 @@ impl NpmManifestScanner {
                         continue;
                     }
                     let ver = Self::sanitize_npm_version(val.as_str().unwrap_or("*"));
+                    if Self::is_local_workspace_spec(&ver) {
+                        continue;
+                    }
                     prod_roots.insert(name.clone());
                     dependencies.push(DependencySpec {
                         name: name.clone(),
@@ -215,9 +295,12 @@ impl NpmManifestScanner {
 
         if let Some(dev_deps) = value.get("devDependencies").and_then(|d| d.as_object()) {
             for (name, val) in dev_deps {
+                let ver = Self::sanitize_npm_version(val.as_str().unwrap_or("*"));
+                if Self::is_local_workspace_spec(&ver) {
+                    continue;
+                }
                 dev_roots.insert(name.clone());
                 if include_dev {
-                    let ver = Self::sanitize_npm_version(val.as_str().unwrap_or("*"));
                     dependencies.push(DependencySpec {
                         name: name.clone(),
                         version_req: ver,
@@ -415,6 +498,7 @@ impl NpmManifestScanner {
 
     fn collect_npm_workspace_members_visited(
         root_dir: &Path,
+        ancestor_lock_dir: Option<&Path>,
         target_platform: Option<&str>,
         include_dev: bool,
         visited_manifests: &mut HashSet<PathBuf>,
@@ -425,6 +509,7 @@ impl NpmManifestScanner {
             if sub_pkg_json.is_file() {
                 let _ = Self::parse_package_json_with_options_visited(
                     &sub_pkg_json,
+                    ancestor_lock_dir,
                     target_platform,
                     include_dev,
                     visited_manifests,
@@ -1218,5 +1303,82 @@ impl<'a> PnpmLockParser<'a> {
             .unwrap_or(stripped)
             .trim()
             .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_monorepo_subpackage_inherits_ancestor_pnpm_lockfile(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let desktop = root.join("apps/desktop");
+        fs::create_dir_all(&desktop)?;
+
+        fs::write(
+            root.join("package.json"),
+            r#"{"name": "monorepo", "private": true}"#,
+        )?;
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - 'apps/*'\n",
+        )?;
+        fs::write(
+            root.join("pnpm-lock.yaml"),
+            r#"lockfileVersion: '9.0'
+
+importers:
+
+  .: {}
+
+  apps/desktop:
+    dependencies:
+      shared-ui:
+        specifier: workspace:*
+        version: link:../shared-ui
+    devDependencies:
+      vite:
+        specifier: ^6.0.0
+        version: 6.0.11
+
+packages:
+
+  vite@6.0.11:
+    resolution: {integrity: sha512-ddd}
+    hasBin: true
+
+snapshots:
+
+  vite@6.0.11: {}
+"#,
+        )?;
+        fs::write(
+            desktop.join("package.json"),
+            r#"{
+  "name": "desktop-app",
+  "dependencies": { "shared-ui": "workspace:*" },
+  "devDependencies": { "vite": "^6.0.0" }
+}"#,
+        )?;
+
+        let mut results = Vec::new();
+        NpmManifestScanner::scan_with_options(root, None, true, &mut results)?;
+        let specs: Vec<_> = results.iter().flat_map(|m| m.dependencies.iter()).collect();
+        assert!(
+            specs.iter().any(|s| s.name == "vite" && s.version_req == "6.0.11"),
+            "Expected subpackage vite to inherit locked version 6.0.11 from root pnpm-lock.yaml: {:?}",
+            specs
+        );
+        assert!(
+            !specs.iter().any(|s| s.name == "shared-ui"),
+            "Expected local workspace:* dependency to be skipped: {:?}",
+            specs
+        );
+        Ok(())
     }
 }

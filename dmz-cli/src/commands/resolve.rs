@@ -48,14 +48,14 @@ pub fn run_resolve(
                 }
             };
 
-        let sidecar_lock = match ResolverEngine::resolve_workspace_with_options(&sc_canon, options)
-        {
-            Ok(lock) => lock,
-            Err(e) => {
-                error!("Sidecar workspace dependency resolution failed: {}", e);
-                return Ok(1);
-            }
-        };
+        let sidecar_lock =
+            match ResolverEngine::resolve_workspace_with_options(&sc_canon, options.clone()) {
+                Ok(lock) => lock,
+                Err(e) => {
+                    error!("Sidecar workspace dependency resolution failed: {}", e);
+                    return Ok(1);
+                }
+            };
 
         // Merge locked packages with workspace member IDs
         let mut merged_packages = Vec::new();
@@ -68,7 +68,11 @@ pub fn run_resolve(
             merged_packages.push(pkg);
         }
 
-        let mut unified_lock = dmz_core::resolver::lockfile::DmzLockfile::new(merged_packages);
+        let mut unified_lock = dmz_core::resolver::lockfile::DmzLockfile::with_platform(
+            merged_packages,
+            options.target_platform.clone(),
+        );
+        unified_lock.include_dev = Some(options.include_dev);
         unified_lock.add_workspace(dmz_core::resolver::lockfile::WorkspaceMetadata {
             id: "primary".to_string(),
             path: ws_canon.display().to_string(),

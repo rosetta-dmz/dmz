@@ -3,8 +3,171 @@
 // multi-workspace member configurations from `dmz.lock` metadata.
 
 use super::schema::{MemberRole, WorkspaceManifestError, WorkspaceMember, WorkspaceProjectConfig};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+const MAX_PROJECT_DISCOVERY_DEPTH: usize = 4;
+const MAX_PROJECT_DISCOVERY_ENTRIES: usize = 512;
+
+/// Returns `true` when `dir` directly contains a Node/npm/pnpm/yarn project manifest.
+pub fn has_node_project_manifest(dir: &Path) -> bool {
+    dir.join("package.json").is_file()
+        || dir.join("pnpm-workspace.yaml").is_file()
+        || dir.join("pnpm-lock.yaml").is_file()
+        || dir.join("package-lock.json").is_file()
+        || dir.join("yarn.lock").is_file()
+}
+
+/// Discovers Node project roots inside `member_dir`: returns `[member_dir]` when the root
+/// itself holds a Node manifest/lockfile, otherwise performs a bounded, symlink-safe walk
+/// (`depth <= 4`, entry cap `<= 512`) to find nested Node roots (e.g., `frontend/`, `apps/desktop/`).
+pub fn discover_node_project_roots(member_dir: &Path) -> Vec<PathBuf> {
+    if !member_dir.is_dir() {
+        return Vec::new();
+    }
+    if has_node_project_manifest(member_dir) {
+        return vec![member_dir.to_path_buf()];
+    }
+    let Ok(canon_root) = fs::canonicalize(member_dir) else {
+        return Vec::new();
+    };
+    let mut visited = HashSet::new();
+    visited.insert(canon_root.clone());
+    let mut roots = Vec::new();
+    let mut scanned = 0usize;
+    collect_nested_project_roots(
+        member_dir,
+        &canon_root,
+        0,
+        &mut scanned,
+        &mut visited,
+        &mut roots,
+        &|dir| has_node_project_manifest(dir),
+        true,
+    );
+    roots.sort();
+    roots
+}
+
+/// Discovers Cargo manifest directories (`Cargo.toml` and nested `src-tauri/Cargo.toml`)
+/// inside `member_dir` using bounded, symlink-safe traversal and canonical deduplication.
+pub fn discover_tauri_cargo_dirs(member_dir: &Path) -> Vec<PathBuf> {
+    if !member_dir.is_dir() {
+        return Vec::new();
+    }
+    let Ok(canon_root) = fs::canonicalize(member_dir) else {
+        return Vec::new();
+    };
+    let mut dirs = Vec::new();
+    let mut seen_manifests = HashSet::new();
+
+    for candidate in [member_dir.to_path_buf(), member_dir.join("src-tauri")] {
+        let toml = candidate.join("Cargo.toml");
+        if toml.is_file() {
+            let canon_toml = fs::canonicalize(&toml).unwrap_or(toml);
+            if seen_manifests.insert(canon_toml) {
+                dirs.push(candidate);
+            }
+        }
+    }
+
+    let mut visited = HashSet::new();
+    visited.insert(canon_root.clone());
+    let mut nested = Vec::new();
+    let mut scanned = 0usize;
+    collect_nested_project_roots(
+        member_dir,
+        &canon_root,
+        0,
+        &mut scanned,
+        &mut visited,
+        &mut nested,
+        &|dir| dir.join("src-tauri").join("Cargo.toml").is_file(),
+        false,
+    );
+    nested.sort();
+    for sub in nested {
+        let tauri_dir = sub.join("src-tauri");
+        let toml = tauri_dir.join("Cargo.toml");
+        let canon_toml = fs::canonicalize(&toml).unwrap_or(toml);
+        if seen_manifests.insert(canon_toml) {
+            dirs.push(tauri_dir);
+        }
+    }
+
+    dirs
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_nested_project_roots<F>(
+    dir: &Path,
+    canon_root: &Path,
+    depth: usize,
+    scanned: &mut usize,
+    visited: &mut HashSet<PathBuf>,
+    out: &mut Vec<PathBuf>,
+    predicate: &F,
+    stop_on_match: bool,
+) where
+    F: Fn(&Path) -> bool,
+{
+    if depth > MAX_PROJECT_DISCOVERY_DEPTH || *scanned >= MAX_PROJECT_DISCOVERY_ENTRIES {
+        return;
+    }
+
+    if depth > 0 && predicate(dir) {
+        out.push(dir.to_path_buf());
+        if stop_on_match {
+            return;
+        }
+    }
+
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut child_dirs = Vec::new();
+    for entry in entries.flatten() {
+        *scanned = scanned.saturating_add(1);
+        if *scanned > MAX_PROJECT_DISCOVERY_ENTRIES {
+            break;
+        }
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() || !ft.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        let path = entry.path();
+        if name_str.starts_with('.')
+            || super::layout::should_skip_workspace_artifact_dir(&path, &name_str, None)
+        {
+            continue;
+        }
+        let Ok(canon_child) = fs::canonicalize(&path) else {
+            continue;
+        };
+        if !canon_child.starts_with(canon_root) || !visited.insert(canon_child) {
+            continue;
+        }
+        child_dirs.push(path);
+    }
+    child_dirs.sort();
+    for child in child_dirs {
+        collect_nested_project_roots(
+            &child,
+            canon_root,
+            depth.saturating_add(1),
+            scanned,
+            visited,
+            out,
+            predicate,
+            stop_on_match,
+        );
+    }
+}
 
 /// Searches for `dmz-workspace.toml` starting in `start_dir` and traversing parents.
 ///
@@ -340,6 +503,45 @@ role = "sidecar"
         let direct = discover_workspace_manifest_scoped(root.path())
             .ok_or("expected root manifest to be discovered")?;
         assert_eq!(direct.0.name, "parent-umbrella");
+        Ok(())
+    }
+
+    #[test]
+    fn test_discover_nested_node_and_tauri_roots_skips_symlinks() -> Result<(), Box<dyn Error>> {
+        let tmp = tempdir()?;
+        let outside = tmp.path().join("outside-pkg");
+        fs::create_dir_all(outside.join("src-tauri"))?;
+        fs::write(outside.join("package.json"), r#"{"name":"outside"}"#)?;
+        fs::write(
+            outside.join("src-tauri/Cargo.toml"),
+            "[package]\nname=\"out\"\n",
+        )?;
+
+        let member = tmp.path().join("member");
+        let frontend = member.join("frontend");
+        fs::create_dir_all(frontend.join("src-tauri"))?;
+        fs::create_dir_all(member.join("node_modules/ignored-pkg"))?;
+        fs::write(frontend.join("package.json"), r#"{"name":"frontend"}"#)?;
+        fs::write(
+            frontend.join("src-tauri/Cargo.toml"),
+            "[package]\nname=\"fe\"\n",
+        )?;
+        fs::write(
+            member.join("node_modules/ignored-pkg/package.json"),
+            r#"{"name":"ignored"}"#,
+        )?;
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, member.join("escape-link"))?;
+            std::os::unix::fs::symlink(&member, frontend.join("loop-link"))?;
+        }
+
+        let node_roots = discover_node_project_roots(&member);
+        assert_eq!(node_roots, vec![frontend.clone()]);
+
+        let cargo_dirs = discover_tauri_cargo_dirs(&member);
+        assert_eq!(cargo_dirs, vec![frontend.join("src-tauri")]);
         Ok(())
     }
 }

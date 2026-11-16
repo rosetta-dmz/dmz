@@ -118,9 +118,29 @@ impl ToolchainProvider {
         profile: ToolchainProfile,
         target_platform: Option<&str>,
     ) -> Vec<DiscoveredToolchain> {
-        let ecosystems = Self::detect_workspace_ecosystems_with_options(
+        Self::discover_for_workspace_with_project_and_options(
             workspace_root,
             lockfile,
+            None,
+            detect_options,
+            profile,
+            target_platform,
+        )
+    }
+
+    /// Discover standalone host toolchains with an optional in-memory multi-workspace config.
+    pub fn discover_for_workspace_with_project_and_options(
+        workspace_root: &Path,
+        lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
+        ws_project_opt: Option<&crate::workspace::WorkspaceProjectConfig>,
+        detect_options: ToolchainDetectOptions,
+        profile: ToolchainProfile,
+        target_platform: Option<&str>,
+    ) -> Vec<DiscoveredToolchain> {
+        let ecosystems = ToolchainDetector::detect_workspace_ecosystems_with_project_and_options(
+            workspace_root,
+            lockfile,
+            ws_project_opt,
             detect_options,
         );
         if ecosystems.is_empty() {
@@ -138,10 +158,13 @@ impl ToolchainProvider {
             "Discovered target workspace ecosystems for toolchain capture"
         );
 
+        let member_roots =
+            ToolchainDetector::collect_workspace_member_dirs(workspace_root, ws_project_opt);
         let ctx = ToolchainDiscoveryContext {
             profile,
             target_platform: target_platform.map(str::to_string),
             workspace_root: Some(workspace_root.to_path_buf()),
+            member_roots,
             ecosystems: ecosystems.clone(),
         };
         let registry = DiscoveryRegistry::with_default_discoverers();
@@ -328,9 +351,34 @@ impl ToolchainPackager {
         profile: ToolchainProfile,
         target_platform: Option<&str>,
     ) -> Result<Vec<ToolchainManifestEntry>, ToolchainError> {
-        let toolchains = ToolchainProvider::discover_for_workspace_with_options(
+        Self::package_toolchains_with_options_and_project(
             workspace_root,
             lockfile,
+            None,
+            tar_builder,
+            deterministic_epoch,
+            detect_options,
+            profile,
+            target_platform,
+        )
+    }
+
+    /// Package discovered toolchains using an optional in-memory multi-workspace config.
+    #[allow(clippy::too_many_arguments)]
+    pub fn package_toolchains_with_options_and_project<W: std::io::Write>(
+        workspace_root: &Path,
+        lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
+        ws_project_opt: Option<&crate::workspace::WorkspaceProjectConfig>,
+        tar_builder: &mut TarBuilder<W>,
+        deterministic_epoch: u64,
+        detect_options: ToolchainDetectOptions,
+        profile: ToolchainProfile,
+        target_platform: Option<&str>,
+    ) -> Result<Vec<ToolchainManifestEntry>, ToolchainError> {
+        let toolchains = ToolchainProvider::discover_for_workspace_with_project_and_options(
+            workspace_root,
+            lockfile,
+            ws_project_opt,
             detect_options,
             profile,
             target_platform,

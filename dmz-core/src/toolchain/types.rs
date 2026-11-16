@@ -201,6 +201,7 @@ pub struct ToolchainDiscoveryContext {
     pub profile: ToolchainProfile,
     pub target_platform: Option<String>,
     pub workspace_root: Option<PathBuf>,
+    pub member_roots: Vec<PathBuf>,
     pub ecosystems: std::collections::HashSet<ToolchainEcosystem>,
 }
 

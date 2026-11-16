@@ -2,7 +2,7 @@ use super::packaging::{append_dir_all, append_filtered_files_prefixed};
 use super::types::ExportError;
 use crate::resolver::lockfile::DmzLockfile;
 use crate::workspace::{MemberRole, WorkspaceProjectConfig};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -27,19 +27,31 @@ pub fn package_multi_workspace_umbrella<W: Write>(
         .unwrap_or("primary")
         .to_string();
 
-    let mut member_folder_names = HashMap::new();
-    let mut member_host_paths = HashMap::new();
+    let mut member_entries: Vec<(PathBuf, String)> = Vec::with_capacity(ws_project.members.len());
+    let mut used_folder_names: HashSet<String> = HashSet::new();
+    let mut primary_folder_name = primary_raw_name.clone();
+
+    // Assign primary folder name first so sidecar disambiguation never collides with it
+    if let Some(primary) = ws_project.primary_member() {
+        primary_folder_name =
+            if !primary.id.is_empty() && primary.id != "primary" && primary.id != "default" {
+                primary.id.clone()
+            } else {
+                primary_raw_name.clone()
+            };
+    }
 
     for member in &ws_project.members {
         if member.role == MemberRole::Primary {
-            let folder_name =
-                if !member.id.is_empty() && member.id != "primary" && member.id != "default" {
-                    member.id.clone()
-                } else {
-                    primary_raw_name.clone()
-                };
-            member_folder_names.insert(member.id.clone(), folder_name);
-            member_host_paths.insert(member.id.clone(), workspace_root.to_path_buf());
+            let mut folder_name = primary_folder_name.clone();
+            if !used_folder_names.insert(folder_name.clone()) {
+                let mut suffix = 2usize;
+                while !used_folder_names.insert(format!("{}-{}", folder_name, suffix)) {
+                    suffix += 1;
+                }
+                folder_name = format!("{}-{}", folder_name, suffix);
+            }
+            member_entries.push((workspace_root.to_path_buf(), folder_name));
         } else {
             let host_path = if member.path.is_relative() {
                 if let Some(m_path) = manifest_path_opt {
@@ -57,7 +69,7 @@ pub fn package_multi_workspace_umbrella<W: Write>(
                 .filter(|n| !n.is_empty())
                 .unwrap_or(&member.id)
                 .to_string();
-            let folder_name = if !member.id.is_empty()
+            let base_name = if !member.id.is_empty()
                 && member.id != "sidecar"
                 && member.id != "service"
                 && member.id != "default"
@@ -66,31 +78,29 @@ pub fn package_multi_workspace_umbrella<W: Write>(
             } else {
                 raw_name
             };
-            member_folder_names.insert(member.id.clone(), folder_name);
-            member_host_paths.insert(member.id.clone(), host_path);
+            let mut folder_name = if base_name == primary_folder_name {
+                format!("{}-sidecar", base_name)
+            } else {
+                base_name
+            };
+            if !used_folder_names.insert(folder_name.clone()) {
+                let mut suffix = 2usize;
+                while !used_folder_names.insert(format!("{}-{}", folder_name, suffix)) {
+                    suffix += 1;
+                }
+                folder_name = format!("{}-{}", folder_name, suffix);
+            }
+            member_entries.push((host_path, folder_name));
         }
     }
 
-    // Disambiguate if primary and sidecar resolve to the same folder name
-    let primary_folder_name = member_folder_names
-        .get(
-            ws_project
-                .primary_member()
-                .map(|m| m.id.as_str())
-                .unwrap_or("primary"),
-        )
-        .cloned()
-        .unwrap_or_else(|| primary_raw_name.clone());
-
-    for (id, name) in member_folder_names.iter_mut() {
-        let is_primary = ws_project
-            .primary_member()
-            .map(|m| m.id == *id)
-            .unwrap_or(false);
-        if !is_primary && *name == primary_folder_name {
-            *name = format!("{}-sidecar", name);
-        }
-    }
+    let primary_folder_name = ws_project
+        .members
+        .iter()
+        .enumerate()
+        .find(|(_, m)| m.role == MemberRole::Primary)
+        .and_then(|(idx, _)| member_entries.get(idx).map(|(_, f)| f.clone()))
+        .unwrap_or(primary_folder_name);
 
     // 1. Package Primary Repository into its dedicated workspaces/<primary_folder> namespace
     let primary_dest = PathBuf::from(format!("workspaces/{}", primary_folder_name));
@@ -118,26 +128,24 @@ pub fn package_multi_workspace_umbrella<W: Write>(
     }
 
     // 2. Package each Sidecar / Service Member into its dedicated workspaces/<sidecar_folder> namespace
-    for member in &ws_project.members {
+    for (idx, member) in ws_project.members.iter().enumerate() {
         if member.role != MemberRole::Primary {
-            if let Some(host_path) = member_host_paths.get(&member.id) {
-                if let Some(folder_name) = member_folder_names.get(&member.id) {
-                    if host_path.is_dir() {
-                        let sidecar_dest = PathBuf::from(format!("workspaces/{}", folder_name));
-                        info!(
-                            member = %member.id,
-                            src = ?host_path,
-                            dest = %sidecar_dest.display(),
-                            "Packaging sidecar workspace files into workspaces namespace"
-                        );
-                        append_dir_all(
-                            tar_builder,
-                            host_path,
-                            &sidecar_dest,
-                            true,
-                            deterministic_epoch,
-                        )?;
-                    }
+            if let Some((host_path, folder_name)) = member_entries.get(idx) {
+                if host_path.is_dir() {
+                    let sidecar_dest = PathBuf::from(format!("workspaces/{}", folder_name));
+                    info!(
+                        member = %member.id,
+                        src = ?host_path,
+                        dest = %sidecar_dest.display(),
+                        "Packaging sidecar workspace files into workspaces namespace"
+                    );
+                    append_dir_all(
+                        tar_builder,
+                        host_path,
+                        &sidecar_dest,
+                        true,
+                        deterministic_epoch,
+                    )?;
                 }
             }
         }
@@ -145,8 +153,8 @@ pub fn package_multi_workspace_umbrella<W: Write>(
 
     // 3. Serialize and embed normalized dmz-workspace.toml pointing to workspaces/<folder> subfolders
     let mut normalized_project = ws_project.clone();
-    for m in &mut normalized_project.members {
-        if let Some(folder_name) = member_folder_names.get(&m.id) {
+    for (idx, m) in normalized_project.members.iter_mut().enumerate() {
+        if let Some((_, folder_name)) = member_entries.get(idx) {
             m.path = PathBuf::from(format!("workspaces/{}", folder_name));
         }
     }
@@ -171,7 +179,8 @@ pub fn package_multi_workspace_umbrella<W: Write>(
     let folder_storage: Vec<(String, String, &Path, &Path, Option<&str>)> = normalized_project
         .members
         .iter()
-        .map(|m| {
+        .enumerate()
+        .map(|(idx, m)| {
             let folder_path = m.path.to_string_lossy().replace('\\', "/");
             let short_folder_name = m.path.file_name().and_then(|n| n.to_str()).unwrap_or(&m.id);
             let label = if !m.id.is_empty() {
@@ -179,9 +188,9 @@ pub fn package_multi_workspace_umbrella<W: Write>(
             } else {
                 short_folder_name.to_string()
             };
-            let host_dir = member_host_paths
-                .get(&m.id)
-                .map(|p| p.as_path())
+            let host_dir = member_entries
+                .get(idx)
+                .map(|(p, _)| p.as_path())
                 .unwrap_or(workspace_root);
             (
                 label,

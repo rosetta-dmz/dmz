@@ -1,6 +1,6 @@
 use super::types::ToolchainEcosystem;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub mod android;
 pub mod apple;
@@ -117,10 +117,79 @@ impl ToolchainDetector {
         )
     }
 
+    /// Resolves the workspace root and all active member roots (including nested Node/Tauri subprojects).
+    pub fn collect_workspace_member_dirs(
+        workspace_root: &Path,
+        ws_project_opt: Option<&crate::workspace::WorkspaceProjectConfig>,
+    ) -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        let mut seen = HashSet::new();
+        let push_dir = |dirs: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, p: PathBuf| {
+            let key = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+            if p.is_dir() && seen.insert(key) {
+                dirs.push(p);
+            }
+        };
+
+        push_dir(&mut dirs, &mut seen, workspace_root.to_path_buf());
+
+        let loaded_manifest;
+        let ws_project_ref = if let Some(ws) = ws_project_opt {
+            Some(ws)
+        } else {
+            let manifest_path = workspace_root.join("dmz-workspace.toml");
+            if manifest_path.is_file() {
+                loaded_manifest =
+                    crate::workspace::WorkspaceProjectConfig::load_from_file(&manifest_path).ok();
+                loaded_manifest.as_ref()
+            } else {
+                None
+            }
+        };
+
+        if let Some(manifest) = ws_project_ref {
+            for member in &manifest.members {
+                let member_dir = if member.path.is_absolute() {
+                    member.path.clone()
+                } else {
+                    workspace_root.join(&member.path)
+                };
+                push_dir(&mut dirs, &mut seen, member_dir);
+            }
+        }
+
+        let base_dirs = dirs.clone();
+        for base in base_dirs {
+            for node_dir in crate::workspace::discover_node_project_roots(&base) {
+                push_dir(&mut dirs, &mut seen, node_dir);
+            }
+            for cargo_dir in crate::workspace::discover_tauri_cargo_dirs(&base) {
+                push_dir(&mut dirs, &mut seen, cargo_dir);
+            }
+        }
+
+        dirs
+    }
+
     /// Detects active workspace ecosystems with explicit detection options.
     pub fn detect_workspace_ecosystems_with_options(
         workspace_root: &Path,
         lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
+        options: ToolchainDetectOptions,
+    ) -> HashSet<ToolchainEcosystem> {
+        Self::detect_workspace_ecosystems_with_project_and_options(
+            workspace_root,
+            lockfile,
+            None,
+            options,
+        )
+    }
+
+    /// Detects active workspace ecosystems using an optional in-memory multi-workspace config and explicit options.
+    pub fn detect_workspace_ecosystems_with_project_and_options(
+        workspace_root: &Path,
+        lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
+        ws_project_opt: Option<&crate::workspace::WorkspaceProjectConfig>,
         options: ToolchainDetectOptions,
     ) -> HashSet<ToolchainEcosystem> {
         let mut ecosystems = HashSet::new();
@@ -129,36 +198,29 @@ impl ToolchainDetector {
             return ecosystems;
         }
 
-        Self::detect_dir_ecosystems_with_options(workspace_root, &mut ecosystems, options);
-
-        // Auto-discover declared multi-workspace members in dmz-workspace.toml
-        let manifest_path = workspace_root.join("dmz-workspace.toml");
-        let mut active_member_ids: Option<HashSet<String>> = None;
-        if manifest_path.is_file() {
-            if let Ok(manifest) =
-                crate::workspace::WorkspaceProjectConfig::load_from_file(&manifest_path)
-            {
-                let mut ids = HashSet::new();
-                for member in &manifest.members {
-                    ids.insert(member.id.clone());
-                    let member_dir = if member.path.is_absolute() {
-                        member.path.clone()
-                    } else {
-                        workspace_root.join(&member.path)
-                    };
-                    if member_dir.is_dir() {
-                        Self::detect_dir_ecosystems_with_options(
-                            &member_dir,
-                            &mut ecosystems,
-                            options,
-                        );
-                    }
-                }
-                if !ids.is_empty() {
-                    active_member_ids = Some(ids);
-                }
-            }
+        let member_dirs = Self::collect_workspace_member_dirs(workspace_root, ws_project_opt);
+        for dir in &member_dirs {
+            Self::detect_dir_ecosystems_with_options(dir, &mut ecosystems, options);
         }
+
+        // Scope lockfile ecosystem mapping to declared member IDs when a project config is present
+        let loaded_manifest;
+        let ws_project_ref = if let Some(ws) = ws_project_opt {
+            Some(ws)
+        } else {
+            let manifest_path = workspace_root.join("dmz-workspace.toml");
+            if manifest_path.is_file() {
+                loaded_manifest =
+                    crate::workspace::WorkspaceProjectConfig::load_from_file(&manifest_path).ok();
+                loaded_manifest.as_ref()
+            } else {
+                None
+            }
+        };
+        let active_member_ids: Option<HashSet<String>> = ws_project_ref.and_then(|manifest| {
+            let ids: HashSet<String> = manifest.members.iter().map(|m| m.id.clone()).collect();
+            (!ids.is_empty()).then_some(ids)
+        });
 
         // Map resolver lockfile ecosystems (scoped to active members when present)
         let map_lockfile =
@@ -193,9 +255,9 @@ impl ToolchainDetector {
             }
         }
 
-        // Minimal companion propagation for native tools
+        // Minimal companion propagation for native tools across all workspace and member dirs
         Self::propagate_native_companion_ecosystems_from_dirs(
-            std::iter::once(workspace_root),
+            member_dirs.iter().map(PathBuf::as_path),
             &mut ecosystems,
         );
 

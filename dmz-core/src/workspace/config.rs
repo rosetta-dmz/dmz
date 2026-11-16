@@ -3,9 +3,10 @@
 // process environments, manifest discovery, and socket lifecycle helpers.
 
 pub use super::discovery::{
-    discover_or_from_lockfile, discover_or_from_lockfile_scoped, discover_workspace_manifest,
-    discover_workspace_manifest_checked, discover_workspace_manifest_scoped,
-    discover_workspace_manifest_scoped_checked,
+    discover_node_project_roots, discover_or_from_lockfile, discover_or_from_lockfile_scoped,
+    discover_tauri_cargo_dirs, discover_workspace_manifest, discover_workspace_manifest_checked,
+    discover_workspace_manifest_scoped, discover_workspace_manifest_scoped_checked,
+    has_node_project_manifest,
 };
 pub use super::env::{
     build_member_env, host_target_triple, inject_node_env, inject_offline_env, inject_python_env,

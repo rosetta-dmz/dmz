@@ -41,14 +41,12 @@ pub(super) enum AirGapTaskOutcome {
 pub(super) struct AirGapState {
     archive_path: String,
     store_dir: String,
-    target_platform: String,
     export_mode: GuiExportMode,
     zstd_level: i32,
     auto_install: bool,
     verify_closure: bool,
     with_toolchain: bool,
     toolchain_profile: ToolchainProfile,
-    include_dev: bool,
     import_include_dev: bool,
     show_export_tip: bool,
     pub(super) active_task: Option<(String, Receiver<AirGapTaskOutcome>)>,
@@ -59,14 +57,12 @@ impl Default for AirGapState {
         Self {
             archive_path: String::from("dist/workspace_closure.tar.zst"),
             store_dir: String::from(".dmz/store"),
-            target_platform: String::new(),
             export_mode: GuiExportMode::Unified,
             zstd_level: 3,
             auto_install: true,
             verify_closure: true,
             with_toolchain: true,
             toolchain_profile: ToolchainProfile::Minimal,
-            include_dev: true,
             import_include_dev: true,
             show_export_tip: true,
             active_task: None,
@@ -80,8 +76,84 @@ impl AirGapState {
     }
 }
 
+fn resolve_multi_workspace_for_session(
+    ws_canon: &Path,
+    lockfile: &Path,
+    is_dual_repo: bool,
+    sidecar_path: &str,
+    sidecar_id: &str,
+    sidecar_role: &str,
+    persist_manifest: bool,
+) -> Option<dmz_core::workspace::WorkspaceProjectConfig> {
+    if let Some(cfg) = dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile_scoped(
+        ws_canon, lockfile,
+    ) {
+        return Some(cfg);
+    }
+    if is_dual_repo && !sidecar_path.trim().is_empty() {
+        let cfg =
+            super::build_dual_repo_project_config(ws_canon, sidecar_path, sidecar_id, sidecar_role);
+        if persist_manifest {
+            let manifest_file = ws_canon.join("dmz-workspace.toml");
+            if let Err(e) = cfg.save_to_file(&manifest_file) {
+                tracing::warn!(
+                    path = ?manifest_file,
+                    error = %e,
+                    "Failed to persist dual-repo dmz-workspace.toml during bundle"
+                );
+            }
+        }
+        return Some(cfg);
+    }
+    None
+}
+
+fn collect_missing_node_modules_dirs(
+    workspace_root: &Path,
+    ws_project: Option<&dmz_core::workspace::WorkspaceProjectConfig>,
+) -> Vec<String> {
+    let mut member_dirs = Vec::new();
+    if let Some(proj) = ws_project {
+        for m in &proj.members {
+            let dir = if m.path.is_absolute() {
+                m.path.clone()
+            } else {
+                workspace_root.join(&m.path)
+            };
+            if dir.is_dir() {
+                member_dirs.push(dir);
+            }
+        }
+    } else {
+        member_dirs.push(workspace_root.to_path_buf());
+    }
+
+    let mut missing = Vec::new();
+    for dir in member_dirs {
+        for node_root in dmz_core::workspace::discover_node_project_roots(&dir) {
+            if dmz_core::workspace::has_node_project_manifest(&node_root)
+                && !node_root.join("node_modules").is_dir()
+            {
+                let display = node_root
+                    .strip_prefix(workspace_root)
+                    .ok()
+                    .and_then(|p| {
+                        let s = p.to_string_lossy().into_owned();
+                        (!s.is_empty()).then_some(s)
+                    })
+                    .unwrap_or_else(|| ".".to_string());
+                if !missing.contains(&display) {
+                    missing.push(display);
+                }
+            }
+        }
+    }
+    missing
+}
+
 pub(super) fn show(
     state: &mut AirGapState,
+    session: &mut super::WorkspaceSessionState,
     ui: &mut egui::Ui,
     workspace_path: &mut String,
     lockfile_path: &mut String,
@@ -200,12 +272,24 @@ pub(super) fn show(
                 ui.label("Target Platform");
                 ui.add_sized(
                     egui::vec2(ui.available_width(), 32.0),
-                    egui::TextEdit::singleline(&mut state.target_platform)
+                    egui::TextEdit::singleline(&mut session.target_platform)
                         .align(egui::Align2::LEFT_CENTER)
                         .margin(egui::Margin::symmetric(8, 0))
                         .hint_text("Optional (e.g. linux-x86_64, macos-arm64, host default)"),
                 );
                 ui.end_row();
+
+                if session.is_dual_repo && !session.sidecar_path.trim().is_empty() {
+                    ui.label("Dual-Repo Sidecar");
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Active ({}: {})",
+                            session.sidecar_id, session.sidecar_path
+                        ))
+                        .color(egui::Color32::from_rgb(0, 180, 216)),
+                    );
+                    ui.end_row();
+                }
             });
     });
 
@@ -244,7 +328,7 @@ pub(super) fn show(
         );
 
         ui.add_space(4.0);
-        ui.checkbox(&mut state.include_dev, "Include dev dependencies");
+        ui.checkbox(&mut session.include_dev, "Include dev dependencies");
 
         ui.add_space(4.0);
         ui.add_enabled_ui(state.with_toolchain, |ui| {
@@ -288,17 +372,21 @@ pub(super) fn show(
                     } else {
                         PathBuf::from(&state.archive_path)
                     };
-                    let target_opt = if state.target_platform.trim().is_empty() {
+                    let target_opt = if session.target_platform.trim().is_empty() {
                         None
                     } else {
-                        Some(state.target_platform.trim().to_string())
+                        Some(session.target_platform.trim().to_string())
                     };
 
                     let zstd_level = state.zstd_level;
                     let export_mode = state.export_mode;
                     let with_toolchain = state.with_toolchain;
                     let toolchain_profile = state.toolchain_profile;
-                    let include_dev = state.include_dev;
+                    let include_dev = session.include_dev;
+                    let is_dual_repo = session.is_dual_repo;
+                    let sidecar_path = session.sidecar_path.clone();
+                    let sidecar_id = session.sidecar_id.clone();
+                    let sidecar_role = session.sidecar_role.clone();
                     let (tx, rx) = channel();
                     let ctx = ui.ctx().clone();
                     state.active_task = Some((
@@ -307,10 +395,15 @@ pub(super) fn show(
                     ));
 
                     thread::spawn(move || {
-                        let multi_workspace =
-                            dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile_scoped(
-                                &ws_canon, &lockfile,
-                            );
+                        let multi_workspace = resolve_multi_workspace_for_session(
+                            &ws_canon,
+                            &lockfile,
+                            is_dual_repo,
+                            &sidecar_path,
+                            &sidecar_id,
+                            &sidecar_role,
+                            true,
+                        );
 
                         if dmz_core::resolver::lockfile::DmzLockfile::file_needs_refresh(
                             &lockfile,
@@ -414,17 +507,21 @@ pub(super) fn show(
                     } else {
                         PathBuf::from(&state.archive_path)
                     };
-                    let target_opt = if state.target_platform.trim().is_empty() {
+                    let target_opt = if session.target_platform.trim().is_empty() {
                         None
                     } else {
-                        Some(state.target_platform.trim().to_string())
+                        Some(session.target_platform.trim().to_string())
                     };
 
                     let zstd_level = state.zstd_level;
                     let export_mode = state.export_mode;
                     let with_toolchain = state.with_toolchain;
                     let toolchain_profile = state.toolchain_profile;
-                    let include_dev = state.include_dev;
+                    let include_dev = session.include_dev;
+                    let is_dual_repo = session.is_dual_repo;
+                    let sidecar_path = session.sidecar_path.clone();
+                    let sidecar_id = session.sidecar_id.clone();
+                    let sidecar_role = session.sidecar_role.clone();
                     let (tx, rx) = channel();
                     let ctx = ui.ctx().clone();
                     state.active_task = Some((
@@ -433,10 +530,15 @@ pub(super) fn show(
                     ));
 
                     thread::spawn(move || {
-                        let multi_workspace =
-                            dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile_scoped(
-                                &ws_canon, &lockfile,
-                            );
+                        let multi_workspace = resolve_multi_workspace_for_session(
+                            &ws_canon,
+                            &lockfile,
+                            is_dual_repo,
+                            &sidecar_path,
+                            &sidecar_id,
+                            &sidecar_role,
+                            false,
+                        );
 
                         let config = ExportConfig {
                             workspace_path: ws_canon.clone(),
@@ -599,17 +701,10 @@ pub(super) fn show(
                                     "Imported {} files into store. Verified Closure: {}",
                                     result.imported_packages, short_sig
                                 );
-                                if let Some(ref proj) = result.workspace_project {
-                                    msg.push_str(&format!(
-                                        " · Dual-Workspace '{}' ({} members) active",
-                                        proj.name,
-                                        proj.members.len()
-                                    ));
-                                }
-
                                 if let Some(ref wp) = result.workspace_project {
                                     msg.push_str(&format!(
-                                        " · Restored dual-workspace umbrella ({} members: primary='{}'). Open via .code-workspace",
+                                        " · Restored dual-workspace '{}' ({} members: primary='{}'). Open via .code-workspace",
+                                        wp.name,
                                         wp.members.len(),
                                         wp.primary_member()
                                             .map(|m| m.path.display().to_string())
@@ -629,6 +724,16 @@ pub(super) fn show(
                                         msg.push_str(&format!(
                                             " · Materialized {} packages into workspace offline",
                                             result.installed_packages
+                                        ));
+                                    }
+                                    let missing_nm = collect_missing_node_modules_dirs(
+                                        &result.workspace_path,
+                                        result.workspace_project.as_ref(),
+                                    );
+                                    if !missing_nm.is_empty() {
+                                        msg.push_str(&format!(
+                                            " · Warning: node_modules missing in {}",
+                                            missing_nm.join(", ")
                                         ));
                                     }
                                 }
@@ -697,6 +802,7 @@ mod tests {
     fn inspect_airgap_grid_layout() {
         let ctx = egui::Context::default();
         let mut state = AirGapState::default();
+        let mut session = crate::app::pages::WorkspaceSessionState::default();
         let mut ws = ".".to_string();
         let mut lock = "dmz.lock".to_string();
         let mut msg = String::new();
@@ -705,14 +811,14 @@ mod tests {
 
         for _ in 0..3 {
             let mut out = ctx.run_ui(Default::default(), |ui| {
-                show(&mut state, ui, &mut ws, &mut lock, &mut msg);
+                show(&mut state, &mut session, ui, &mut ws, &mut lock, &mut msg);
             });
             out.textures_delta.clear();
         }
 
         state.show_export_tip = false;
         let mut out = ctx.run_ui(Default::default(), |ui| {
-            show(&mut state, ui, &mut ws, &mut lock, &mut msg);
+            show(&mut state, &mut session, ui, &mut ws, &mut lock, &mut msg);
         });
         out.textures_delta.clear();
     }

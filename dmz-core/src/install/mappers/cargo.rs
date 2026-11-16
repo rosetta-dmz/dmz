@@ -200,24 +200,26 @@ impl CargoMapper {
             InstallError::IoError(format!("Failed to write .cargo-checksum.json: {}", e))
         })?;
 
-        // Ensure .cargo/config.toml points to the correct .cargo/vendor path without clobbering user config
+        // Configure vendoring for root, src-tauri, and any nested Tauri subprojects.
+        let vendor_root = cargo_dir.join("vendor");
         Self::ensure_vendored_cargo_config(&cargo_dir.join("config.toml"), ".cargo/vendor")?;
 
-        // If this workspace is a Tauri project (with src-tauri/Cargo.toml), also configure
-        // src-tauri/.cargo/config.toml with config-relative path `../.cargo/vendor`.
-        if workspace_path.join("src-tauri/Cargo.toml").is_file() {
-            let tauri_cargo_dir = workspace_path.join("src-tauri/.cargo");
+        for tauri_dir in crate::workspace::discover_tauri_cargo_dirs(workspace_path) {
+            if tauri_dir == workspace_path {
+                continue;
+            }
+            let tauri_cargo_dir = tauri_dir.join(".cargo");
             fs::create_dir_all(&tauri_cargo_dir).map_err(|e| {
-                InstallError::IoError(format!("Failed to create src-tauri/.cargo: {}", e))
+                InstallError::IoError(format!("Failed to create {:?}: {}", tauri_cargo_dir, e))
             })?;
-            Self::ensure_vendored_cargo_config(
-                &tauri_cargo_dir.join("config.toml"),
-                "../.cargo/vendor",
-            )?;
+            let rel_vendor = crate::archive::importer::hydration::relative_path_between(
+                &tauri_dir,
+                &vendor_root,
+            );
+            Self::ensure_vendored_cargo_config(&tauri_cargo_dir.join("config.toml"), &rel_vendor)?;
         }
 
         // Also ensure .cargo/vendor/config.json exists
-        let vendor_root = cargo_dir.join("vendor");
         let vendor_config_json = vendor_root.join("config.json");
         if !vendor_config_json.exists() {
             fs::write(&vendor_config_json, r#"{"packages":{}}"#).map_err(|e| {

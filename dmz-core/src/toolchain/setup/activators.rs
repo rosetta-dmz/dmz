@@ -68,9 +68,12 @@ if [ -d "$DMZ_WS/.dmz/toolchains" ]; then
     done
 fi
 
-# Prepend member node_modules/.bin directories to PATH
+# Prepend member and nested node_modules/.bin directories to PATH
 if [ -d "$DMZ_WS/workspaces" ]; then
-    for ws_bin in "$DMZ_WS"/workspaces/*/node_modules/.bin; do
+    for ws_bin in \
+        "$DMZ_WS"/workspaces/*/node_modules/.bin \
+        "$DMZ_WS"/workspaces/*/*/node_modules/.bin \
+        "$DMZ_WS"/workspaces/*/*/*/node_modules/.bin; do
         if [ -d "$ws_bin" ]; then
             case ":$PATH:" in
                 *":$ws_bin:"*) ;;
@@ -79,6 +82,14 @@ if [ -d "$DMZ_WS/workspaces" ]; then
         fi
     done
 fi
+for nested_bin in "$DMZ_WS"/*/node_modules/.bin "$DMZ_WS"/*/*/node_modules/.bin; do
+    if [ -d "$nested_bin" ]; then
+        case ":$PATH:" in
+            *":$nested_bin:"*) ;;
+            *) export PATH="$nested_bin:$PATH" ;;
+        esac
+    fi
+done
 if [ -d "$DMZ_WS/node_modules/.bin" ]; then
     case ":$PATH:" in
         *":$DMZ_WS/node_modules/.bin:"*) ;;
@@ -240,6 +251,11 @@ for /d %%D in ("%DMZ_WORKSPACE%\.dmz\toolchains\*") do (
 for /d %%D in ("%DMZ_WORKSPACE%\workspaces\*") do (
     if exist "%%D\node_modules\.bin" (
         echo ;%PATH%; | findstr /I /C:";%%D\node_modules\.bin;" >nul || set "PATH=%%D\node_modules\.bin;%PATH%"
+    )
+    for /d %%S in ("%%D\*") do (
+        if exist "%%S\node_modules\.bin" (
+            echo ;%PATH%; | findstr /I /C:";%%S\node_modules\.bin;" >nul || set "PATH=%%S\node_modules\.bin;%PATH%"
+        )
     )
 )
 
