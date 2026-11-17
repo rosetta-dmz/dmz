@@ -5,6 +5,9 @@ use std::fs;
 use std::path::Path;
 
 /// Generates shell and batch activator scripts in `.dmz/` for immediate developer use.
+///
+/// # Errors
+/// Returns `ToolchainError::SetupFailed` if `.dmz`, `env.sh`, or `env.bat` cannot be written.
 pub fn generate_activator_scripts(workspace_root: &Path) -> Result<(), ToolchainError> {
     let env_sh_path = workspace_root.join(".dmz/env.sh");
     let env_bat_path = workspace_root.join(".dmz/env.bat");
@@ -306,25 +309,18 @@ REM DMZ Toolchain Environment Activator (Windows)
 set DMZ_WORKSPACE=%~dp0..
 
 for /d %%D in ("%DMZ_WORKSPACE%\.dmz\toolchains\*") do (
-    if exist "%%D\bin" (
-        echo ;%PATH%; | findstr /I /C:";%%D\bin;" >nul || set "PATH=%%D\bin;%PATH%"
-    )
+    if exist "%%D\bin" call :_dmz_prepend_path "%%D\bin"
+    if exist "%%D\python.exe" call :_dmz_prepend_path "%%D"
 )
 
 for /d %%D in ("%DMZ_WORKSPACE%\workspaces\*") do (
-    if exist "%%D\node_modules\.bin" (
-        echo ;%PATH%; | findstr /I /C:";%%D\node_modules\.bin;" >nul || set "PATH=%%D\node_modules\.bin;%PATH%"
-    )
+    if exist "%%D\node_modules\.bin" call :_dmz_prepend_path "%%D\node_modules\.bin"
     for /d %%S in ("%%D\*") do (
-        if exist "%%S\node_modules\.bin" (
-            echo ;%PATH%; | findstr /I /C:";%%S\node_modules\.bin;" >nul || set "PATH=%%S\node_modules\.bin;%PATH%"
-        )
+        if exist "%%S\node_modules\.bin" call :_dmz_prepend_path "%%S\node_modules\.bin"
     )
 )
 
-if exist "%DMZ_WORKSPACE%\node_modules\.bin" (
-    echo ;%PATH%; | findstr /I /C:";%DMZ_WORKSPACE%\node_modules\.bin;" >nul || set "PATH=%DMZ_WORKSPACE%\node_modules\.bin;%PATH%"
-)
+if exist "%DMZ_WORKSPACE%\node_modules\.bin" call :_dmz_prepend_path "%DMZ_WORKSPACE%\node_modules\.bin"
 
 if exist "%DMZ_WORKSPACE%\.dmz\toolchains\rust" (
     set "RUSTUP_HOME=%DMZ_WORKSPACE%\.dmz\toolchains\rust"
@@ -348,9 +344,7 @@ if exist "%CD%\.venv" (
 )
 if defined _DMZ_VENV (
     set "VIRTUAL_ENV=%_DMZ_VENV%"
-    if exist "%_DMZ_VENV%\Scripts" (
-        echo ;%PATH%; | findstr /I /C:";%_DMZ_VENV%\Scripts;" >nul || set "PATH=%_DMZ_VENV%\Scripts;%PATH%"
-    )
+    if exist "%_DMZ_VENV%\Scripts" call :_dmz_prepend_path "%_DMZ_VENV%\Scripts"
     if exist "%_DMZ_VENV%\Lib\site-packages" (
         set "PYTHONPATH=%_DMZ_VENV%\Lib\site-packages;%PYTHONPATH%"
     )
@@ -441,6 +435,14 @@ if exist "%DMZ_WORKSPACE%\.dmz\toolchains\pkgconfig\lib\pkgconfig" (
 )
 
 echo DMZ bundled toolchains activated.
+goto :eof
+
+:_dmz_prepend_path
+set "_DMZ_ADD=%~1"
+if "%_DMZ_ADD%"=="" goto :eof
+echo ;%PATH%; | findstr /I /C:";%_DMZ_ADD%;" >nul || set "PATH=%_DMZ_ADD%;%PATH%"
+set "_DMZ_ADD="
+goto :eof
 "#;
 
     fs::create_dir_all(workspace_root.join(".dmz")).map_err(|e| {
@@ -460,4 +462,20 @@ echo DMZ bundled toolchains activated.
         .map_err(|e| ToolchainError::SetupFailed(format!("Failed to write env.bat: {}", e)))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_env_bat_uses_subroutine_for_loop_path_updates() {
+        let ws = tempdir().unwrap();
+        generate_activator_scripts(ws.path()).unwrap();
+        let bat = fs::read_to_string(ws.path().join(".dmz/env.bat")).unwrap();
+        assert!(bat.contains("call :_dmz_prepend_path \"%%D\\bin\""));
+        assert!(bat.contains("call :_dmz_prepend_path \"%%D\""));
+        assert!(bat.contains(":_dmz_prepend_path"));
+    }
 }

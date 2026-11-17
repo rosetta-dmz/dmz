@@ -1,7 +1,9 @@
 // Toolchain environment setup and configuration
 
 pub mod activators;
+mod bin_io;
 pub mod cmake;
+pub mod elf;
 pub mod ide;
 pub mod macho;
 pub mod permissions;

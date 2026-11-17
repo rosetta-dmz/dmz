@@ -155,7 +155,7 @@ fn test_compilation_proof_python() {
 
     let py_exec = std::process::Command::new(&py_run_bin)
         .arg("-c")
-        .arg("import sys; print(f'Hermetic Python {sys.version_info.major} Success')")
+        .arg("import sys, json; print(f'Hermetic Python {sys.version_info.major} Success')")
         .envs(&envs)
         .output()
         .expect("Failed to invoke bundled python");
@@ -167,6 +167,82 @@ fn test_compilation_proof_python() {
         String::from_utf8_lossy(&py_exec.stderr)
     );
     assert!(String::from_utf8_lossy(&py_exec.stdout).contains("Hermetic Python"));
+
+    // Verify relocated python works via `source .dmz/env.sh` + hydrated `.venv` without
+    // relying on `DYLD_LIBRARY_PATH` (stripped by macOS SIP) and resolves `.dmz/venv` packages.
+    #[cfg(unix)]
+    {
+        let py_ver = dmz_core::install::mappers::PyPiMapper::detect_python_version(target_ws);
+        let dmz_sp = target_ws
+            .join(".dmz/venv/lib")
+            .join(&py_ver)
+            .join("site-packages/fake_pydantic");
+        fs::create_dir_all(&dmz_sp).unwrap();
+        fs::write(dmz_sp.join("__init__.py"), "VERSION = 'test'\n").unwrap();
+
+        dmz_core::install::mappers::PyPiMapper::hydrate_venv_environment(
+            target_ws,
+            &target_ws.join(".venv"),
+            &py_ver,
+        )
+        .expect("hydrate_venv_environment must succeed");
+        ToolchainPackager::setup_imported_toolchains(target_ws).unwrap();
+
+        let shell_cmd = format!(
+            "unset DYLD_LIBRARY_PATH LD_LIBRARY_PATH; . \"{}/.dmz/env.sh\" >/dev/null && python -c \"import sys, json, ctypes, ssl, sqlite3, fake_pydantic; print(sys.executable, fake_pydantic.VERSION)\"",
+            target_ws.to_string_lossy()
+        );
+        let sh_out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&shell_cmd)
+            .output()
+            .expect("Failed to run shell env.sh + python");
+        assert!(
+            sh_out.status.success(),
+            "Sourced env.sh python execution failed: stdout={}\nstderr={}",
+            String::from_utf8_lossy(&sh_out.stdout),
+            String::from_utf8_lossy(&sh_out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&sh_out.stdout);
+        assert!(
+            stdout.contains("test"),
+            "Expected fake_pydantic import output, got: {}",
+            stdout
+        );
+    }
+
+    #[cfg(windows)]
+    {
+        let py_ver = dmz_core::install::mappers::PyPiMapper::detect_python_version(target_ws);
+        let dmz_sp = target_ws
+            .join(".dmz/venv/lib")
+            .join(&py_ver)
+            .join("site-packages/fake_pydantic");
+        fs::create_dir_all(&dmz_sp).unwrap();
+        fs::write(dmz_sp.join("__init__.py"), "VERSION = 'test'\n").unwrap();
+
+        dmz_core::install::mappers::PyPiMapper::hydrate_venv_environment(
+            target_ws,
+            &target_ws.join(".venv"),
+            &py_ver,
+        )
+        .expect("hydrate_venv_environment must succeed");
+        ToolchainPackager::setup_imported_toolchains(target_ws).unwrap();
+
+        let venv_py = target_ws.join(".venv/Scripts/python.exe");
+        let py_out = std::process::Command::new(&venv_py)
+            .arg("-c")
+            .arg("import sys, ctypes, json; print(sys.executable)")
+            .env("PATH", "")
+            .output()
+            .expect("Failed to invoke .venv\\Scripts\\python.exe directly");
+        assert!(
+            py_out.status.success(),
+            "Direct Windows .venv python failed: stdout={}\nstderr={}",
+            String::from_utf8_lossy(&py_out.stdout),
+            String::from_utf8_lossy(&py_out.stderr)
+        );
+    }
 }
 
 #[test]

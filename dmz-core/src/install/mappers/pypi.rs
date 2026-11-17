@@ -12,6 +12,7 @@ pub struct PyPiMapper;
 impl PyPiMapper {
     /// Detects the target Python version from existing environments or bundled toolchains,
     /// defaulting to `python3.11` for backward compatibility.
+    #[must_use]
     pub fn detect_python_version(workspace_path: &Path) -> String {
         // 1. Check existing .dmz/venv/lib/python3.X
         let dmz_venv_lib = workspace_path.join(".dmz").join("venv").join("lib");
@@ -220,6 +221,11 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
         let _ = fs::write(&ps1_path, ps1_content);
     }
 
+    /// Unpacks a Python package archive into `.dmz/venv`, creates `.venv` `.pth` wiring,
+    /// and hydrates the virtual environment interpreter.
+    ///
+    /// # Errors
+    /// Returns `InstallError` if archive extraction, `.venv` wiring, or I/O fails.
     pub fn map_package(
         workspace_path: &Path,
         pkg: &LockedPackage,
@@ -300,6 +306,9 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
     /// Hydrates a PEP 405 virtual environment into `.venv` using a real symlink (Unix) or
     /// interpreter copy (Windows) to the resolved Python binary — bundled `.dmz/toolchains/python`
     /// first, then host `PATH` outside `.venv` — instead of synthetic shell stubs.
+    ///
+    /// # Errors
+    /// Returns `InstallError` if `.venv` directories, config, or Python launchers fail to write.
     pub fn hydrate_venv_environment(
         workspace_path: &Path,
         root_venv: &Path,
@@ -451,8 +460,47 @@ export PATH
             ))
         })?;
         let py3_dst = venv_scripts.join("python3.exe");
-        let _ = fs::copy(&resolved.executable, &py3_dst);
+        if let Err(e) = fs::copy(&resolved.executable, &py3_dst) {
+            warn!(path = ?py3_dst, error = %e, "Failed to copy python3.exe into .venv/Scripts");
+        }
+
+        let mut src_dirs: Vec<&Path> = vec![resolved.home_dir.as_path()];
+        if let Some(parent) = resolved.executable.parent() {
+            if parent != resolved.home_dir.as_path() {
+                src_dirs.push(parent);
+            }
+        }
+        Self::copy_windows_companion_dlls(&src_dirs, venv_scripts);
         Ok(())
+    }
+
+    // Side-by-side DLL copy matching Bazel `rules_python` so Scripts\python.exe finds python3*.dll.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn copy_windows_companion_dlls(src_dirs: &[&Path], venv_scripts: &Path) {
+        let mut copied: std::collections::HashSet<std::ffi::OsString> =
+            std::collections::HashSet::new();
+        for dir in src_dirs {
+            let Ok(entries) = fs::read_dir(dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let p = entry.path();
+                let is_non_symlink_dll = fs::symlink_metadata(&p).is_ok_and(|m| m.is_file())
+                    && p.extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("dll"));
+                if !is_non_symlink_dll {
+                    continue;
+                }
+                let fname = entry.file_name();
+                if copied.insert(fname.clone()) {
+                    let dst = venv_scripts.join(&fname);
+                    if let Err(e) = fs::copy(&p, &dst) {
+                        warn!(src = ?p, dst = ?dst, error = %e, "Failed to copy Python companion DLL");
+                    }
+                }
+            }
+        }
     }
 
     fn resolve_base_python_with_path(
@@ -541,6 +589,7 @@ export PATH
 
     /// Resolves a verified non-stub host or bundled Python interpreter for `workspace_path`,
     /// never returning a macOS `/usr/bin/python*` Apple CLT popup shim when CLT is absent.
+    #[must_use]
     pub fn resolve_non_stub_host_python(workspace_path: &Path) -> Option<PathBuf> {
         Self::resolve_base_python_with_path(
             workspace_path,
@@ -552,6 +601,7 @@ export PATH
 
     /// Returns `true` when either a bundled Python toolchain or a host Python interpreter
     /// outside any workspace `.venv` is available to hydrate a virtual environment.
+    #[must_use]
     pub fn has_available_base_python(workspace_path: &Path) -> bool {
         Self::resolve_base_python_with_path(
             workspace_path,
@@ -609,4 +659,36 @@ struct ResolvedPython {
     executable: PathBuf,
     home_dir: PathBuf,
     is_bundled: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_copy_windows_companion_dlls_copies_only_regular_dlls() {
+        let tmp = tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let bin = tmp.path().join("bin");
+        let scripts = tmp.path().join("Scripts");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&scripts).unwrap();
+
+        fs::write(home.join("python312.dll"), b"dll-home").unwrap();
+        fs::write(bin.join("vcruntime140.dll"), b"dll-bin").unwrap();
+        fs::write(home.join("README.txt"), b"ignore").unwrap();
+
+        PyPiMapper::copy_windows_companion_dlls(&[&home, &bin], &scripts);
+        assert_eq!(
+            fs::read(scripts.join("python312.dll")).unwrap(),
+            b"dll-home"
+        );
+        assert_eq!(
+            fs::read(scripts.join("vcruntime140.dll")).unwrap(),
+            b"dll-bin"
+        );
+        assert!(!scripts.join("README.txt").exists());
+    }
 }

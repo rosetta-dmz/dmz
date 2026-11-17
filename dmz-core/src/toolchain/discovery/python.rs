@@ -535,6 +535,7 @@ fn collect_python_binaries(
                 for entry in entries.flatten() {
                     let p = entry.path();
                     if p.is_file()
+                        && !p.is_symlink()
                         && p.extension()
                             .and_then(|e| e.to_str())
                             .is_some_and(|ext| ext.eq_ignore_ascii_case("dll"))
@@ -561,7 +562,7 @@ fn collect_python_binaries(
         for entry in entries.flatten() {
             let p = entry.path();
             let s = entry.file_name().to_string_lossy().to_string();
-            if p.is_file() && s.starts_with("python") && s.ends_with(".dll") {
+            if p.is_file() && !p.is_symlink() && s.starts_with("python") && s.ends_with(".dll") {
                 push_deduped_file(&mut bin_files, &mut seen_bin, p, s);
             }
         }
@@ -636,9 +637,22 @@ fn collect_python_libraries(
     }
 
     let win_lib = py_root.join("Lib");
-    if win_lib.is_dir() {
+    if win_lib.is_dir() && !win_lib.is_symlink() {
         collect_python_files_recursive_deduped(
             &win_lib,
+            py_root,
+            &mut lib_files,
+            &mut seen_lib,
+            "",
+            0,
+            profile,
+        );
+    }
+
+    let win_dlls = py_root.join("DLLs");
+    if win_dlls.is_dir() && !win_dlls.is_symlink() {
+        collect_python_files_recursive_deduped(
+            &win_dlls,
             py_root,
             &mut lib_files,
             &mut seen_lib,
@@ -898,6 +912,10 @@ fn collect_python_lib_dir(
                     &p, py_root, lib_files, seen_lib, "", 0, profile,
                 );
             } else if p.is_file()
+                && (!p.is_symlink()
+                    || (fs::canonicalize(&p).ok())
+                        .zip(fs::canonicalize(lib_dir).ok())
+                        .is_some_and(|(target, root)| target.starts_with(root)))
                 && ((s.starts_with("libpython")
                     && (s.ends_with(".dylib")
                         || s.contains(".so")
@@ -911,24 +929,27 @@ fn collect_python_lib_dir(
     }
 }
 
-/// Collects companion shared libraries under `<py_root>/lib/` referenced via Mach-O load commands
-/// by `py_bin` (or already-discovered `lib/libpython*` dylibs) so non-monolithic standalone
-/// runtimes (e.g., `pyenv`, `miniforge`) remain self-contained in the bundle without spawning `otool`.
-#[cfg(target_os = "macos")]
+/// Collects companion shared libraries under `<py_root>/lib/` referenced by `py_bin` or `libpython*`
+/// using pure-Rust Mach-O (macOS) or ELF `DT_NEEDED` (Linux) inspection without external tools.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn collect_python_companion_shared_libs(
     py_bin: &Path,
     lib_dir: &Path,
     lib_files: &mut Vec<(PathBuf, String)>,
     seen_lib: &mut HashSet<String>,
 ) {
-    let mut inspect_targets = vec![py_bin.to_path_buf()];
+    let mut queue = vec![py_bin.to_path_buf()];
     for (src, rel) in lib_files.iter() {
-        if rel.starts_with("lib/") && rel.ends_with(".dylib") {
-            inspect_targets.push(src.clone());
+        let is_shared = if cfg!(target_os = "macos") {
+            rel.ends_with(".dylib")
+        } else {
+            rel.contains(".so")
+        };
+        if rel.starts_with("lib/") && is_shared {
+            queue.push(src.clone());
         }
     }
 
-    let mut queue = inspect_targets;
     let mut inspected: HashSet<PathBuf> = HashSet::new();
     let canonical_lib_dir = fs::canonicalize(lib_dir).unwrap_or_else(|_| lib_dir.to_path_buf());
 
@@ -936,38 +957,13 @@ fn collect_python_companion_shared_libs(
         if !inspected.insert(target.clone()) {
             continue;
         }
-        let Some(info) = crate::toolchain::setup::macho::inspect_macho_load_info(&target) else {
-            continue;
-        };
-        for raw_dep in &info.dylib_deps {
-            let dep = raw_dep.trim();
-            if dep.is_empty() {
-                continue;
-            }
-            let dep_name = dep
-                .strip_prefix("@rpath/")
-                .or_else(|| dep.strip_prefix("@loader_path/"))
-                .or_else(|| dep.strip_prefix("@executable_path/../lib/"))
-                .or_else(|| {
-                    Path::new(dep)
-                        .strip_prefix(lib_dir)
-                        .ok()
-                        .and_then(|p| p.to_str())
-                })
-                .or_else(|| {
-                    Path::new(dep)
-                        .strip_prefix(&canonical_lib_dir)
-                        .ok()
-                        .and_then(|p| p.to_str())
-                });
 
-            let Some(rel_name) = dep_name else {
-                continue;
-            };
+        let dep_names = extract_companion_lib_rel_names(&target, lib_dir, &canonical_lib_dir);
+        for rel_name in dep_names {
             if rel_name.contains("..") || rel_name.is_empty() {
                 continue;
             }
-            let candidate = lib_dir.join(rel_name);
+            let candidate = lib_dir.join(&rel_name);
             if candidate.is_file() {
                 let target_rel = format!("lib/{}", rel_name.replace('\\', "/"));
                 let was_new = !seen_lib.contains(&target_rel);
@@ -980,7 +976,71 @@ fn collect_python_companion_shared_libs(
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "macos")]
+fn extract_companion_lib_rel_names(
+    target: &Path,
+    lib_dir: &Path,
+    canonical_lib_dir: &Path,
+) -> Vec<String> {
+    let Some(info) = crate::toolchain::setup::macho::inspect_macho_load_info(target) else {
+        return Vec::new();
+    };
+    info.dylib_deps
+        .iter()
+        .filter_map(|raw_dep| {
+            let dep = raw_dep.trim();
+            if dep.is_empty() {
+                return None;
+            }
+            dep.strip_prefix("@rpath/")
+                .or_else(|| dep.strip_prefix("@loader_path/"))
+                .or_else(|| dep.strip_prefix("@executable_path/../lib/"))
+                .or_else(|| {
+                    Path::new(dep)
+                        .strip_prefix(lib_dir)
+                        .ok()
+                        .and_then(|p| p.to_str())
+                })
+                .or_else(|| {
+                    Path::new(dep)
+                        .strip_prefix(canonical_lib_dir)
+                        .ok()
+                        .and_then(|p| p.to_str())
+                })
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn extract_companion_lib_rel_names(
+    target: &Path,
+    _lib_dir: &Path,
+    _canonical_lib_dir: &Path,
+) -> Vec<String> {
+    const SYSTEM_ELF_PREFIXES: &[&str] = &[
+        "libc.so",
+        "libm.so",
+        "libpthread.so",
+        "libdl.so",
+        "librt.so",
+        "libutil.so",
+        "ld-linux",
+    ];
+    let Some(info) = crate::toolchain::setup::elf::inspect_elf_load_info(target) else {
+        return Vec::new();
+    };
+    info.needed
+        .into_iter()
+        .filter(|name| {
+            !name.is_empty()
+                && !name.contains('/')
+                && !SYSTEM_ELF_PREFIXES.iter().any(|p| name.starts_with(p))
+        })
+        .collect()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn collect_python_companion_shared_libs(
     _py_bin: &Path,
     _lib_dir: &Path,
@@ -1037,7 +1097,7 @@ fn collect_python_files_recursive_deduped(
                     depth + 1,
                     profile,
                 );
-            } else if p.is_file() {
+            } else if p.is_file() && !p.is_symlink() {
                 if let Ok(rel) = p.strip_prefix(base) {
                     let rel_str = rel.to_string_lossy().replace('\\', "/");
                     let target_path = if target_prefix.is_empty() {
@@ -1473,5 +1533,37 @@ mod tests {
             Some((3, 12)),
         );
         assert_eq!(ordered, vec![py312, py313, py311]);
+    }
+
+    #[test]
+    fn test_python_collects_windows_dlls_dir_and_skips_file_symlinks() -> std::io::Result<()> {
+        let temp = tempdir()?;
+        let py_root = temp.path().join("py_win");
+        let dlls = py_root.join("DLLs");
+        let lib_dir = py_root.join("Lib");
+        fs::create_dir_all(&dlls)?;
+        fs::create_dir_all(&lib_dir)?;
+
+        fs::write(dlls.join("_ssl.pyd"), b"pyd")?;
+        fs::write(dlls.join("libssl-3-x64.dll"), b"dll")?;
+        fs::write(lib_dir.join("os.py"), b"# os")?;
+
+        #[cfg(unix)]
+        {
+            let secret = temp.path().join("outside.py");
+            fs::write(&secret, b"secret")?;
+            std::os::unix::fs::symlink(&secret, lib_dir.join("leaked.py"))?;
+        }
+
+        let py_bin = py_root.join("python.exe");
+        fs::write(&py_bin, b"exe")?;
+        let collected =
+            collect_python_libraries(&py_bin, &py_root, ToolchainProfile::Minimal, false);
+        let rels: Vec<&str> = collected.iter().map(|(_, r)| r.as_str()).collect();
+        assert!(rels.contains(&"DLLs/_ssl.pyd"));
+        assert!(rels.contains(&"DLLs/libssl-3-x64.dll"));
+        assert!(rels.contains(&"Lib/os.py"));
+        assert!(!rels.contains(&"Lib/leaked.py"));
+        Ok(())
     }
 }
