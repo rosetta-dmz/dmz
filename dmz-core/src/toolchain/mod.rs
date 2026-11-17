@@ -248,7 +248,7 @@ impl ToolchainProvider {
             missing_required.sort_by_key(|e| e.as_str());
             let missing_list: Vec<&str> = missing_required.iter().map(|e| e.as_str()).collect();
             let remediation = if missing_required.contains(&ToolchainEcosystem::Python) {
-                "Install an official standalone Python distribution from python.org or via `uv python install` on the export host (Homebrew, Nix, and macOS `/usr/bin/python3` / Xcode stubs are rejected because they are non-relocatable), or pass `--allow-missing-toolchains` / `--no-toolchain`."
+                "Install an official standalone Python distribution from python.org or via `uv python install` on the export host, or pass `--allow-missing-toolchains` / `--no-toolchain`."
             } else {
                 "Install the required standalone provider toolchain on the export host, or pass `--allow-missing-toolchains` / `--no-toolchain`."
             };
