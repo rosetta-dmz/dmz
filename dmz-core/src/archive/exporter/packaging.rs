@@ -114,6 +114,24 @@ pub fn append_dir_all<W: Write>(
     skip_manifest: bool,
     deterministic_epoch: u64,
 ) -> Result<(), ExportError> {
+    append_dir_all_excluding(
+        tar,
+        src_dir,
+        dest_prefix,
+        skip_manifest,
+        deterministic_epoch,
+        &[],
+    )
+}
+
+pub fn append_dir_all_excluding<W: Write>(
+    tar: &mut TarBuilder<W>,
+    src_dir: &Path,
+    dest_prefix: &Path,
+    skip_manifest: bool,
+    deterministic_epoch: u64,
+    excluded_canon: &[PathBuf],
+) -> Result<(), ExportError> {
     let entries = fs::read_dir(src_dir)
         .map_err(|e| ExportError::IoError(format!("Directory read failed {:?}: {}", src_dir, e)))?;
 
@@ -126,6 +144,15 @@ pub fn append_dir_all<W: Write>(
 
     for entry in sorted_entries {
         let path = entry.path();
+        if !excluded_canon.is_empty() {
+            let entry_canon = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if excluded_canon
+                .iter()
+                .any(|ex| entry_canon == *ex || entry_canon.starts_with(ex))
+            {
+                continue;
+            }
+        }
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         let file_type = entry
@@ -146,7 +173,14 @@ pub fn append_dir_all<W: Write>(
         let rel_dest = dest_prefix.join(name);
 
         if file_type.is_dir() {
-            append_dir_all(tar, &path, &rel_dest, skip_manifest, deterministic_epoch)?;
+            append_dir_all_excluding(
+                tar,
+                &path,
+                &rel_dest,
+                skip_manifest,
+                deterministic_epoch,
+                excluded_canon,
+            )?;
         } else {
             let normalized_dest = rel_dest.to_string_lossy().replace('\\', "/");
             append_file_normalized(tar, &path, &normalized_dest, deterministic_epoch)?;

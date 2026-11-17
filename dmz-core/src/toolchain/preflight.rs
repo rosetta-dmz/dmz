@@ -174,6 +174,126 @@ pub fn resolve_real_apple_developer_tool(tool: &str) -> Option<PathBuf> {
     None
 }
 
+/// Returns `true` when `path` is a Mach-O binary linking Apple's `libxcselect.dylib` CLT shim loader.
+pub(crate) fn is_macho_xcselect_stub(path: &Path) -> bool {
+    crate::toolchain::setup::macho::inspect_macho_load_info(path).is_some_and(|info| {
+        info.dylib_deps
+            .iter()
+            .any(|dep| dep.contains("libxcselect"))
+    })
+}
+
+/// Returns `true` when `path` resolves on macOS (without spawning it) to an Apple CLT stub
+/// that would trigger the Command Line Developer Tools GUI prompt while no usable CLT/SDK exists.
+pub fn is_uninstalled_macos_clt_shim(path: &Path, workspace_root: &Path) -> bool {
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let in_usr_bin = path.parent() == Some(Path::new("/usr/bin"))
+        || resolved.parent() == Some(Path::new("/usr/bin"));
+    let in_apple_dev_tree =
+        crate::toolchain::discovery::is_apple_system_toolchain_path(&resolved) && !in_usr_bin;
+
+    if in_apple_dev_tree {
+        return !has_usable_apple_sdk_or_clt(workspace_root);
+    }
+
+    // Any `/usr/bin/*` Mach-O linking `libxcselect.dylib` (or `/usr/bin/python*`) ALWAYS invokes
+    // Apple's CLT popup when no active CLT/Xcode directory exists on disk, even if `SDKROOT`
+    // is configured alongside a standalone compiler. Check developer dir presence BEFORE SDKROOT.
+    if is_macho_xcselect_stub(&resolved)
+        || (in_usr_bin
+            && crate::toolchain::discovery::python::is_unrelocatable_macos_python(&resolved))
+    {
+        return discover_filesystem_developer_dir().is_none()
+            || !check_apple_developer_tools().is_ready();
+    }
+
+    if has_usable_apple_sdk_or_clt(workspace_root) {
+        return false;
+    }
+
+    false
+}
+
+/// Resolves `program` against `envs["PATH"]` (or host `PATH`) and returns `Some(stub_path)`
+/// if executing it on macOS would invoke an uninstalled Apple CLT shim.
+pub fn should_skip_uninstalled_macos_clt_command<S: std::hash::BuildHasher>(
+    program: &str,
+    envs: &std::collections::HashMap<String, String, S>,
+    cwd: &Path,
+) -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let path_env = envs
+        .get("PATH")
+        .cloned()
+        .or_else(|| std::env::var("PATH").ok())
+        .unwrap_or_default();
+    let resolved = crate::workspace::resolve_executable_in_env(program, &path_env, cwd);
+    let resolved_path = PathBuf::from(&resolved);
+    if is_uninstalled_macos_clt_shim(&resolved_path, cwd) {
+        return Some(resolved_path);
+    }
+    if Path::new(program).file_name().and_then(|n| n.to_str()) == Some("python")
+        && !resolved_path.is_file()
+        && Path::new("/usr/bin/python").is_file()
+        && is_uninstalled_macos_clt_shim(Path::new("/usr/bin/python"), cwd)
+    {
+        return Some(PathBuf::from("/usr/bin/python"));
+    }
+    None
+}
+
+/// Returns a `PATH` value with `/usr/bin` removed on macOS when Apple CLT/Xcode is absent so
+/// wrapper script probes cannot fall back to `/usr/bin/*` Apple CLT GUI shims.
+pub(crate) fn sanitized_probe_path_without_macos_clt_stubs() -> Option<std::ffi::OsString> {
+    if !cfg!(target_os = "macos") || discover_filesystem_developer_dir().is_some() {
+        return None;
+    }
+    let raw = std::env::var_os("PATH")?;
+    let filtered: Vec<PathBuf> = std::env::split_paths(&raw)
+        .filter(|dir| *dir != Path::new("/usr/bin"))
+        .collect();
+    std::env::join_paths(filtered).ok()
+}
+
+/// Resolves an executable from `workspace_root`, bundled toolchains, or `path_env`,
+/// skipping any macOS `/usr/bin/*` Apple CLT shims when CLT/Xcode is unavailable.
+pub fn resolve_non_stub_executable(
+    program: &str,
+    path_env: Option<&std::ffi::OsStr>,
+    workspace_root: &Path,
+) -> Option<PathBuf> {
+    let raw_path = Path::new(program);
+    if raw_path.is_absolute() || program.contains('/') || program.contains('\\') {
+        let candidate = if raw_path.is_absolute() {
+            raw_path.to_path_buf()
+        } else {
+            workspace_root.join(raw_path)
+        };
+        if candidate.is_file() && !is_uninstalled_macos_clt_shim(&candidate, workspace_root) {
+            return Some(candidate);
+        }
+        return None;
+    }
+
+    let path_str = path_env?;
+    for dir in std::env::split_paths(path_str) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        let cand = dir.join(program);
+        if cand.is_file() && !is_uninstalled_macos_clt_shim(&cand, workspace_root) {
+            return Some(cand);
+        }
+    }
+    None
+}
+
 /// Returns `true` when running on macOS and active Apple CLT / Xcode provides `tool`.
 pub(crate) fn host_apple_clt_provides(tool: &str) -> bool {
     if !cfg!(target_os = "macos") {
@@ -570,5 +690,45 @@ mod tests {
             assert_ne!(tool.parent(), Some(Path::new("/usr/bin")));
             assert!(tool.is_file());
         }
+    }
+
+    #[test]
+    fn test_is_macho_xcselect_stub_detects_libxcselect_dylib() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub_path = dir.path().join("python3");
+        let non_stub_path = dir.path().join("env");
+
+        let stub_bytes = crate::toolchain::setup::macho::tests::build_synthetic_macho64(
+            "@loader_path",
+            "/usr/lib/libxcselect.dylib",
+        );
+        let non_stub_bytes = crate::toolchain::setup::macho::tests::build_synthetic_macho64(
+            "@loader_path",
+            "/usr/lib/libSystem.B.dylib",
+        );
+
+        std::fs::write(&stub_path, stub_bytes).unwrap();
+        std::fs::write(&non_stub_path, non_stub_bytes).unwrap();
+
+        assert!(is_macho_xcselect_stub(&stub_path));
+        assert!(!is_macho_xcselect_stub(&non_stub_path));
+    }
+
+    #[test]
+    fn test_should_skip_uninstalled_macos_clt_command_handles_non_stub_safely() {
+        let dir = tempfile::tempdir().unwrap();
+        let non_stub = dir.path().join("my-tool");
+        let non_stub_bytes = crate::toolchain::setup::macho::tests::build_synthetic_macho64(
+            "@loader_path",
+            "/usr/lib/libSystem.B.dylib",
+        );
+        std::fs::write(&non_stub, non_stub_bytes).unwrap();
+        let envs = std::collections::HashMap::new();
+        assert!(should_skip_uninstalled_macos_clt_command(
+            &non_stub.display().to_string(),
+            &envs,
+            dir.path()
+        )
+        .is_none());
     }
 }

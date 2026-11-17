@@ -89,6 +89,7 @@ require (
         version: 1,
         target_platform: None,
         include_dev: None,
+        inputs_digest: None,
         vcs: None,
         workspaces: BTreeMap::new(),
         closure_signature: DmzLockfile::compute_closure_hash(&packages),

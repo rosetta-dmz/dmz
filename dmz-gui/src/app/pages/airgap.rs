@@ -429,7 +429,13 @@ pub(super) fn show(
 
                             match resolve_res {
                                 Ok(resolved) => {
-                                    let _ = resolved.save(&lockfile);
+                                    if let Err(e) = resolved.save(&lockfile) {
+                                        let _ = tx.send(AirGapTaskOutcome::Failure(format!(
+                                            "Bundle failed saving refreshed lockfile: {e}"
+                                        )));
+                                        ctx.request_repaint();
+                                        return;
+                                    }
                                 }
                                 Err(e) => {
                                     let _ = tx.send(AirGapTaskOutcome::Failure(format!(

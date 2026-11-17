@@ -164,6 +164,22 @@ pub fn run_import(args: ImportArgs) -> anyhow::Result<i32> {
                         &mut toolchain_envs,
                     );
 
+                    if let Some(stub_path) =
+                        dmz_core::toolchain::should_skip_uninstalled_macos_clt_command(
+                            &cmd.program,
+                            &toolchain_envs,
+                            &member_root,
+                        )
+                    {
+                        warn!(
+                            ecosystem = %eco.name(),
+                            stub = ?stub_path,
+                            "Skipping verification for '{}' because it resolves to macOS Apple CLT stub without Command Line Tools installed",
+                            eco.name()
+                        );
+                        continue;
+                    }
+
                     let status_res = if args.no_sandbox {
                         info!("Executing verification unsandboxed (--no-sandbox requested)");
                         let mut proc_cmd = std::process::Command::new(&cmd.program);

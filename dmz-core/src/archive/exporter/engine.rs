@@ -160,6 +160,33 @@ impl AirGapExporter {
         let mut lockfile = DmzLockfile::load_and_verify(&effective_lockfile)
             .map_err(|e| ExportError::LockfileError(e.to_string()))?;
 
+        // Detect Multi-Workspace Configuration early so export can verify lockfile completeness
+        // against declared Cargo manifests/Cargo.lock (matching Nix/Bazel completeness invariants).
+        let (ws_project_opt, manifest_path_opt) = match config.multi_workspace.clone() {
+            Some(cfg) => (Some(cfg), None),
+            None => WorkspaceProjectConfig::discover_workspace_manifest_scoped(&workspace_root)
+                .map(|(cfg, p)| (Some(cfg), Some(p)))
+                .unwrap_or((None, None)),
+        };
+
+        if (config.mode == ExportMode::Unified || config.mode == ExportMode::DepsOnly)
+            && config.target_platform.is_none()
+            && lockfile.target_platform.is_none()
+        {
+            let effective_include_dev = lockfile.include_dev.unwrap_or(config.include_dev);
+            if let Some(missing_msg) = lockfile.find_missing_cargo_requirement(
+                &workspace_root,
+                None,
+                effective_include_dev,
+                ws_project_opt.as_ref(),
+            ) {
+                return Err(ExportError::LockfileError(format!(
+                    "{}. Run 'dmz bundle' / 'Scan & Resolve' before exporting.",
+                    missing_msg
+                )));
+            }
+        }
+
         // Synchronize lockfile VCS provenance if not already set
         if lockfile.vcs.is_none() && vcs_provenance.is_some() {
             lockfile.vcs = vcs_provenance.clone();
@@ -288,17 +315,10 @@ impl AirGapExporter {
             }
         }
 
-        // Detect Multi-Workspace Configuration
-        let (ws_project_opt, manifest_path_opt) = match config.multi_workspace.clone() {
-            Some(cfg) => (Some(cfg), None),
-            None => WorkspaceProjectConfig::discover_workspace_manifest_scoped(&workspace_root)
-                .map(|(cfg, p)| (Some(cfg), Some(p)))
-                .unwrap_or((None, None)),
-        };
-
         let mut final_ws_project = None;
 
-        // Append workspace source code (if mode is Unified or CodeOnly)
+        // Append workspace source code (if mode is Unified or CodeOnly), or embed normalized
+        // `dmz-workspace.toml` for DepsOnly multi-workspace archives so imports retain member routing.
         if config.mode == ExportMode::Unified || config.mode == ExportMode::CodeOnly {
             if let Some(ref ws_project) = ws_project_opt {
                 // --- MULTI-WORKSPACE UMBRELLA EXPORT ---
@@ -342,6 +362,35 @@ impl AirGapExporter {
                     }
                 }
             }
+        } else if let Some(ref ws_project) = ws_project_opt {
+            let layouts =
+                ws_project.resolve_member_layouts(&workspace_root, manifest_path_opt.as_deref());
+            let mut normalized_project = ws_project.clone();
+            for (idx, m) in normalized_project.members.iter_mut().enumerate() {
+                if let Some(layout) = layouts.get(idx) {
+                    m.path = layout.archive_path.clone();
+                }
+            }
+            if let Ok(toml_str) = normalized_project.to_toml_string() {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(toml_str.len() as u64);
+                header.set_mode(0o644);
+                header.set_mtime(deterministic_epoch);
+                header.set_uid(0);
+                header.set_gid(0);
+                let _ = header.set_username("");
+                let _ = header.set_groupname("");
+                header.set_cksum();
+                tar_builder
+                    .append_data(&mut header, "dmz-workspace.toml", toml_str.as_bytes())
+                    .map_err(|e| {
+                        ExportError::ArchiveError(format!(
+                            "Failed to embed dmz-workspace.toml in DepsOnly archive: {}",
+                            e
+                        ))
+                    })?;
+            }
+            final_ws_project = Some(normalized_project);
         }
 
         // Append Git Bundle if requested (`--with-git-history`)

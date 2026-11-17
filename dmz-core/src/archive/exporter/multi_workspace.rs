@@ -1,4 +1,4 @@
-use super::packaging::{append_dir_all, append_filtered_files_prefixed};
+use super::packaging::{append_dir_all, append_dir_all_excluding, append_filtered_files_prefixed};
 use super::types::ExportError;
 use crate::resolver::lockfile::DmzLockfile;
 use crate::workspace::{MemberRole, WorkspaceProjectConfig};
@@ -109,6 +109,23 @@ pub fn package_multi_workspace_umbrella<W: Write>(
         path = ?workspace_root,
         "Packaging primary workspace files into workspaces namespace"
     );
+    let root_canon =
+        fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
+    let primary_excluded: Vec<PathBuf> = member_entries
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| {
+            ws_project
+                .members
+                .get(*idx)
+                .is_some_and(|m| m.role != MemberRole::Primary)
+        })
+        .filter_map(|(_, (p, _))| {
+            let c = fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+            (c != root_canon && c.starts_with(&root_canon)).then_some(c)
+        })
+        .collect();
+
     if let Some(changed_files) = changed_files_filter {
         append_filtered_files_prefixed(
             tar_builder,
@@ -118,12 +135,13 @@ pub fn package_multi_workspace_umbrella<W: Write>(
             deterministic_epoch,
         )?;
     } else {
-        append_dir_all(
+        append_dir_all_excluding(
             tar_builder,
             workspace_root,
             &primary_dest,
             true,
             deterministic_epoch,
+            &primary_excluded,
         )?;
     }
 

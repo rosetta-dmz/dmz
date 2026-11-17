@@ -165,10 +165,18 @@ if [ -x "$VENV_DIR/bin/python3" ]; then
   exec "$VENV_DIR/bin/python3" -c "import sys; from {module} import {func}; sys.exit({func}())" "$@"
 elif [ -x "$VENV_DIR/../.dmz/toolchains/python/bin/python3" ]; then
   exec "$VENV_DIR/../.dmz/toolchains/python/bin/python3" -c "import sys; from {module} import {func}; sys.exit({func}())" "$@"
+elif [ -x "$VENV_DIR/../../../.dmz/toolchains/python/bin/python3" ]; then
+  exec "$VENV_DIR/../../../.dmz/toolchains/python/bin/python3" -c "import sys; from {module} import {func}; sys.exit({func}())" "$@"
 else
-  exec python3 -c "import sys; from {module} import {func}; sys.exit({func}())" "$@"
+  HOST_PY="$(command -v python3 2>/dev/null || true)"
+  if [ -n "$HOST_PY" ] && ( [ "$HOST_PY" != "/usr/bin/python3" ] || [ -d /Library/Developer/CommandLineTools/usr/bin ] || [ -d /Applications/Xcode.app ] || [ "$(uname -s)" != "Darwin" ] ); then
+    exec "$HOST_PY" -c "import sys; from {module} import {func}; sys.exit({func}())" "$@"
+  fi
+  echo "No non-stub python3 runtime available for {cmd_name}." >&2
+  exit 127
 fi
 "#,
+                cmd_name = cmd_name,
                 py_ver = py_ver,
                 module = module,
                 func = func,
@@ -508,7 +516,12 @@ export PATH
             }
             for name in host_names {
                 let cand = dir.join(name);
-                if cand.is_file() {
+                if cand.is_file()
+                    && !crate::toolchain::preflight::is_uninstalled_macos_clt_shim(
+                        &cand,
+                        workspace_path,
+                    )
+                {
                     let home_dir = cand
                         .parent()
                         .map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
@@ -523,6 +536,17 @@ export PATH
         }
 
         None
+    }
+
+    /// Resolves a verified non-stub host or bundled Python interpreter for `workspace_path`,
+    /// never returning a macOS `/usr/bin/python*` Apple CLT popup shim when CLT is absent.
+    pub fn resolve_non_stub_host_python(workspace_path: &Path) -> Option<PathBuf> {
+        Self::resolve_base_python_with_path(
+            workspace_path,
+            &workspace_path.join(".venv"),
+            std::env::var_os("PATH").as_deref(),
+        )
+        .map(|resolved| resolved.executable)
     }
 
     /// Returns `true` when either a bundled Python toolchain or a host Python interpreter

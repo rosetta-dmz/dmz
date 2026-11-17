@@ -8,6 +8,7 @@
     clippy::indexing_slicing
 )]
 
+mod cargo_sidecar_vendor;
 mod generic_sibling_roundtrip;
 mod host_venv_exclusion;
 mod manifest_scanner;

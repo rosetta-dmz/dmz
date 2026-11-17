@@ -7,8 +7,168 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const MAX_PROJECT_DISCOVERY_DEPTH: usize = 4;
-const MAX_PROJECT_DISCOVERY_ENTRIES: usize = 512;
+const MAX_PROJECT_DISCOVERY_DEPTH: usize = 64;
+
+fn canonical_excluded_roots(member_dir: &Path, excluded_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let member_canon = fs::canonicalize(member_dir).unwrap_or_else(|_| member_dir.to_path_buf());
+    excluded_dirs
+        .iter()
+        .filter_map(|p| {
+            let canon = fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+            // Exclude only sibling members strictly nested inside `member_dir`;
+            // never exclude an ancestor (e.g. `.`) from scanning its child members.
+            (canon != member_canon && canon.starts_with(&member_canon)).then_some(canon)
+        })
+        .collect()
+}
+
+fn is_excluded_path(canon_path: &Path, excluded_canon: &[PathBuf]) -> bool {
+    excluded_canon
+        .iter()
+        .any(|ex| canon_path == *ex || canon_path.starts_with(ex))
+}
+
+/// Expands workspace glob patterns (`*`, `**`, exact directory names) into directories
+/// containing `manifest_file`, skipping ignored build/VCS artifact directories.
+pub(crate) fn expand_manifest_glob_pattern(
+    root_dir: &Path,
+    pattern: &str,
+    manifest_file: &str,
+    out: &mut Vec<PathBuf>,
+) {
+    if pattern.contains("**") {
+        let base = pattern
+            .split("**")
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('/');
+        let start = if base.is_empty() {
+            root_dir.to_path_buf()
+        } else {
+            root_dir.join(base)
+        };
+        collect_recursive_manifest_dirs(&start, manifest_file, 0, out);
+        return;
+    }
+
+    if let Some(prefix) = pattern
+        .strip_suffix("/*")
+        .or_else(|| pattern.strip_suffix('*'))
+    {
+        let base_dir = if prefix.is_empty() {
+            root_dir.to_path_buf()
+        } else {
+            root_dir.join(prefix.trim_end_matches('/'))
+        };
+        if let Ok(entries) = fs::read_dir(base_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() && path.join(manifest_file).is_file() {
+                    out.push(path);
+                }
+            }
+        }
+        return;
+    }
+
+    let exact_dir = root_dir.join(pattern);
+    if exact_dir.is_dir() && exact_dir.join(manifest_file).is_file() {
+        out.push(exact_dir);
+    }
+}
+
+fn collect_recursive_manifest_dirs(
+    dir: &Path,
+    manifest_file: &str,
+    depth: usize,
+    out: &mut Vec<PathBuf>,
+) {
+    if depth > 6 || !dir.is_dir() {
+        return;
+    }
+    if depth > 0 && dir.join(manifest_file).is_file() {
+        out.push(dir.to_path_buf());
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if super::layout::should_skip_workspace_artifact_dir(&path, &name_str, None) {
+            continue;
+        }
+        collect_recursive_manifest_dirs(&path, manifest_file, depth + 1, out);
+    }
+}
+
+fn collect_cargo_table_path_deps(
+    table: Option<&toml::Value>,
+    cargo_root: &Path,
+    dirs: &mut HashSet<PathBuf>,
+) {
+    let Some(tbl) = table.and_then(|v| v.as_table()) else {
+        return;
+    };
+    for val in tbl.values() {
+        if let Some(rel) = val.get("path").and_then(|p| p.as_str()) {
+            let candidate = cargo_root.join(rel);
+            if candidate.is_dir() && candidate.join("Cargo.toml").is_file() {
+                dirs.insert(fs::canonicalize(&candidate).unwrap_or(candidate));
+            }
+        }
+    }
+}
+
+pub(crate) fn discover_cargo_workspace_member_dirs(cargo_root: &Path) -> HashSet<PathBuf> {
+    let toml_path = cargo_root.join("Cargo.toml");
+    let Ok(content) = fs::read_to_string(&toml_path) else {
+        return HashSet::new();
+    };
+    let Ok(val) = toml::from_str::<toml::Value>(&content) else {
+        return HashSet::new();
+    };
+
+    let mut dirs = HashSet::new();
+    if let Some(members) = val
+        .get("workspace")
+        .and_then(|w| w.get("members"))
+        .and_then(|m| m.as_array())
+    {
+        let mut matched = Vec::new();
+        for pattern in members.iter().filter_map(|v| v.as_str()) {
+            let trimmed = pattern
+                .trim()
+                .trim_start_matches("./")
+                .trim_end_matches('/');
+            if trimmed.is_empty() || trimmed == "." {
+                continue;
+            }
+            matched.clear();
+            expand_manifest_glob_pattern(cargo_root, trimmed, "Cargo.toml", &mut matched);
+            for p in &matched {
+                dirs.insert(fs::canonicalize(p).unwrap_or_else(|_| p.clone()));
+            }
+        }
+    }
+
+    for key in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        collect_cargo_table_path_deps(val.get(key), cargo_root, &mut dirs);
+    }
+    if let Some(targets) = val.get("target").and_then(|t| t.as_table()) {
+        for target_tbl in targets.values() {
+            for key in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                collect_cargo_table_path_deps(target_tbl.get(key), cargo_root, &mut dirs);
+            }
+        }
+    }
+
+    dirs
+}
 
 /// Returns `true` when `dir` directly contains a Node/npm/pnpm/yarn project manifest.
 pub fn has_node_project_manifest(dir: &Path) -> bool {
@@ -20,15 +180,25 @@ pub fn has_node_project_manifest(dir: &Path) -> bool {
 }
 
 /// Discovers Node project roots inside `member_dir`: includes `member_dir` if it holds a
-/// Node manifest/lockfile AND performs a bounded, symlink-safe walk (`depth <= 4`, cap `<= 512`)
-/// to locate any independent nested Node roots (e.g., `frontend/`) outside declared workspace globs.
+/// Node manifest/lockfile AND performs a cycle-safe walk to locate any independent nested
+/// Node roots (e.g., `frontend/`) outside declared workspace globs.
 pub fn discover_node_project_roots(member_dir: &Path) -> Vec<PathBuf> {
+    discover_node_project_roots_excluding(member_dir, &[])
+}
+
+/// Like [`discover_node_project_roots`], excluding any directories belonging to `excluded_dirs`
+/// (e.g., nested declared umbrella workspace members).
+pub fn discover_node_project_roots_excluding(
+    member_dir: &Path,
+    excluded_dirs: &[PathBuf],
+) -> Vec<PathBuf> {
     if !member_dir.is_dir() {
         return Vec::new();
     }
     let Ok(canon_root) = fs::canonicalize(member_dir) else {
         return Vec::new();
     };
+    let excluded_canon = canonical_excluded_roots(member_dir, excluded_dirs);
     let mut roots = Vec::new();
     if has_node_project_manifest(member_dir) {
         roots.push(member_dir.to_path_buf());
@@ -50,12 +220,11 @@ pub fn discover_node_project_roots(member_dir: &Path) -> Vec<PathBuf> {
     let mut visited = HashSet::new();
     visited.insert(canon_root.clone());
     let mut nested = Vec::new();
-    let mut scanned = 0usize;
     collect_nested_project_roots(
         member_dir,
         &canon_root,
+        &excluded_canon,
         0,
-        &mut scanned,
         &mut visited,
         &mut nested,
         &|dir| has_node_project_manifest(dir),
@@ -74,15 +243,25 @@ pub fn discover_node_project_roots(member_dir: &Path) -> Vec<PathBuf> {
     roots
 }
 
-/// Discovers Cargo manifest directories (`Cargo.toml` and nested `src-tauri/Cargo.toml`)
-/// inside `member_dir` using bounded, symlink-safe traversal and canonical deduplication.
+/// Discovers Cargo manifest directories (`Cargo.toml`, `src-tauri/Cargo.toml`, and nested
+/// Cargo/Tauri subprojects) inside `member_dir` using cycle-safe traversal and deduplication.
 pub fn discover_tauri_cargo_dirs(member_dir: &Path) -> Vec<PathBuf> {
+    discover_tauri_cargo_dirs_excluding(member_dir, &[])
+}
+
+/// Like [`discover_tauri_cargo_dirs`], excluding any directories belonging to `excluded_dirs`
+/// (e.g., nested declared umbrella workspace members).
+pub fn discover_tauri_cargo_dirs_excluding(
+    member_dir: &Path,
+    excluded_dirs: &[PathBuf],
+) -> Vec<PathBuf> {
     if !member_dir.is_dir() {
         return Vec::new();
     }
     let Ok(canon_root) = fs::canonicalize(member_dir) else {
         return Vec::new();
     };
+    let excluded_canon = canonical_excluded_roots(member_dir, excluded_dirs);
     let mut dirs = Vec::new();
     let mut seen_manifests = HashSet::new();
 
@@ -96,27 +275,38 @@ pub fn discover_tauri_cargo_dirs(member_dir: &Path) -> Vec<PathBuf> {
         }
     }
 
+    let declared_ws_members = if member_dir.join("Cargo.toml").is_file() {
+        discover_cargo_workspace_member_dirs(member_dir)
+    } else {
+        HashSet::new()
+    };
+
     let mut visited = HashSet::new();
     visited.insert(canon_root.clone());
     let mut nested = Vec::new();
-    let mut scanned = 0usize;
     collect_nested_project_roots(
         member_dir,
         &canon_root,
+        &excluded_canon,
         0,
-        &mut scanned,
         &mut visited,
         &mut nested,
-        &|dir| dir.join("src-tauri").join("Cargo.toml").is_file(),
-        false,
+        &|dir| dir.join("Cargo.toml").is_file(),
+        true,
     );
     nested.sort();
-    for sub in nested {
-        let tauri_dir = sub.join("src-tauri");
-        let toml = tauri_dir.join("Cargo.toml");
+    for cargo_dir in nested {
+        let canon_dir = fs::canonicalize(&cargo_dir).unwrap_or_else(|_| cargo_dir.clone());
+        let is_declared_ws_member = declared_ws_members
+            .iter()
+            .any(|ws_dir| canon_dir == *ws_dir || canon_dir.starts_with(ws_dir));
+        if is_declared_ws_member {
+            continue;
+        }
+        let toml = cargo_dir.join("Cargo.toml");
         let canon_toml = fs::canonicalize(&toml).unwrap_or(toml);
         if seen_manifests.insert(canon_toml) {
-            dirs.push(tauri_dir);
+            dirs.push(cargo_dir);
         }
     }
 
@@ -127,8 +317,8 @@ pub fn discover_tauri_cargo_dirs(member_dir: &Path) -> Vec<PathBuf> {
 fn collect_nested_project_roots<F>(
     dir: &Path,
     canon_root: &Path,
+    excluded_canon: &[PathBuf],
     depth: usize,
-    scanned: &mut usize,
     visited: &mut HashSet<PathBuf>,
     out: &mut Vec<PathBuf>,
     predicate: &F,
@@ -136,7 +326,7 @@ fn collect_nested_project_roots<F>(
 ) where
     F: Fn(&Path) -> bool,
 {
-    if depth > MAX_PROJECT_DISCOVERY_DEPTH || *scanned >= MAX_PROJECT_DISCOVERY_ENTRIES {
+    if depth > MAX_PROJECT_DISCOVERY_DEPTH {
         return;
     }
 
@@ -152,10 +342,6 @@ fn collect_nested_project_roots<F>(
     };
     let mut child_dirs = Vec::new();
     for entry in entries.flatten() {
-        *scanned = scanned.saturating_add(1);
-        if *scanned > MAX_PROJECT_DISCOVERY_ENTRIES {
-            break;
-        }
         let Ok(ft) = entry.file_type() else {
             continue;
         };
@@ -173,7 +359,10 @@ fn collect_nested_project_roots<F>(
         let Ok(canon_child) = fs::canonicalize(&path) else {
             continue;
         };
-        if !canon_child.starts_with(canon_root) || !visited.insert(canon_child) {
+        if !canon_child.starts_with(canon_root)
+            || is_excluded_path(&canon_child, excluded_canon)
+            || !visited.insert(canon_child)
+        {
             continue;
         }
         child_dirs.push(path);
@@ -183,8 +372,8 @@ fn collect_nested_project_roots<F>(
         collect_nested_project_roots(
             &child,
             canon_root,
+            excluded_canon,
             depth.saturating_add(1),
-            scanned,
             visited,
             out,
             predicate,
@@ -404,192 +593,5 @@ impl WorkspaceProjectConfig {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::error::Error;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_discover_workspace_manifest_in_current_dir() -> Result<(), Box<dyn Error>> {
-        let dir = tempdir()?;
-        let manifest = dir.path().join("dmz-workspace.toml");
-        fs::write(
-            &manifest,
-            "name = \"test-ws\"\n[[members]]\nid = \"m1\"\npath = \".\"\nrole = \"primary\"\n",
-        )?;
-
-        let discovered = discover_workspace_manifest(dir.path());
-        assert!(discovered.is_some());
-        let (cfg, path) = discovered.ok_or("expected discovered manifest")?;
-        assert_eq!(cfg.name, "test-ws");
-        assert_eq!(path.canonicalize()?, manifest.canonicalize()?);
-        Ok(())
-    }
-
-    #[test]
-    fn test_discover_workspace_manifest_climbs_parents() -> Result<(), Box<dyn Error>> {
-        let root = tempdir()?;
-        let manifest = root.path().join("dmz-workspace.toml");
-        fs::write(
-            &manifest,
-            "name = \"parent-ws\"\n[[members]]\nid = \"root\"\npath = \".\"\nrole = \"primary\"\n",
-        )?;
-
-        let deep_nested = root.path().join("a").join("b").join("c");
-        fs::create_dir_all(&deep_nested)?;
-
-        let discovered = discover_workspace_manifest(&deep_nested);
-        assert!(discovered.is_some());
-        let (cfg, path) = discovered.ok_or("expected discovered manifest from deep child")?;
-        assert_eq!(cfg.name, "parent-ws");
-        assert_eq!(path.canonicalize()?, manifest.canonicalize()?);
-        Ok(())
-    }
-
-    #[test]
-    fn test_discover_workspace_manifest_from_file_path() -> Result<(), Box<dyn Error>> {
-        let root = tempdir()?;
-        let manifest = root.path().join("dmz-workspace.toml");
-        fs::write(
-            &manifest,
-            "name = \"file-ws\"\n[[members]]\nid = \"root\"\npath = \".\"\nrole = \"primary\"\n",
-        )?;
-
-        let nested_file = root.path().join("src").join("main.rs");
-        fs::create_dir_all(nested_file.parent().ok_or("missing parent")?)?;
-        fs::write(&nested_file, "fn main() {}")?;
-
-        let discovered = discover_workspace_manifest(&nested_file);
-        assert!(discovered.is_some());
-        let (cfg, path) = discovered.ok_or("expected discovered manifest starting from file")?;
-        assert_eq!(cfg.name, "file-ws");
-        assert_eq!(path.canonicalize()?, manifest.canonicalize()?);
-        Ok(())
-    }
-
-    #[test]
-    fn test_discover_workspace_manifest_not_found() -> Result<(), Box<dyn Error>> {
-        let dir = tempdir()?;
-        assert!(discover_workspace_manifest(dir.path()).is_none());
-        assert!(discover_workspace_manifest_checked(dir.path())?.is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn test_discover_workspace_manifest_checked_surfaces_parse_error() -> Result<(), Box<dyn Error>>
-    {
-        let dir = tempdir()?;
-        let manifest = dir.path().join("dmz-workspace.toml");
-        fs::write(&manifest, "name = [invalid toml syntax\n")?;
-
-        let err = discover_workspace_manifest_checked(dir.path())
-            .err()
-            .ok_or("expected parse error for malformed dmz-workspace.toml")?;
-        assert!(err.to_string().contains("Invalid workspace manifest"));
-        Ok(())
-    }
-
-    #[test]
-    fn test_scoped_discovery_ignores_unrelated_ancestor_umbrella() -> Result<(), Box<dyn Error>> {
-        let root = tempdir()?;
-        let sibling_sidecar = root.path().join("sidecar");
-        let standalone_child = root.path().join("standalone-child");
-        let declared_member = root.path().join("declared-member");
-        fs::create_dir_all(&sibling_sidecar)?;
-        fs::create_dir_all(&standalone_child)?;
-        fs::create_dir_all(&declared_member)?;
-
-        fs::write(
-            root.path().join("dmz-workspace.toml"),
-            r#"name = "parent-umbrella"
-[[members]]
-id = "primary"
-path = "."
-role = "primary"
-
-[[members]]
-id = "declared-member"
-path = "declared-member"
-role = "sidecar"
-"#,
-        )?;
-
-        // Standalone sibling child not listed in ancestor dmz-workspace.toml must stay isolated
-        assert!(discover_workspace_manifest_scoped(&standalone_child).is_none());
-        assert!(discover_workspace_manifest_scoped_checked(&standalone_child)?.is_none());
-
-        // Explicitly declared non-root member resolves back to its umbrella manifest
-        let found = discover_workspace_manifest_scoped(&declared_member)
-            .ok_or("expected declared member to resolve to parent umbrella")?;
-        assert_eq!(found.0.name, "parent-umbrella");
-
-        // Root itself finds its direct dmz-workspace.toml
-        let direct = discover_workspace_manifest_scoped(root.path())
-            .ok_or("expected root manifest to be discovered")?;
-        assert_eq!(direct.0.name, "parent-umbrella");
-        Ok(())
-    }
-
-    #[test]
-    fn test_discover_nested_node_and_tauri_roots_skips_symlinks() -> Result<(), Box<dyn Error>> {
-        let tmp = tempdir()?;
-        let outside = tmp.path().join("outside-pkg");
-        fs::create_dir_all(outside.join("src-tauri"))?;
-        fs::write(outside.join("package.json"), r#"{"name":"outside"}"#)?;
-        fs::write(
-            outside.join("src-tauri/Cargo.toml"),
-            "[package]\nname=\"out\"\n",
-        )?;
-
-        let member = tmp.path().join("member");
-        let frontend = member.join("frontend");
-        fs::create_dir_all(frontend.join("src-tauri"))?;
-        fs::create_dir_all(member.join("node_modules/ignored-pkg"))?;
-        fs::write(frontend.join("package.json"), r#"{"name":"frontend"}"#)?;
-        fs::write(
-            frontend.join("src-tauri/Cargo.toml"),
-            "[package]\nname=\"fe\"\n",
-        )?;
-        fs::write(
-            member.join("node_modules/ignored-pkg/package.json"),
-            r#"{"name":"ignored"}"#,
-        )?;
-
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(&outside, member.join("escape-link"))?;
-            std::os::unix::fs::symlink(&member, frontend.join("loop-link"))?;
-        }
-
-        let node_roots = discover_node_project_roots(&member);
-        assert_eq!(node_roots, vec![frontend.clone()]);
-
-        let cargo_dirs = discover_tauri_cargo_dirs(&member);
-        assert_eq!(cargo_dirs, vec![frontend.join("src-tauri")]);
-        Ok(())
-    }
-
-    #[test]
-    fn test_discover_node_roots_includes_root_plus_undeclared_frontend_and_excludes_monorepo_globs(
-    ) -> Result<(), Box<dyn Error>> {
-        let tmp = tempdir()?;
-        let root = tmp.path();
-        let ws_pkg = root.join("packages/ui");
-        let standalone_fe = root.join("frontend");
-        fs::create_dir_all(&ws_pkg)?;
-        fs::create_dir_all(&standalone_fe)?;
-
-        fs::write(
-            root.join("package.json"),
-            r#"{"name":"wrapper","workspaces":["packages/*"]}"#,
-        )?;
-        fs::write(ws_pkg.join("package.json"), r#"{"name":"ui"}"#)?;
-        fs::write(standalone_fe.join("package.json"), r#"{"name":"frontend"}"#)?;
-
-        let roots = discover_node_project_roots(root);
-        assert!(roots.contains(&root.to_path_buf()));
-        assert!(roots.contains(&standalone_fe));
-        assert!(!roots.contains(&ws_pkg));
-        Ok(())
-    }
-}
+#[path = "discovery_tests.rs"]
+mod tests;

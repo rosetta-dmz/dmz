@@ -22,6 +22,15 @@ impl ManifestScanner {
         target_platform: Option<&str>,
         include_dev: bool,
     ) -> Result<Vec<ManifestInfo>, ManifestError> {
+        Self::scan_dir_with_options_excluding(root_path, target_platform, include_dev, &[])
+    }
+
+    pub fn scan_dir_with_options_excluding(
+        root_path: &Path,
+        target_platform: Option<&str>,
+        include_dev: bool,
+        excluded_dirs: &[std::path::PathBuf],
+    ) -> Result<Vec<ManifestInfo>, ManifestError> {
         if !root_path.exists() || !root_path.is_dir() {
             return Err(ManifestError::IoError(format!(
                 "Directory does not exist: {}",
@@ -31,10 +40,11 @@ impl ManifestScanner {
 
         let mut results = Vec::new();
         cargo::CargoManifestScanner::scan(root_path, &mut results)?;
-        npm::NpmManifestScanner::scan_with_options(
+        npm::NpmManifestScanner::scan_with_options_excluding(
             root_path,
             target_platform,
             include_dev,
+            excluded_dirs,
             &mut results,
         )?;
         python::PythonManifestScanner::scan_with_options(

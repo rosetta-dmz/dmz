@@ -46,13 +46,30 @@ fn is_unrelocatable_macos_python_path(path: &Path) -> bool {
 
 /// Resolves symlink/venv/shim Python paths to the underlying base interpreter executable.
 fn resolve_python_executable(candidate: &Path) -> PathBuf {
-    let probe = Command::new(candidate)
-        .args([
-            "-c",
-            "import sys; print(getattr(sys, '_base_executable', sys.executable))",
-        ])
-        .stdin(Stdio::null())
-        .output();
+    let canon = fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+    if is_unrelocatable_macos_python(candidate)
+        || is_unrelocatable_macos_python(&canon)
+        || crate::toolchain::preflight::is_macho_xcselect_stub(&canon)
+        || candidate
+            .to_string_lossy()
+            .replace('\\', "/")
+            .contains("/shims/")
+    {
+        return canon;
+    }
+
+    let mut cmd = Command::new(candidate);
+    cmd.args([
+        "-c",
+        "import sys; print(getattr(sys, '_base_executable', sys.executable))",
+    ])
+    .stdin(Stdio::null());
+    if let Some(safe_path) =
+        crate::toolchain::preflight::sanitized_probe_path_without_macos_clt_stubs()
+    {
+        cmd.env("PATH", safe_path);
+    }
+    let probe = cmd.output();
 
     if let Ok(output) = probe {
         if output.status.success() {
@@ -68,7 +85,7 @@ fn resolve_python_executable(candidate: &Path) -> PathBuf {
         }
     }
 
-    fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf())
+    canon
 }
 
 /// Extracts numeric runs from a version directory name (e.g. `cpython-3.12.7` -> `[3, 12, 7]`).
@@ -316,34 +333,17 @@ fn collect_python_candidates() -> Vec<PathBuf> {
 }
 
 /// Checks whether a Python binary links dynamically to non-standalone package-manager paths
-/// (e.g., Homebrew OpenSSL linked into a `pyenv` build).
+/// (e.g., Homebrew OpenSSL linked into a `pyenv` build) via pure-Rust Mach-O inspection.
 fn has_non_standalone_dylib_deps(bin_path: &Path) -> bool {
     #[cfg(target_os = "macos")]
     {
-        let Ok(output) = Command::new("otool")
-            .arg("-L")
-            .arg(bin_path)
-            .stdin(Stdio::null())
-            .output()
-        else {
+        let Some(info) = crate::toolchain::setup::macho::inspect_macho_load_info(bin_path) else {
             return false;
         };
-        if !output.status.success() {
-            return false;
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines().skip(1) {
-            let dep_path = line
-                .trim()
-                .split(" (compatibility version")
-                .next()
-                .unwrap_or("")
-                .trim();
-            if dep_path.starts_with('/') && is_non_standalone_path(Path::new(dep_path)) {
-                return true;
-            }
-        }
-        false
+        info.dylib_deps.iter().any(|dep| {
+            let trimmed = dep.trim();
+            trimmed.starts_with('/') && is_non_standalone_path(Path::new(trimmed))
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -752,9 +752,9 @@ fn collect_python_lib_dir(
     }
 }
 
-/// Collects companion shared libraries under `<py_root>/lib/` referenced via Mach-O `otool -L`
+/// Collects companion shared libraries under `<py_root>/lib/` referenced via Mach-O load commands
 /// by `py_bin` (or already-discovered `lib/libpython*` dylibs) so non-monolithic standalone
-/// runtimes (e.g., `pyenv`, `miniforge`) remain self-contained in the bundle.
+/// runtimes (e.g., `pyenv`, `miniforge`) remain self-contained in the bundle without spawning `otool`.
 #[cfg(target_os = "macos")]
 fn collect_python_companion_shared_libs(
     py_bin: &Path,
@@ -777,25 +777,11 @@ fn collect_python_companion_shared_libs(
         if !inspected.insert(target.clone()) {
             continue;
         }
-        let Ok(out) = Command::new("otool")
-            .arg("-L")
-            .arg(&target)
-            .stdin(Stdio::null())
-            .output()
-        else {
+        let Some(info) = crate::toolchain::setup::macho::inspect_macho_load_info(&target) else {
             continue;
         };
-        if !out.status.success() {
-            continue;
-        }
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        for line in stdout.lines().skip(1) {
-            let trimmed = line.trim();
-            let dep = trimmed
-                .split(" (compatibility version")
-                .next()
-                .unwrap_or("")
-                .trim();
+        for raw_dep in &info.dylib_deps {
+            let dep = raw_dep.trim();
             if dep.is_empty() {
                 continue;
             }

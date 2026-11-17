@@ -219,6 +219,16 @@ pub async fn spawn_member_process(
     let resolved_exec_cmd =
         WorkspaceProjectConfig::resolve_executable_in_env(&raw_exec_cmd, &path_env, &effective_cwd);
 
+    if dmz_core::toolchain::is_uninstalled_macos_clt_shim(
+        Path::new(&resolved_exec_cmd),
+        workspace_root,
+    ) {
+        return Err(SidecarOrchestratorError::Generic(format!(
+            "Command '{}' for workspace member '{}' resolves to macOS Apple CLT stub '{}' while Command Line Tools / standalone runtime are unavailable. Bundle the toolchain with `dmz bundle` or install a standalone runtime instead.",
+            raw_exec_cmd, member.id, resolved_exec_cmd
+        )));
+    }
+
     let mut cmd = build_member_command(
         workspace_root,
         &member_dir,

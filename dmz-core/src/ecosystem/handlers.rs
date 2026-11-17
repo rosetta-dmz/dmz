@@ -374,20 +374,36 @@ impl EcosystemHandler for PythonEcosystem {
         } else {
             root.join(".venv").join("bin").join("python")
         };
-        if venv_py.is_file() {
+        if venv_py.is_file() && !crate::toolchain::is_uninstalled_macos_clt_shim(&venv_py, root) {
             return Some(CommandSpec {
                 program: venv_py.display().to_string(),
                 args: vec!["-m".into(), "compileall".into(), "-q".into(), ".".into()],
             });
         }
         let py_prog = if cfg!(windows) { "python" } else { "python3" };
-        Some(
+        let resolved_ws = CommandSpec {
+            program: py_prog.into(),
+            args: vec!["-m".into(), "compileall".into(), "-q".into(), ".".into()],
+        }
+        .resolve_in_workspace(root);
+
+        if Path::new(&resolved_ws.program).is_absolute()
+            && !crate::toolchain::is_uninstalled_macos_clt_shim(
+                Path::new(&resolved_ws.program),
+                root,
+            )
+        {
+            return Some(resolved_ws);
+        }
+
+        // Only return a verified non-stub interpreter path (never bare `python`/`python3`,
+        // which can still resolve to `/usr/bin/python3` Apple CLT GUI stub ahead of bundled/other entries).
+        crate::install::mappers::PyPiMapper::resolve_non_stub_host_python(root).map(|resolved_py| {
             CommandSpec {
-                program: py_prog.into(),
+                program: resolved_py.display().to_string(),
                 args: vec!["-m".into(), "compileall".into(), "-q".into(), ".".into()],
             }
-            .resolve_in_workspace(root),
-        )
+        })
     }
 }
 
@@ -618,11 +634,14 @@ mod tests {
         std::fs::write(ws.join("requirements.txt"), "").unwrap();
         assert!(py.detect(ws));
 
-        let cmd_ambient = py.verification_command(ws).unwrap();
-        #[cfg(not(windows))]
-        assert_eq!(cmd_ambient.program, "python3");
-        #[cfg(windows)]
-        assert_eq!(cmd_ambient.program, "python");
+        if let Some(expected_py) =
+            crate::install::mappers::PyPiMapper::resolve_non_stub_host_python(ws)
+        {
+            let cmd_ambient = py.verification_command(ws).unwrap();
+            assert_eq!(Path::new(&cmd_ambient.program), expected_py.as_path());
+        } else {
+            assert!(py.verification_command(ws).is_none());
+        }
 
         // When .venv exists, verification prefers the virtual environment binary
         let venv_bin = if cfg!(windows) {

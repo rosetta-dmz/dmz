@@ -557,6 +557,21 @@ pub(super) fn show(
                                     &member_root,
                                     &mut member_envs,
                                 );
+                                if let Some(stub_path) =
+                                    dmz_core::toolchain::should_skip_uninstalled_macos_clt_command(
+                                        &cmd.program,
+                                        &member_envs,
+                                        &member_root,
+                                    )
+                                {
+                                    tracing::warn!(
+                                        ecosystem = %eco.name(),
+                                        stub = ?stub_path,
+                                        "Skipping verification for '{}' because it resolves to macOS Apple CLT stub without Command Line Tools installed",
+                                        eco.name()
+                                    );
+                                    continue;
+                                }
                                 match std::process::Command::new(&cmd.program)
                                     .args(&cmd.args)
                                     .current_dir(&member_root)

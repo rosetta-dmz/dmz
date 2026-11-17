@@ -146,8 +146,23 @@ impl ResolverEngine {
                 )));
             }
 
+            let layout_canon = std::fs::canonicalize(&layout.host_path)
+                .unwrap_or_else(|_| layout.host_path.clone());
+            let excluded_siblings: Vec<std::path::PathBuf> = layouts
+                .iter()
+                .filter_map(|other| {
+                    let other_canon = std::fs::canonicalize(&other.host_path)
+                        .unwrap_or_else(|_| other.host_path.clone());
+                    (other.id != layout.id && other_canon != layout_canon).then_some(other_canon)
+                })
+                .collect();
+
             let member_cfg = project.find_member(&layout.id);
-            match Self::resolve_single_workspace_with_options(&layout.host_path, options) {
+            match Self::resolve_single_workspace_excluding(
+                &layout.host_path,
+                options,
+                &excluded_siblings,
+            ) {
                 Ok(member_lock) => {
                     let member_sig = member_lock.closure_signature.clone();
                     for (_, mut pkg) in member_lock.packages {
@@ -192,6 +207,12 @@ impl ResolverEngine {
         let mut unified_lock =
             DmzLockfile::with_platform(merged_packages, options.target_platform.clone());
         unified_lock.include_dev = Some(options.include_dev);
+        unified_lock.inputs_digest = Some(DmzLockfile::compute_workspace_inputs_digest(
+            workspace_dir,
+            options.target_platform.as_deref(),
+            options.include_dev,
+            Some(project),
+        ));
         for meta in workspaces_meta {
             unified_lock.add_workspace(meta);
         }
@@ -238,6 +259,21 @@ impl ResolverEngine {
         workspace_dir: &Path,
         options: &ResolveOptions,
     ) -> Result<DmzLockfile, ResolverError> {
+        let mut lockfile = Self::resolve_single_workspace_excluding(workspace_dir, options, &[])?;
+        lockfile.inputs_digest = Some(DmzLockfile::compute_workspace_inputs_digest(
+            workspace_dir,
+            options.target_platform.as_deref(),
+            options.include_dev,
+            None,
+        ));
+        Ok(lockfile)
+    }
+
+    fn resolve_single_workspace_excluding(
+        workspace_dir: &Path,
+        options: &ResolveOptions,
+        excluded_dirs: &[std::path::PathBuf],
+    ) -> Result<DmzLockfile, ResolverError> {
         info!(
             path = ?workspace_dir,
             include_dev = options.include_dev,
@@ -247,8 +283,9 @@ impl ResolverEngine {
 
         let mut locked_packages = Vec::new();
 
-        // Native Cargo Auto-Resolution (Root Cargo.toml, src-tauri/Cargo.toml, and nested Tauri subprojects)
-        let cargo_dirs = crate::workspace::discover_tauri_cargo_dirs(workspace_dir);
+        // Native Cargo Auto-Resolution (Root Cargo.toml, src-tauri/Cargo.toml, and nested Cargo/Tauri subprojects)
+        let cargo_dirs =
+            crate::workspace::discover_tauri_cargo_dirs_excluding(workspace_dir, excluded_dirs);
         let has_cargo_graph = !cargo_dirs.is_empty();
         for cargo_dir in &cargo_dirs {
             for pkg in Self::resolve_cargo_graph(cargo_dir, options)? {
@@ -261,11 +298,13 @@ impl ResolverEngine {
         }
 
         // Scan remaining non-Cargo ecosystems using options-aware ManifestScanner
-        let manifests = crate::resolver::manifest::ManifestScanner::scan_dir_with_options(
-            workspace_dir,
-            options.target_platform.as_deref(),
-            options.include_dev,
-        )?;
+        let manifests =
+            crate::resolver::manifest::ManifestScanner::scan_dir_with_options_excluding(
+                workspace_dir,
+                options.target_platform.as_deref(),
+                options.include_dev,
+                excluded_dirs,
+            )?;
 
         for manifest in manifests {
             // When `cargo metadata` already resolved the Cargo graph, do not re-inject
@@ -329,8 +368,10 @@ impl ResolverEngine {
         cargo_dir: &Path,
         options: &ResolveOptions,
     ) -> Result<Vec<LockedPackage>, ResolverError> {
-        let target_triple =
-            crate::workspace::resolve_rust_target_triple(options.target_platform.as_deref());
+        let target_triple = options
+            .target_platform
+            .as_deref()
+            .and_then(|tp| crate::workspace::resolve_rust_target_triple(Some(tp)));
         info!(
             cargo_dir = ?cargo_dir,
             target_triple = ?target_triple,
@@ -349,9 +390,22 @@ impl ResolverEngine {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            let local_cargo_cfg = cargo_dir.join(".cargo/config.toml");
+            let vendor_hint = if local_cargo_cfg.is_file()
+                && std::fs::read_to_string(&local_cargo_cfg)
+                    .map(|c| c.contains("vendored-sources"))
+                    .unwrap_or(false)
+            {
+                format!(
+                    "\nHint: {} configures offline `[source.vendored-sources]` replacement. If new crates were added to Cargo.toml, update Cargo.lock online (or temporarily remove vendored source replacement) before re-bundling.",
+                    local_cargo_cfg.display()
+                )
+            } else {
+                String::new()
+            };
             return Err(ResolverError::Command(format!(
-                "Cargo metadata resolution failed:\n{}",
-                stderr
+                "Cargo metadata resolution failed at {:?}:{}\n{}",
+                cargo_dir, vendor_hint, stderr
             )));
         }
 
@@ -399,8 +453,9 @@ impl ResolverEngine {
                     .and_then(|m| m.as_str())
                     .unwrap_or_default();
 
-                let is_workspace_member = workspace_member_ids.contains(id);
-                let version_req = if is_workspace_member {
+                let is_local_crate = workspace_member_ids.contains(id)
+                    || pkg.get("source").is_none_or(|s| s.is_null());
+                let version_req = if is_local_crate {
                     format!("path:{}", manifest_path)
                 } else {
                     version
@@ -423,6 +478,44 @@ impl ResolverEngine {
                         dependencies: Vec::new(),
                         member_id: None,
                     });
+                }
+            }
+        }
+
+        // Reconcile full Cargo.lock closure when platform filtering is not restricted
+        // (matching Nix `vendorCargoDeps` / Bazel `crate_universe` guarantees).
+        if target_triple.is_none() && options.include_dev {
+            for entry in crate::resolver::manifest::cargo::CargoManifestScanner::collect_lockfile_registry_packages(cargo_dir) {
+                if !locked
+                    .iter()
+                    .any(|p: &LockedPackage| p.name == entry.name && p.version == entry.version)
+                {
+                    let fallback_hash = DmzLockfile::hash_bytes(
+                        format!("{}:{}:{:?}", entry.name, entry.version, Ecosystem::Cargo)
+                            .as_bytes(),
+                    );
+                    locked.push(LockedPackage {
+                        name: entry.name,
+                        version: entry.version,
+                        ecosystem: Ecosystem::Cargo,
+                        sha256: entry.checksum.unwrap_or(fallback_hash),
+                        source_url: None,
+                        dependencies: Vec::new(),
+                        member_id: None,
+                    });
+                }
+            }
+
+            for direct in
+                crate::resolver::manifest::cargo::CargoManifestScanner::collect_direct_crate_names(
+                    cargo_dir, true,
+                )
+            {
+                if !locked.iter().any(|p| p.name == direct) {
+                    return Err(ResolverError::Command(format!(
+                        "Cargo resolution at {:?} omitted direct dependency '{}' declared in Cargo.toml",
+                        cargo_dir, direct
+                    )));
                 }
             }
         }
@@ -705,6 +798,24 @@ dev-only = { path = "dev-only" }
         assert!(win_names.contains(&"win-only"));
         assert!(!win_names.contains(&"linux-only"));
         assert!(win_names.contains(&"dev-only"));
+
+        // Target-unfiltered resolution (target_platform = None) retains ALL target-gated crates
+        // matching Nix `vendorCargoDeps` / Bazel `crate_universe`.
+        let all_targets = ResolverEngine::resolve_single_workspace_with_options(
+            root,
+            &ResolveOptions {
+                target_platform: None,
+                include_dev: true,
+            },
+        )?;
+        let all_names: Vec<&str> = all_targets
+            .packages
+            .values()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert!(all_names.contains(&"linux-only"));
+        assert!(all_names.contains(&"win-only"));
+        assert!(all_names.contains(&"dev-only"));
 
         Ok(())
     }

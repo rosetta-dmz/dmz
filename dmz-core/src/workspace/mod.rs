@@ -12,14 +12,16 @@ pub mod socket;
 pub use atomic::{atomic_write_file, atomic_write_file_with_mode, DEFAULT_FILE_MODE};
 pub use config::{
     build_member_env, canonical_virtual_path, cleanup_stale_socket, detect_default_command,
-    discover_node_project_roots, discover_or_from_lockfile, discover_or_from_lockfile_scoped,
-    discover_tauri_cargo_dirs, discover_workspace_manifest, discover_workspace_manifest_checked,
-    discover_workspace_manifest_scoped, discover_workspace_manifest_scoped_checked,
-    has_node_project_manifest, host_target_triple, is_ignored_workspace_rel_path,
-    normalize_member_path, populate_detected_defaults, resolve_command, resolve_executable_in_env,
-    resolve_member_layouts, resolve_rust_target_triple, resolve_target_os_arch, safe_socket_path,
-    sanitize_folder_name, should_skip_workspace_artifact_dir, IpcBridgeConfig, MemberRole,
-    ResolvedMemberLayout, WorkspaceMember, WorkspaceProjectConfig,
+    discover_node_project_roots, discover_node_project_roots_excluding, discover_or_from_lockfile,
+    discover_or_from_lockfile_scoped, discover_tauri_cargo_dirs,
+    discover_tauri_cargo_dirs_excluding, discover_workspace_manifest,
+    discover_workspace_manifest_checked, discover_workspace_manifest_scoped,
+    discover_workspace_manifest_scoped_checked, has_node_project_manifest, host_target_triple,
+    is_ignored_workspace_rel_path, normalize_member_path, populate_detected_defaults,
+    resolve_command, resolve_executable_in_env, resolve_member_layouts, resolve_rust_target_triple,
+    resolve_target_os_arch, safe_socket_path, sanitize_folder_name,
+    should_skip_workspace_artifact_dir, IpcBridgeConfig, MemberRole, ResolvedMemberLayout,
+    WorkspaceMember, WorkspaceProjectConfig,
 };
 pub use diagnostics::{analyze_sidecar_abi, check_socket_path_length, SidecarAbiReport};
 pub use inference::WorkspaceError;

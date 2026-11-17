@@ -94,17 +94,30 @@ impl InstallerEngine {
 
             // Ecosystem-specific deterministic linkage
             for target_workspace in &target_workspaces {
+                let excluded = Self::excluded_sibling_dirs_for(
+                    &config.workspace_path,
+                    target_workspace,
+                    workspace_manifest.as_ref(),
+                );
                 Self::dispatch_package_mapper(
                     target_workspace,
                     &config.workspace_path,
                     pkg,
                     &archive_path,
+                    &excluded,
                 )?;
             }
 
             installed_count += 1;
             info!(name = %pkg.name, version = %pkg.version, "Successfully installed package offline");
         }
+
+        // Post-install Cargo vendor completeness verification across every discovered Cargo target
+        Self::verify_cargo_vendor_completeness(
+            &config.workspace_path,
+            &lockfile,
+            workspace_manifest.as_ref(),
+        )?;
 
         // Post-install environment hydration (IDE settings, shims, activators, modules.yaml, pnpm links)
         Self::hydrate_post_install_environment(config, &lockfile, workspace_manifest.as_ref())?;
@@ -245,10 +258,22 @@ impl InstallerEngine {
 
         if let Some(member) = member_opt {
             let member_dir = Self::resolve_member_path(workspace_path, &member.path);
-            if member_dir.is_dir() {
+            let other_member_owns_eco = manifest.members.iter().any(|m| {
+                m.id != member.id
+                    && Self::member_matches_ecosystem(
+                        &Self::resolve_member_path(workspace_path, &m.path),
+                        &pkg.ecosystem,
+                    )
+            });
+            if member_dir.is_dir()
+                && (Self::member_matches_ecosystem(&member_dir, &pkg.ecosystem)
+                    || !other_member_owns_eco)
+            {
                 return Self::expand_ecosystem_target_dirs(&member_dir, &pkg.ecosystem);
             }
-            return Self::expand_ecosystem_target_dirs(workspace_path, &pkg.ecosystem);
+            if !other_member_owns_eco {
+                return Self::expand_ecosystem_target_dirs(workspace_path, &pkg.ecosystem);
+            }
         }
 
         // 2. Intelligent Ecosystem Fallback:
@@ -323,12 +348,34 @@ impl InstallerEngine {
         Ok(())
     }
 
+    fn excluded_sibling_dirs_for(
+        workspace_path: &Path,
+        target_workspace: &Path,
+        workspace_manifest: Option<&WorkspaceProjectConfig>,
+    ) -> Vec<PathBuf> {
+        let Some(manifest) = workspace_manifest else {
+            return Vec::new();
+        };
+        let target_canon =
+            fs::canonicalize(target_workspace).unwrap_or_else(|_| target_workspace.to_path_buf());
+        manifest
+            .members
+            .iter()
+            .filter_map(|m| {
+                let resolved = Self::resolve_member_path(workspace_path, &m.path);
+                let canon = fs::canonicalize(&resolved).unwrap_or(resolved);
+                (canon != target_canon).then_some(canon)
+            })
+            .collect()
+    }
+
     /// Dispatches package layout mapping to the corresponding ecosystem mapper
     fn dispatch_package_mapper(
         target_workspace: &Path,
         root_workspace: &Path,
         pkg: &LockedPackage,
         archive_path: &Path,
+        excluded_dirs: &[PathBuf],
     ) -> Result<(), InstallError> {
         match pkg.ecosystem {
             Ecosystem::Npm => {
@@ -352,7 +399,12 @@ impl InstallerEngine {
                 }
             }
             Ecosystem::Cargo => {
-                mappers::CargoMapper::map_package(target_workspace, pkg, archive_path)?;
+                mappers::CargoMapper::map_package_excluding(
+                    target_workspace,
+                    pkg,
+                    archive_path,
+                    excluded_dirs,
+                )?;
             }
             Ecosystem::PyPI => {
                 mappers::PyPiMapper::map_package(target_workspace, pkg, archive_path)?;
@@ -371,6 +423,156 @@ impl InstallerEngine {
             }
             Ecosystem::Unknown(ref eco) => {
                 return Err(InstallError::UnsupportedEcosystem(eco.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_effective_cargo_vendor_dir(cargo_dir: &Path, stop_root: &Path) -> Option<PathBuf> {
+        let stop_canon = fs::canonicalize(stop_root).unwrap_or_else(|_| stop_root.to_path_buf());
+        let mut cursor = Some(cargo_dir);
+        while let Some(dir) = cursor {
+            let cfg_path = dir.join(".cargo/config.toml");
+            if cfg_path.is_file() {
+                if let Some(raw_dir) =
+                    mappers::CargoMapper::read_vendored_source_directory(&cfg_path)
+                {
+                    let raw = Path::new(&raw_dir);
+                    let resolved = if raw.is_absolute() {
+                        raw.to_path_buf()
+                    } else {
+                        dir.join(raw)
+                    };
+                    return Some(resolved);
+                }
+            }
+            let canon_dir = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+            if canon_dir == stop_canon {
+                break;
+            }
+            cursor = dir.parent();
+        }
+        None
+    }
+
+    fn vendor_dir_contains_crate_named(vendor_dir: &Path, crate_name: &str) -> bool {
+        let prefix = format!("{}-", crate_name);
+        let Ok(entries) = fs::read_dir(vendor_dir) else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            let p = entry.path();
+            p.is_dir()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&prefix))
+                && p.join("Cargo.toml").is_file()
+        })
+    }
+
+    /// Verifies that every non-local Cargo package in `dmz.lock`, every direct Cargo.toml dependency,
+    /// and (for target-unfiltered closures) every Cargo.lock crates.io package is materialized inside
+    /// the resolved `[source.vendored-sources].directory` used by each discovered `Cargo.toml`.
+    fn verify_cargo_vendor_completeness(
+        workspace_path: &Path,
+        lockfile: &DmzLockfile,
+        workspace_manifest: Option<&WorkspaceProjectConfig>,
+    ) -> Result<(), InstallError> {
+        let cargo_pkgs: Vec<&LockedPackage> = lockfile
+            .packages
+            .values()
+            .filter(|p| p.ecosystem == Ecosystem::Cargo && !p.is_local_path())
+            .collect();
+
+        for pkg in &cargo_pkgs {
+            for target_ws in
+                Self::resolve_target_workspaces(workspace_path, pkg, workspace_manifest)
+            {
+                let excluded =
+                    Self::excluded_sibling_dirs_for(workspace_path, &target_ws, workspace_manifest);
+                let cargo_dirs =
+                    crate::workspace::discover_tauri_cargo_dirs_excluding(&target_ws, &excluded);
+                for cargo_dir in cargo_dirs {
+                    let Some(vendor_dir) =
+                        Self::resolve_effective_cargo_vendor_dir(&cargo_dir, workspace_path)
+                    else {
+                        return Err(InstallError::MapperError(format!(
+                            "Missing `.cargo/config.toml` vendored-sources configuration for Cargo project at {:?}",
+                            cargo_dir
+                        )));
+                    };
+                    let crate_manifest = vendor_dir
+                        .join(format!("{}-{}", pkg.name, pkg.version))
+                        .join("Cargo.toml");
+                    if !crate_manifest.is_file() {
+                        return Err(InstallError::MapperError(format!(
+                            "Vendored Cargo crate '{}@{}' required by {:?} was not materialized in {:?}",
+                            pkg.name, pkg.version, cargo_dir, vendor_dir
+                        )));
+                    }
+                }
+            }
+        }
+
+        let include_dev = lockfile.include_dev.unwrap_or(true);
+        let include_target_tables = lockfile.target_platform.is_none();
+        let member_targets: Vec<PathBuf> = if let Some(manifest) = workspace_manifest {
+            manifest
+                .members
+                .iter()
+                .map(|m| Self::resolve_member_path(workspace_path, &m.path))
+                .filter(|d| d.is_dir())
+                .collect()
+        } else {
+            vec![workspace_path.to_path_buf()]
+        };
+
+        for target_ws in member_targets {
+            let excluded =
+                Self::excluded_sibling_dirs_for(workspace_path, &target_ws, workspace_manifest);
+            for cargo_dir in
+                crate::workspace::discover_tauri_cargo_dirs_excluding(&target_ws, &excluded)
+            {
+                let direct_crates = crate::resolver::manifest::cargo::CargoManifestScanner::collect_direct_crate_names_with_targets(
+                    &cargo_dir,
+                    include_dev,
+                    include_target_tables,
+                );
+                let lock_pkgs = if include_target_tables && include_dev {
+                    crate::resolver::manifest::cargo::CargoManifestScanner::collect_lockfile_registry_packages(&cargo_dir)
+                } else {
+                    Vec::new()
+                };
+                if direct_crates.is_empty() && lock_pkgs.is_empty() {
+                    continue;
+                }
+                let Some(vendor_dir) =
+                    Self::resolve_effective_cargo_vendor_dir(&cargo_dir, workspace_path)
+                else {
+                    return Err(InstallError::MapperError(format!(
+                        "Missing `.cargo/config.toml` vendored-sources configuration for Cargo project at {:?}",
+                        cargo_dir
+                    )));
+                };
+                for crate_name in direct_crates {
+                    if !Self::vendor_dir_contains_crate_named(&vendor_dir, &crate_name) {
+                        return Err(InstallError::MapperError(format!(
+                            "Direct Cargo.toml dependency '{}' required by {:?} is missing from vendored directory {:?} (re-run `dmz bundle` or `Scan & Resolve`)",
+                            crate_name, cargo_dir, vendor_dir
+                        )));
+                    }
+                }
+                for entry in lock_pkgs {
+                    let crate_manifest = vendor_dir
+                        .join(format!("{}-{}", entry.name, entry.version))
+                        .join("Cargo.toml");
+                    if !crate_manifest.is_file() {
+                        return Err(InstallError::MapperError(format!(
+                            "Cargo.lock package '{}@{}' required by {:?} was not materialized in {:?} (re-run `dmz bundle` or `Scan & Resolve`)",
+                            entry.name, entry.version, cargo_dir, vendor_dir
+                        )));
+                    }
+                }
             }
         }
         Ok(())
@@ -495,239 +697,4 @@ pub fn locate_locked_store_artifact(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_install_error_display() {
-        let err = InstallError::IntegrityMismatch {
-            expected: "abc".into(),
-            actual: "def".into(),
-        };
-        assert!(err
-            .to_string()
-            .contains("Store Artifact Integrity Mismatch"));
-
-        let err2 = InstallError::ArtifactMissing {
-            package: "foo".into(),
-            path: PathBuf::from("/store/foo.archive"),
-        };
-        assert!(err2.to_string().contains("Missing cached store artifact"));
-
-        let err3 = InstallError::UnsupportedEcosystem("unknown_lang".into());
-        assert!(err3.to_string().contains("Ecosystem not supported"));
-    }
-
-    #[test]
-    fn test_install_fails_fast_when_store_missing() {
-        let temp = tempdir().unwrap();
-        let ws = temp.path().join("workspace");
-        fs::create_dir_all(&ws).unwrap();
-        let lockfile_path = ws.join("dmz.lock");
-
-        let packages = std::collections::BTreeMap::new();
-        let closure_signature = DmzLockfile::compute_closure_hash(&packages);
-        let lockfile = DmzLockfile {
-            version: 1,
-            target_platform: None,
-            include_dev: None,
-            vcs: None,
-            workspaces: std::collections::BTreeMap::new(),
-            closure_signature,
-            packages,
-        };
-        lockfile.save(&lockfile_path).unwrap();
-
-        let config = InstallConfig {
-            workspace_path: ws,
-            lockfile_path,
-            store_dir: temp.path().join("non_existent_store"),
-        };
-
-        let result = InstallerEngine::install(&config);
-        assert!(matches!(result, Err(InstallError::IoError(_))));
-    }
-
-    #[test]
-    fn test_locate_store_artifact_missing() {
-        let temp = tempdir().unwrap();
-        let store = temp.path().join("store");
-        fs::create_dir_all(&store).unwrap();
-
-        let pkg = LockedPackage {
-            name: "test-pkg".into(),
-            version: "1.0.0".into(),
-            ecosystem: Ecosystem::Cargo,
-            sha256: "deadbeef".into(),
-            source_url: None,
-            dependencies: vec![],
-            member_id: None,
-        };
-
-        let result = InstallerEngine::locate_store_artifact(&store, &pkg);
-        assert!(matches!(result, Err(InstallError::ArtifactMissing { .. })));
-    }
-
-    #[test]
-    fn test_verify_artifact_integrity_mismatch() {
-        let temp = tempdir().unwrap();
-        let archive_path = temp.path().join("artifact.archive");
-        fs::write(&archive_path, b"corrupted content").unwrap();
-
-        let pkg = LockedPackage {
-            name: "test-pkg".into(),
-            version: "1.0.0".into(),
-            ecosystem: Ecosystem::Cargo,
-            sha256: "0000000000000000000000000000000000000000000000000000000000000000".into(),
-            source_url: None,
-            dependencies: vec![],
-            member_id: None,
-        };
-
-        let result = InstallerEngine::verify_artifact_integrity(&archive_path, &pkg);
-        assert!(matches!(
-            result,
-            Err(InstallError::IntegrityMismatch { .. })
-        ));
-    }
-
-    #[test]
-    fn test_locate_store_artifact_rejects_traversal() {
-        let temp = tempdir().unwrap();
-        let store = temp.path().join("store");
-        fs::create_dir_all(&store).unwrap();
-
-        for traversal_name in &["..", "../escape", "../../etc/shadow", "safe/../../escape"] {
-            let pkg = LockedPackage {
-                name: traversal_name.to_string(),
-                version: "1.0.0".into(),
-                ecosystem: Ecosystem::Cargo,
-                sha256: "deadbeef".into(),
-                source_url: None,
-                dependencies: vec![],
-                member_id: None,
-            };
-
-            let result = InstallerEngine::locate_store_artifact(&store, &pkg);
-            assert!(
-                matches!(result, Err(InstallError::MapperError(_))),
-                "Expected traversal rejection for {}",
-                traversal_name
-            );
-        }
-    }
-
-    #[test]
-    fn test_resolve_member_path_containment() {
-        let temp = tempdir().unwrap();
-        let ws = temp.path().join("workspace");
-        fs::create_dir_all(&ws).unwrap();
-        let canonical_ws = fs::canonicalize(&ws).unwrap();
-
-        // Valid inside member
-        let valid_member = ws.join("packages/app");
-        fs::create_dir_all(&valid_member).unwrap();
-        let resolved = InstallerEngine::resolve_member_path(&ws, Path::new("packages/app"));
-        assert!(resolved.starts_with(&canonical_ws));
-
-        // Escaping member path
-        let escaped_path = Path::new("../../../../etc");
-        let resolved = InstallerEngine::resolve_member_path(&ws, escaped_path);
-        // Must fallback to workspace root
-        assert_eq!(resolved, canonical_ws);
-    }
-
-    #[test]
-    fn test_verify_artifact_integrity_rejects_dummy_placeholders() {
-        let temp = tempdir().unwrap();
-        let archive_path = temp.path().join("artifact.archive");
-        let bytes = b"real archive payload";
-        fs::write(&archive_path, bytes).unwrap();
-        let real_hash = {
-            use sha2::Digest as _;
-            crate::archive::format_sha256_hex(&sha2::Sha256::digest(bytes))
-        };
-
-        for dummy_hash in &["", "dummy", "pending", "0000000000000000"] {
-            let pkg = LockedPackage {
-                name: "test-pkg".into(),
-                version: "1.0.0".into(),
-                ecosystem: Ecosystem::Cargo,
-                sha256: (*dummy_hash).to_string(),
-                source_url: None,
-                dependencies: vec![],
-                member_id: None,
-            };
-            let res = InstallerEngine::verify_artifact_integrity(&archive_path, &pkg);
-            assert!(
-                matches!(res, Err(InstallError::IntegrityMismatch { .. })),
-                "Expected dummy hash {:?} to be rejected",
-                dummy_hash
-            );
-        }
-
-        let valid_pkg = LockedPackage {
-            name: "test-pkg".into(),
-            version: "1.0.0".into(),
-            ecosystem: Ecosystem::Cargo,
-            sha256: real_hash,
-            source_url: None,
-            dependencies: vec![],
-            member_id: None,
-        };
-        assert!(InstallerEngine::verify_artifact_integrity(&archive_path, &valid_pkg).is_ok());
-    }
-
-    #[test]
-    fn test_resolve_target_member_dir_bundler_and_maven_gradle_fallback() {
-        let temp = tempdir().unwrap();
-        let ws = temp.path();
-        let ruby_dir = ws.join("ruby-service");
-        let jvm_dir = ws.join("jvm-service");
-        fs::create_dir_all(&ruby_dir).unwrap();
-        fs::create_dir_all(&jvm_dir).unwrap();
-        fs::write(ruby_dir.join("Gemfile"), "source 'https://rubygems.org'\n").unwrap();
-        fs::write(jvm_dir.join("pom.xml"), "<project></project>\n").unwrap();
-
-        let cfg = WorkspaceProjectConfig::new(
-            "polyglot",
-            vec![
-                crate::workspace::WorkspaceMember::new(
-                    "ruby",
-                    Path::new("ruby-service"),
-                    crate::workspace::MemberRole::Sidecar,
-                ),
-                crate::workspace::WorkspaceMember::new(
-                    "jvm",
-                    Path::new("jvm-service"),
-                    crate::workspace::MemberRole::Service,
-                ),
-            ],
-        );
-
-        let bundler_pkg = LockedPackage {
-            name: "rack".into(),
-            version: "3.0.0".into(),
-            ecosystem: Ecosystem::Bundler,
-            sha256: "abc".into(),
-            source_url: None,
-            dependencies: vec![],
-            member_id: None,
-        };
-        let resolved_ruby = InstallerEngine::resolve_target_workspace(ws, &bundler_pkg, Some(&cfg));
-        assert_eq!(resolved_ruby, fs::canonicalize(&ruby_dir).unwrap());
-
-        let maven_pkg = LockedPackage {
-            name: "com.example:lib".into(),
-            version: "1.0.0".into(),
-            ecosystem: Ecosystem::MavenGradle,
-            sha256: "def".into(),
-            source_url: None,
-            dependencies: vec![],
-            member_id: None,
-        };
-        let resolved_jvm = InstallerEngine::resolve_target_workspace(ws, &maven_pkg, Some(&cfg));
-        assert_eq!(resolved_jvm, fs::canonicalize(&jvm_dir).unwrap());
-    }
-}
+mod tests;

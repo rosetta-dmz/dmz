@@ -16,6 +16,17 @@ impl NpmManifestScanner {
         include_dev: bool,
         results: &mut Vec<ManifestInfo>,
     ) -> Result<(), ManifestError> {
+        Self::scan_with_options_excluding(root_path, target_platform, include_dev, &[], results)
+    }
+
+    /// Like [`Self::scan_with_options`], excluding nested sibling member directories.
+    pub fn scan_with_options_excluding(
+        root_path: &Path,
+        target_platform: Option<&str>,
+        include_dev: bool,
+        excluded_dirs: &[PathBuf],
+        results: &mut Vec<ManifestInfo>,
+    ) -> Result<(), ManifestError> {
         let mut visited_manifests = HashSet::new();
         Self::scan_node_dir_with_options(
             root_path,
@@ -26,7 +37,9 @@ impl NpmManifestScanner {
             results,
         )?;
 
-        for nested_root in crate::workspace::discover_node_project_roots(root_path) {
+        for nested_root in
+            crate::workspace::discover_node_project_roots_excluding(root_path, excluded_dirs)
+        {
             if nested_root != root_path {
                 Self::scan_node_dir_with_options(
                     &nested_root,
@@ -429,69 +442,12 @@ impl NpmManifestScanner {
     }
 
     fn expand_workspace_pattern(root_dir: &Path, pattern: &str, out: &mut Vec<PathBuf>) {
-        if pattern.contains("**") {
-            let base = pattern
-                .split("**")
-                .next()
-                .unwrap_or("")
-                .trim_end_matches('/');
-            let start = if base.is_empty() {
-                root_dir.to_path_buf()
-            } else {
-                root_dir.join(base)
-            };
-            Self::collect_recursive_package_dirs(&start, 0, out);
-            return;
-        }
-
-        if let Some(prefix) = pattern
-            .strip_suffix("/*")
-            .or_else(|| pattern.strip_suffix('*'))
-        {
-            let base_dir = if prefix.is_empty() {
-                root_dir.to_path_buf()
-            } else {
-                root_dir.join(prefix.trim_end_matches('/'))
-            };
-            if let Ok(entries) = fs::read_dir(base_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() && path.join("package.json").is_file() {
-                        out.push(path);
-                    }
-                }
-            }
-            return;
-        }
-
-        let exact_dir = root_dir.join(pattern);
-        if exact_dir.is_dir() && exact_dir.join("package.json").is_file() {
-            out.push(exact_dir);
-        }
-    }
-
-    fn collect_recursive_package_dirs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
-        if depth > 6 || !dir.is_dir() {
-            return;
-        }
-        if depth > 0 && dir.join("package.json").is_file() {
-            out.push(dir.to_path_buf());
-        }
-        let Ok(entries) = fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if crate::workspace::should_skip_workspace_artifact_dir(&path, &name_str, None) {
-                continue;
-            }
-            Self::collect_recursive_package_dirs(&path, depth + 1, out);
-        }
+        crate::workspace::discovery::expand_manifest_glob_pattern(
+            root_dir,
+            pattern,
+            "package.json",
+            out,
+        );
     }
 
     fn collect_npm_workspace_members_visited(

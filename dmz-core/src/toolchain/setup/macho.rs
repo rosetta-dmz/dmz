@@ -172,10 +172,10 @@ pub fn inspect_macho_bytes(buf: &[u8]) -> Option<MachOLoadInfo> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn build_synthetic_macho64(rpath: &str, dep: &str) -> Vec<u8> {
+    pub(crate) fn build_synthetic_macho64(rpath: &str, dep: &str) -> Vec<u8> {
         let mut rpath_cmd = Vec::new();
         let mut rpath_bytes = rpath.as_bytes().to_vec();
         rpath_bytes.push(0);

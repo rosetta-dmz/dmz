@@ -148,9 +148,22 @@ pub fn hydrate_offline_dependencies_with_options(
             }
         }
 
+        let excluded_for = |dir: &Path| -> Vec<PathBuf> {
+            let canon = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+            target_dirs
+                .iter()
+                .filter_map(|(other, _)| {
+                    let other_canon =
+                        fs::canonicalize(other).unwrap_or_else(|_| other.to_path_buf());
+                    (other_canon != canon).then_some(other_canon)
+                })
+                .collect()
+        };
+
         // 1. Cargo vendoring configuration: .cargo/config.toml (root, src-tauri, and nested Tauri subprojects)
         // Per Cargo's config-relative-paths specification, `directory` in `.cargo/config.toml`
         // is resolved relative to the parent directory of `.cargo`.
+        let excluded_dirs = excluded_for(dir);
         let member_vendor = dir.join(".cargo/vendor");
         let root_vendor = workspace_root.join(".cargo/vendor");
         let (vendor_abs_opt, force_overwrite) = if member_vendor.is_dir() {
@@ -162,17 +175,20 @@ pub fn hydrate_offline_dependencies_with_options(
         };
         let vendor_target = vendor_abs_opt.unwrap_or(&effective_target_store);
 
-        for cargo_manifest_dir in crate::workspace::discover_tauri_cargo_dirs(dir) {
+        for cargo_manifest_dir in
+            crate::workspace::discover_tauri_cargo_dirs_excluding(dir, &excluded_dirs)
+        {
             let cargo_dir = cargo_manifest_dir.join(".cargo");
             let rel_vendor = relative_path_between(&cargo_manifest_dir, vendor_target);
             if fs::create_dir_all(&cargo_dir).is_ok() {
                 let config_path = cargo_dir.join("config.toml");
-                if force_overwrite || !config_path.exists() {
-                    let cargo_config_content = format!(
-                        "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"{}\"\n",
-                        rel_vendor
-                    );
-                    let _ = fs::write(&config_path, cargo_config_content);
+                if (force_overwrite || !config_path.exists())
+                    && crate::install::mappers::CargoMapper::ensure_vendored_cargo_config(
+                        &config_path,
+                        &rel_vendor,
+                    )
+                    .is_ok()
+                {
                     info!(
                         config = ?config_path,
                         vendor = %rel_vendor,
@@ -183,7 +199,9 @@ pub fn hydrate_offline_dependencies_with_options(
         }
 
         // 2. Generic Node / NPM CLI shim hydration: node_modules/.bin/* and pnpm .modules.yaml
-        for node_root in crate::workspace::discover_node_project_roots(dir) {
+        for node_root in
+            crate::workspace::discover_node_project_roots_excluding(dir, &excluded_dirs)
+        {
             if node_root.join("package.json").is_file() || node_root.join("node_modules").is_dir() {
                 crate::install::mappers::NpmMapper::hydrate_workspace_bin_shims_with_options(
                     &node_root,
@@ -201,12 +219,17 @@ pub fn hydrate_offline_dependencies_with_options(
         }
 
         // 3. Python folder-scoped configuration
-        let has_python =
-            dir.join("requirements.txt").is_file() || dir.join("pyproject.toml").is_file();
+        let has_python = dir.join("requirements.txt").is_file()
+            || dir.join("pyproject.toml").is_file()
+            || dir.join("setup.py").is_file()
+            || dir.join("Pipfile").is_file();
+        let member_venv = dir.join(".venv");
+        let venv_has_clt_stub = ["bin/python", "bin/python3"].iter().any(|rel| {
+            crate::toolchain::is_uninstalled_macos_clt_shim(&member_venv.join(rel), dir)
+        });
         let is_umbrella =
             workspace_project.is_some() || workspace_root.join("dmz-workspace.toml").exists();
-        if has_python {
-            let member_venv = dir.join(".venv");
+        if has_python || venv_has_clt_stub {
             if member_venv.is_dir()
                 || crate::install::mappers::PyPiMapper::has_available_base_python(dir)
             {

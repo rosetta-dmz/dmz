@@ -74,6 +74,7 @@ edition = "2021"
         version: 1,
         target_platform: None,
         include_dev: None,
+        inputs_digest: None,
         vcs: None,
         workspaces: BTreeMap::new(),
         closure_signature: closure_sig,
