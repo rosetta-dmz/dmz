@@ -309,8 +309,7 @@ pub fn select_strict_standalone_candidate(candidates: Vec<PathBuf>) -> Option<Pa
 }
 
 /// Evaluates `candidates` in priority order using `probe`, strictly rejecting non-standalone
-/// package-manager installs (Homebrew, Linuxbrew, Nix, Snap) with a notice and never falling
-/// back to them.
+/// package-manager installs (Homebrew, Linuxbrew, Nix, Snap) with a notice.
 pub fn select_strict_standalone_verified<T, F>(
     candidates: Vec<PathBuf>,
     mut probe: F,

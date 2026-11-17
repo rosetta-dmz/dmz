@@ -9,7 +9,7 @@ pub mod stream;
 use crate::resolver::lockfile::{DmzLockfile, LockedPackage};
 use crate::resolver::manifest::{Ecosystem, ManifestScanner};
 use crate::resolver::ResolverError;
-pub use pypi::select_pypi_artifact;
+pub use pypi::{select_pypi_artifact, select_pypi_artifact_for_python};
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -99,6 +99,15 @@ impl DependencyFetcher {
         let golang_proxy_base = bases.golang.clone();
 
         let target_platform = lockfile.target_platform.clone();
+        let workspace_dir = lockfile_path.parent();
+        let member_roots = workspace_dir
+            .map(|ws| crate::toolchain::ToolchainDetector::collect_workspace_member_dirs(ws, None))
+            .unwrap_or_default();
+        let preferred_cp_tag = crate::toolchain::discovery::python::resolve_workspace_python_minor(
+            workspace_dir,
+            &member_roots,
+        )
+        .map(|(major, minor)| format!("cp{}{}", major, minor));
 
         // Defensive sanitation of lockfile packages against stale/dirty names (e.g. from prior PEP 508 bugs)
         let mut sanitized_packages = std::collections::BTreeMap::new();
@@ -176,6 +185,7 @@ impl DependencyFetcher {
                     let pypi_ref = &pypi_base;
                     let golang_ref = &golang_proxy_base;
                     let target_ref = target_platform.as_deref();
+                    let cp_tag_ref = preferred_cp_tag.as_deref();
 
                     s.spawn(move || {
                         let client = match reqwest::blocking::Client::builder()
@@ -220,6 +230,7 @@ impl DependencyFetcher {
                                 pypi_ref,
                                 golang_ref,
                                 target_ref,
+                                cp_tag_ref,
                                 key,
                                 pkg,
                             );

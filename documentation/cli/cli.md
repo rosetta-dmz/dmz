@@ -170,7 +170,8 @@ dmz bundle [OPTIONS]
 * `--mode <MODE>` — Export mode: `unified` (code + dependencies), `code-only`, or `deps-only`. *(Default: `unified`)*
 * `--zstd-level <LEVEL>` — Zstandard compression level from `1` to `22`. *(Default: `3`)*
 * `-t, --target <TARGET>` — Target platform specification (e.g., `macos-arm64`, `linux-x86_64`).
-* `--with-toolchain` — Automatically captures host compiler runtimes (Rust `cargo`/`rustc`, Node.js, Python, Go, PHP, Ruby) directly into the bundle for true zero-dependency target execution.
+* `--with-toolchain` — Automatically captures standalone provider compiler runtimes (Rust `cargo`/`rustc`, Node.js, Python, Go, PHP, Ruby) directly into the bundle for true zero-dependency target execution. Fails export if a required primary runtime (such as standalone Python via `python.org` or `uv python install`) cannot be found unless `--allow-missing-toolchains` or `--no-toolchain` is passed.
+* `--allow-missing-toolchains` — Permits `export`/`bundle` to warn and omit missing host standalone runtimes instead of failing.
 * `--toolchain-profile <minimal|full>` — First-party compiler toolchain closure profile: `minimal` (default) packages core compiler/runtime, host/target sysroots, and the lockfile's package manager while stripping IDE/dev tools (`rustdoc`, `rust-analyzer`, `cargo-clippy`), foreign cross-targets, and unused package managers; `full` adds first-party toolchain extras (`rust-analyzer`, `clippy`, `rustdoc`, `ctest`, `cpack`, headers, stdlib extras, cross-targets, and official Node package managers). Host-global package caches (`site-packages`, `dist-packages`, non-manager `node_modules`, Ruby `gems`/`site_ruby`, PEAR/PECL) are excluded in **both** profiles; third-party runtime/dev packages belong in `dmz.lock` (`--include-dev`).
 * `--include-dev` — Include project development dependencies (`devDependencies`, `dev-dependencies`, test/lint extras) from workspace manifests in `dmz.lock` and toolchain detection. *(Default: `false`)*
 * `--with-git-history` — Archives a deterministic Git bundle v2 file (`workspace.bundle`) alongside the closure.
@@ -205,7 +206,8 @@ dmz airgap export [OPTIONS]
 * `--mode <MODE>` — Export mode: `unified` (code + dependencies), `code-only`, or `deps-only`. *(Default: `unified`)*
 * `--zstd-level <LEVEL>` — Zstandard compression level from `1` to `22`. *(Default: `3`)*
 * `-t, --target <TARGET>` — Target platform specification (e.g., `macos-arm64`, `linux-x86_64`).
-* `--with-toolchain` — Package active compiler toolchains (cargo, rustc, node, go, python, php, ruby) into bundle.
+* `--with-toolchain` — Package active compiler toolchains (cargo, rustc, node, go, python, php, ruby) into bundle. Fails if a required primary runtime cannot be discovered on the export host unless `--allow-missing-toolchains` is passed.
+* `--allow-missing-toolchains` — Permits exporting with a warning if a required standalone runtime toolchain is unavailable on the export host.
 * `--toolchain-profile <minimal|full>` — First-party compiler toolchain closure profile (`minimal` by default, or `full` for extra first-party IDE/doc tools, headers, stdlib extras, cross-targets, and official package managers). Host-global package caches are excluded in **both** profiles; third-party packages belong in `dmz.lock` (`--include-dev`).
 * `--include-dev` — Include development dependencies during toolchain detection (pair with a `dmz.lock` resolved with `--include-dev`). *(Default: `false`)*
 * `--with-git-history` — Archive deterministic Git bundle alongside closure.
@@ -233,7 +235,7 @@ When toolchains are bundled (`--with-toolchain`):
 - Enforces **Root Manifest Dominance**: validates declared workspace ecosystems (respecting `--include-dev`) and purges any unrequested `.dmz/toolchains/<ecosystem>/` directories or unreferenced store artifacts.
 - Extracted automatically to `<workspace>/.dmz/toolchains/<ecosystem>/` with executable (`0o755`) permissions.
 - Runs `xattr -cr` across `.dmz/toolchains` on macOS to eliminate Gatekeeper / quarantine restrictions.
-- Generates `.dmz/env.sh` (Unix/macOS) and `.dmz/env.bat` (Windows) activator scripts that prepend `.dmz/toolchains/*/bin` to `$PATH` and configure `CARGO_HOME`, `RUSTUP_HOME`, `GOROOT`, and `PYTHONHOME`.
+- Generates `.dmz/env.sh` (Unix/macOS) and `.dmz/env.bat` (Windows) activator scripts that prepend `.venv/bin` (when present) and `.dmz/toolchains/*/bin` to `$PATH`, unset stale `PYTHONHOME`, expose `.venv` / `.dmz/venv` `site-packages` on `PYTHONPATH`, and configure `CARGO_HOME`, `RUSTUP_HOME`, and `GOROOT`.
 - Injected automatically into subsequent `dmz shell` and `dmz sandbox` sessions.
 
 ```bash

@@ -662,6 +662,148 @@ fn collect_python_libraries(
     lib_files
 }
 
+/// Parses a Python version constraint or pin (e.g. `"3.12"`, `"3.11.9"`, `">=3.12"`, `"==3.11.*"`)
+/// into a `(major, minor)` pair when an explicit major.minor token is present.
+pub(crate) fn parse_python_minor_spec(raw: &str) -> Option<(u8, u8)> {
+    for clause in raw.split(',') {
+        let trimmed = clause
+            .trim()
+            .trim_start_matches(['>', '<', '=', '~', '!', '^']);
+        let cleaned = trimmed.trim();
+        let mut parts = cleaned.split('.');
+        let major_str = parts.next()?.trim();
+        let minor_str = parts.next()?.trim();
+        let major = major_str.parse::<u8>().ok()?;
+        let minor_digits: String = minor_str
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if minor_digits.is_empty() {
+            continue;
+        }
+        let minor = minor_digits.parse::<u8>().ok()?;
+        if major == 3 {
+            return Some((major, minor));
+        }
+    }
+    None
+}
+
+/// Resolves the desired `(major, minor)` Python version declared by `.python-version`,
+/// `pyproject.toml`, or `uv.lock` across the workspace and its members.
+pub(crate) fn resolve_workspace_python_minor(
+    workspace_root: Option<&Path>,
+    member_roots: &[PathBuf],
+) -> Option<(u8, u8)> {
+    let mut roots: Vec<&Path> = Vec::new();
+    if let Some(ws) = workspace_root {
+        roots.push(ws);
+    }
+    for member in member_roots {
+        let m_path = member.as_path();
+        if !roots.contains(&m_path) {
+            roots.push(m_path);
+        }
+    }
+
+    for dir in &roots {
+        let py_ver_file = dir.join(".python-version");
+        if let Ok(content) = fs::read_to_string(&py_ver_file) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                if let Some(ver) = parse_python_minor_spec(trimmed) {
+                    return Some(ver);
+                }
+            }
+        }
+    }
+
+    for dir in &roots {
+        let pyproject = dir.join("pyproject.toml");
+        if let Ok(content) = fs::read_to_string(&pyproject) {
+            if let Ok(toml_val) = toml::from_str::<toml::Value>(&content) {
+                if let Some(req) = toml_val
+                    .get("project")
+                    .and_then(|p| p.get("requires-python"))
+                    .and_then(|v| v.as_str())
+                {
+                    if let Some(ver) = parse_python_minor_spec(req) {
+                        return Some(ver);
+                    }
+                }
+                if let Some(req) = toml_val
+                    .get("tool")
+                    .and_then(|t| t.get("poetry"))
+                    .and_then(|p| p.get("dependencies"))
+                    .and_then(|d| d.get("python"))
+                    .and_then(|v| v.as_str())
+                {
+                    if let Some(ver) = parse_python_minor_spec(req) {
+                        return Some(ver);
+                    }
+                }
+            }
+        }
+    }
+
+    for dir in &roots {
+        let uv_lock = dir.join("uv.lock");
+        if let Ok(content) = fs::read_to_string(&uv_lock) {
+            if let Ok(toml_val) = toml::from_str::<toml::Value>(&content) {
+                if let Some(req) = toml_val.get("requires-python").and_then(|v| v.as_str()) {
+                    if let Some(ver) = parse_python_minor_spec(req) {
+                        return Some(ver);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Returns `true` when `target_platform` is unset or matches the current host `(os, arch)`.
+pub(crate) fn is_target_matching_host(target_platform: Option<&str>) -> bool {
+    let (target_os, target_arch) = crate::workspace::resolve_target_os_arch(target_platform);
+    target_os == std::env::consts::OS && target_arch == std::env::consts::ARCH
+}
+
+fn candidate_matches_minor(candidate: &Path, desired: (u8, u8)) -> bool {
+    let needle_dot = format!("{}.{}", desired.0, desired.1);
+    let needle_bin = format!("python{}.{}", desired.0, desired.1);
+    candidate.components().any(|comp| {
+        let s = comp.as_os_str().to_string_lossy();
+        s == needle_dot
+            || s.starts_with(&format!("{}.", needle_dot))
+            || s.contains(&format!("-{}", needle_dot))
+            || s.contains(&format!("cpython-{}", needle_dot))
+            || s == needle_bin
+    })
+}
+
+fn prioritize_candidates_by_minor(
+    candidates: Vec<PathBuf>,
+    desired_minor: Option<(u8, u8)>,
+) -> Vec<PathBuf> {
+    let Some(desired) = desired_minor else {
+        return candidates;
+    };
+    let mut matching = Vec::new();
+    let mut rest = Vec::new();
+    for cand in candidates {
+        if candidate_matches_minor(&cand, desired) {
+            matching.push(cand);
+        } else {
+            rest.push(cand);
+        }
+    }
+    matching.extend(rest);
+    matching
+}
+
 /// Discovers host Python runtime (`python3`, `pip`), strictly preferring standalone official
 /// `python.org` and `uv` (`python-build-standalone`) builds and rejecting Homebrew/Xcode stubs.
 #[derive(Debug, Default, Clone)]
@@ -680,7 +822,23 @@ impl ToolchainDiscoverer for PythonDiscoverer {
         &self,
         ctx: &ToolchainDiscoveryContext,
     ) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
-        let py_candidates = collect_python_candidates();
+        if !is_target_matching_host(ctx.target_platform.as_deref()) {
+            let (target_os, target_arch) =
+                crate::workspace::resolve_target_os_arch(ctx.target_platform.as_deref());
+            warn!(
+                host_os = std::env::consts::OS,
+                host_arch = std::env::consts::ARCH,
+                target_os,
+                target_arch,
+                "Target platform differs from host OS/architecture; refusing to bundle incompatible host Python binaries"
+            );
+            return Ok(None);
+        }
+
+        let desired_minor =
+            resolve_workspace_python_minor(ctx.workspace_root.as_deref(), &ctx.member_roots);
+        let py_candidates =
+            prioritize_candidates_by_minor(collect_python_candidates(), desired_minor);
         if py_candidates.is_empty() {
             return Ok(None);
         }
@@ -698,6 +856,7 @@ impl ToolchainDiscoverer for PythonDiscoverer {
         info!(
             py_root = %redact_home_prefix(&py_root),
             version = %version,
+            desired_minor = ?desired_minor,
             profile = %ctx.profile,
             "Discovered host Python toolchain"
         );
@@ -1254,5 +1413,65 @@ mod tests {
         assert!(candidates.contains(&pyenv_py));
         assert!(candidates.contains(&mise_py));
         Ok(())
+    }
+
+    #[test]
+    fn test_resolve_workspace_python_minor_from_manifests() -> std::io::Result<()> {
+        let temp = tempdir()?;
+        let ws = temp.path();
+
+        fs::write(
+            ws.join("pyproject.toml"),
+            "[project]\nname = \"app\"\nrequires-python = \">=3.12,<3.14\"\n",
+        )?;
+        assert_eq!(resolve_workspace_python_minor(Some(ws), &[]), Some((3, 12)));
+
+        // .python-version overrides pyproject.toml when present
+        fs::write(ws.join(".python-version"), "# pinned\n3.11.9\n")?;
+        assert_eq!(resolve_workspace_python_minor(Some(ws), &[]), Some((3, 11)));
+
+        let uv_only = tempdir()?;
+        fs::write(
+            uv_only.path().join("uv.lock"),
+            "version = 1\nrequires-python = \">=3.13\"\n",
+        )?;
+        assert_eq!(
+            resolve_workspace_python_minor(Some(uv_only.path()), &[]),
+            Some((3, 13))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_cross_target_platform_skips_incompatible_host_python() {
+        let cross_target = if cfg!(target_os = "linux") {
+            "macos-arm64"
+        } else {
+            "linux-x86_64"
+        };
+        assert!(!is_target_matching_host(Some(cross_target)));
+        assert!(is_target_matching_host(None));
+
+        let ctx = ToolchainDiscoveryContext {
+            target_platform: Some(cross_target.to_string()),
+            ..ToolchainDiscoveryContext::default()
+        };
+        assert!(PythonDiscoverer
+            .discover_with_context(&ctx)
+            .expect("cross-target discover should not error")
+            .is_none());
+    }
+
+    #[test]
+    fn test_prioritize_candidates_by_minor_reorders_matching_version_first() {
+        let py313 = PathBuf::from("/opt/uv/cpython-3.13.2/bin/python3");
+        let py311 = PathBuf::from("/opt/uv/cpython-3.11.9/bin/python3");
+        let py312 = PathBuf::from("/opt/uv/cpython-3.12.7/bin/python3");
+
+        let ordered = prioritize_candidates_by_minor(
+            vec![py313.clone(), py311.clone(), py312.clone()],
+            Some((3, 12)),
+        );
+        assert_eq!(ordered, vec![py312, py313, py311]);
     }
 }

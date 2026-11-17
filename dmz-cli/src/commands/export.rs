@@ -50,6 +50,7 @@ pub fn run_export(args: ExportArgs) -> anyhow::Result<i32> {
         include_dev,
         toolchain_profile: args.toolchain_profile.into(),
         multi_workspace,
+        allow_missing_toolchains: args.allow_missing_toolchains,
     };
 
     match AirGapExporter::export(&config) {

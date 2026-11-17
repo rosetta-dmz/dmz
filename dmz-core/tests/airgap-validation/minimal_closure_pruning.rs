@@ -95,6 +95,7 @@ fn test_export_prunes_unreferenced_store_versions_metadata_and_stale_dirs(
         multi_workspace: None,
         include_dev: false,
         toolchain_profile: ToolchainProfile::Minimal,
+        allow_missing_toolchains: false,
     };
 
     AirGapExporter::export(&cfg)?;
@@ -363,6 +364,7 @@ ecosystem = "python"
         multi_workspace: None,
         include_dev: false,
         toolchain_profile: ToolchainProfile::Minimal,
+        allow_missing_toolchains: false,
     };
     let manifest = AirGapExporter::export(&cfg)?;
     assert!(manifest.workspace_project.is_none());

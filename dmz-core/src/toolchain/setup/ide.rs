@@ -98,9 +98,16 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), ToolchainError
         }
     }
 
-    // Configure terminal environment for bundled toolchains (e.g., Rust, Go, Python)
-    if toolchains_dir.exists() {
-        let mut bin_subpaths: Vec<String> = Vec::new();
+    // Configure terminal environment for virtual environments and bundled toolchains (e.g., Rust, Go, Python)
+    if toolchains_dir.exists() || workspace_root.join(".venv").is_dir() {
+        let mut unix_subpaths: Vec<String> = Vec::new();
+        let mut win_subpaths: Vec<String> = Vec::new();
+        if workspace_root.join(".venv/bin").is_dir() {
+            unix_subpaths.push("${workspaceFolder}/.venv/bin".into());
+        }
+        if workspace_root.join(".venv/Scripts").is_dir() {
+            win_subpaths.push("${workspaceFolder}\\.venv\\Scripts".into());
+        }
         if let Ok(entries) = fs::read_dir(&toolchains_dir) {
             for entry in entries.flatten() {
                 let name_os = entry.file_name();
@@ -114,36 +121,45 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), ToolchainError
                 let bin = entry.path().join("bin");
                 if bin.exists() {
                     let name = name_os.to_string_lossy().to_string();
-                    bin_subpaths.push(format!("${{workspaceFolder}}/.dmz/toolchains/{}/bin", name));
+                    unix_subpaths
+                        .push(format!("${{workspaceFolder}}/.dmz/toolchains/{}/bin", name));
+                    win_subpaths.push(format!(
+                        "${{workspaceFolder}}\\.dmz\\toolchains\\{}\\bin",
+                        name
+                    ));
                 }
             }
         }
 
-        if !bin_subpaths.is_empty() {
-            let unix_path = format!("{}:${{env:PATH}}", bin_subpaths.join(":"));
-            let win_path = format!("{};${{env:PATH}}", bin_subpaths.join(";"));
+        if !unix_subpaths.is_empty() || !win_subpaths.is_empty() {
+            let unix_path = format!("{}:${{env:PATH}}", unix_subpaths.join(":"));
+            let win_path = format!("{};${{env:PATH}}", win_subpaths.join(";"));
 
             for platform in &[
                 "terminal.integrated.env.osx",
                 "terminal.integrated.env.linux",
             ] {
-                let mut env_obj = settings
-                    .get(*platform)
-                    .and_then(|v| v.as_object().cloned())
-                    .unwrap_or_default();
-                env_obj.insert("PATH".into(), serde_json::Value::String(unix_path.clone()));
-                settings.insert(platform.to_string(), serde_json::Value::Object(env_obj));
+                if !unix_subpaths.is_empty() {
+                    let mut env_obj = settings
+                        .get(*platform)
+                        .and_then(|v| v.as_object().cloned())
+                        .unwrap_or_default();
+                    env_obj.insert("PATH".into(), serde_json::Value::String(unix_path.clone()));
+                    settings.insert(platform.to_string(), serde_json::Value::Object(env_obj));
+                }
             }
 
-            let mut win_env = settings
-                .get("terminal.integrated.env.windows")
-                .and_then(|v| v.as_object().cloned())
-                .unwrap_or_default();
-            win_env.insert("PATH".into(), serde_json::Value::String(win_path));
-            settings.insert(
-                "terminal.integrated.env.windows".into(),
-                serde_json::Value::Object(win_env),
-            );
+            if !win_subpaths.is_empty() {
+                let mut win_env = settings
+                    .get("terminal.integrated.env.windows")
+                    .and_then(|v| v.as_object().cloned())
+                    .unwrap_or_default();
+                win_env.insert("PATH".into(), serde_json::Value::String(win_path));
+                settings.insert(
+                    "terminal.integrated.env.windows".into(),
+                    serde_json::Value::Object(win_env),
+                );
+            }
         }
 
         // Configure rust-analyzer if Rust is bundled
@@ -468,6 +484,10 @@ pub(crate) fn build_multi_root_workspace_doc(
         }
 
         let folder_var = crate::workspace::interpreter::workspace_folder_var(Some(m.label));
+        if is_python && (m.fs_dir.join(".venv").is_dir() || assume_bundled_python) {
+            node_bin_unix.push(format!("{}/.venv/bin", folder_var));
+            node_bin_win.push(format!("{}\\.venv\\Scripts", folder_var));
+        }
         if is_node {
             node_bin_unix.push(format!("{}/node_modules/.bin", folder_var));
             node_bin_win.push(format!("{}\\node_modules\\.bin", folder_var));

@@ -316,6 +316,10 @@ pub struct BundleArgs {
     /// Compiler toolchain packaging profile: minimal (core runtime/build essentials) or full (adds first-party IDE/doc tools, headers, stdlib extras, and cross-targets; host-global package caches are always excluded—use --include-dev for project dev packages)
     #[arg(long, value_enum, default_value_t = CliToolchainProfile::Minimal)]
     pub toolchain_profile: CliToolchainProfile,
+
+    /// Allow exporting without failing if a required standalone runtime toolchain (e.g., Python) is missing on the export host
+    #[arg(long, default_value_t = false)]
+    pub allow_missing_toolchains: bool,
 }
 
 impl BundleArgs {
@@ -393,6 +397,10 @@ pub struct ExportArgs {
     /// Compiler toolchain packaging profile: minimal (core runtime/build essentials) or full (adds first-party IDE/doc tools, headers, stdlib extras, and cross-targets; host-global package caches are always excluded—use --include-dev for project dev packages)
     #[arg(long, value_enum, default_value_t = CliToolchainProfile::Minimal)]
     pub toolchain_profile: CliToolchainProfile,
+
+    /// Allow exporting without failing if a required standalone runtime toolchain (e.g., Python) is missing on the export host
+    #[arg(long, default_value_t = false)]
+    pub allow_missing_toolchains: bool,
 }
 
 impl ExportArgs {

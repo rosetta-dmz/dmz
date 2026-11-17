@@ -334,6 +334,7 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
         let _ = fs::remove_file(&activate_path);
         let activate_content = r#"VIRTUAL_ENV="$(cd "$(dirname "$0")/.." && pwd)"
 export VIRTUAL_ENV
+unset PYTHONHOME 2>/dev/null || true
 _OLD_PATH="$PATH"
 PATH="$VIRTUAL_ENV/bin:$PATH"
 export PATH

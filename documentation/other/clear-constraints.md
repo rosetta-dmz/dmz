@@ -42,8 +42,8 @@
 * **Boundary:** On Linux, compiled binaries packaged on a system with a newer `glibc` version (e.g. `glibc 2.38`) cannot execute on an older target host with an outdated runtime (e.g. `glibc 2.31`). The target host must meet or exceed the minimum glibc baseline of the packaged binaries.
 
 ### Constraint 3: Root-Managed System Path Relocatability
-* **Constraint:** Host compilers installed into non-relocatable root directories (e.g. `/usr/bin/gcc`, `/usr/lib64`) have hardcoded library search paths and lack standalone isolation.
-* **Boundary:** DMZ detects and packages standalone toolchains cleanly. When only root-managed non-relocatable system compilers are found, DMZ emits an advisory notice recommending standalone/hermetic distributions (e.g. LLVM toolchains, rustup toolchains, standalone NDK).
+* **Constraint:** Host compilers and runtimes installed into non-relocatable root directories (e.g. `/usr/bin/gcc`, `/usr/lib64`, `/opt/homebrew/*`, `/usr/bin/python3`, or Xcode stubs) have hardcoded library search paths or OS stub linkage and lack standalone isolation.
+* **Boundary:** DMZ detects and packages standalone provider toolchains cleanly (for Python: official `python.org` installers or standalone `uv python install` builds, strictly excluding host `site-packages` and `dist-packages` so PyPI dependencies flow solely through `dmz.lock`). Target import machines require zero pre-installed runtimes; on the export host, `--with-toolchain` exports fail fast when a required standalone primary runtime (such as Python) is missing unless `--allow-missing-toolchains` or `--no-toolchain` is explicitly specified.
 
 ### Constraint 4: User-Space Execution (No Root/Kernel Modules)
 * **Constraint:** DMZ runs under standard unprivileged user credentials within the `.dmz/` workspace.

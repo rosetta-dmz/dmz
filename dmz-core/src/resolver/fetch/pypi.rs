@@ -5,6 +5,16 @@ pub fn select_pypi_artifact(
     urls: &[serde_json::Value],
     target_platform: Option<&str>,
 ) -> Option<String> {
+    select_pypi_artifact_for_python(urls, target_platform, None)
+}
+
+/// Evaluates Python wheel ABI tags with an optional preferred CPython tag (e.g. `"cp312"`)
+/// so native extension wheels align with the workspace/bundled Python runtime ABI.
+pub fn select_pypi_artifact_for_python(
+    urls: &[serde_json::Value],
+    target_platform: Option<&str>,
+    preferred_cp_tag: Option<&str>,
+) -> Option<String> {
     let host_os = std::env::consts::OS;
     let host_arch = std::env::consts::ARCH;
 
@@ -28,6 +38,11 @@ pub fn select_pypi_artifact(
     let mut best_score: i32 = -1;
     let mut best_url: Option<String> = None;
 
+    let preferred_lower = preferred_cp_tag
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase);
+
     for entry in urls {
         let url_str = match entry.get("url").and_then(|u| u.as_str()) {
             Some(u) => u,
@@ -39,10 +54,23 @@ pub fn select_pypi_artifact(
             .unwrap_or("")
             .to_lowercase();
 
-        // Python version bonus for hermetic toolchain compatibility (Python 3.11 default in DMZ)
-        let py_bonus: i32 = if filename.contains("cp311") {
+        // Python version bonus for hermetic toolchain compatibility:
+        // Prefer workspace-configured Python ABI (or abi3 stable ABI), defaulting to cp311.
+        let py_bonus: i32 = if let Some(ref pref) = preferred_lower {
+            if filename.contains(pref.as_str()) {
+                4
+            } else if filename.contains("-abi3-") {
+                3
+            } else if filename.contains("cp311") {
+                2
+            } else if filename.contains("cp312") || filename.contains("cp313") {
+                1
+            } else {
+                0
+            }
+        } else if filename.contains("cp311") {
             3
-        } else if filename.contains("cp312") {
+        } else if filename.contains("-abi3-") || filename.contains("cp312") {
             2
         } else if filename.contains("cp310") || filename.contains("cp313") {
             1
@@ -131,4 +159,40 @@ pub fn select_pypi_artifact(
     }
 
     best_url
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_select_pypi_artifact_for_python_prefers_workspace_abi_and_abi3() {
+        let urls = vec![
+            serde_json::json!({
+                "filename": "pydantic_core-2.20.0-cp311-cp311-manylinux_2_17_x86_64.whl",
+                "url": "https://example.invalid/cp311.whl"
+            }),
+            serde_json::json!({
+                "filename": "pydantic_core-2.20.0-cp312-cp312-manylinux_2_17_x86_64.whl",
+                "url": "https://example.invalid/cp312.whl"
+            }),
+            serde_json::json!({
+                "filename": "pydantic_core-2.20.0-cp313-cp313-manylinux_2_17_x86_64.whl",
+                "url": "https://example.invalid/cp313.whl"
+            }),
+        ];
+
+        assert_eq!(
+            select_pypi_artifact(&urls, Some("linux-x86_64")).as_deref(),
+            Some("https://example.invalid/cp311.whl")
+        );
+        assert_eq!(
+            select_pypi_artifact_for_python(&urls, Some("linux-x86_64"), Some("cp312")).as_deref(),
+            Some("https://example.invalid/cp312.whl")
+        );
+        assert_eq!(
+            select_pypi_artifact_for_python(&urls, Some("linux-x86_64"), Some("cp313")).as_deref(),
+            Some("https://example.invalid/cp313.whl")
+        );
+    }
 }

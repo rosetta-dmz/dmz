@@ -384,7 +384,16 @@ fn test_cli_include_dev_and_toolchain_profile_defaults_and_overrides(
     let bundle_default = Cli::try_parse_from(["dmz", "bundle"])?;
     if let Commands::Bundle(args) = bundle_default.command {
         assert!(args.include_dev_enabled());
+        assert!(!args.allow_missing_toolchains);
         assert_eq!(args.toolchain_profile, CliToolchainProfile::Minimal);
+    } else {
+        return Err("Expected Commands::Bundle".into());
+    }
+
+    let bundle_allow_missing =
+        Cli::try_parse_from(["dmz", "bundle", "--allow-missing-toolchains"])?;
+    if let Commands::Bundle(args) = bundle_allow_missing.command {
+        assert!(args.allow_missing_toolchains);
     } else {
         return Err("Expected Commands::Bundle".into());
     }
@@ -413,9 +422,11 @@ fn test_cli_include_dev_and_toolchain_profile_defaults_and_overrides(
         "out.tar.zst",
         "--toolchain-profile",
         "full",
+        "--allow-missing-toolchains",
     ])?;
     if let Commands::Export(args) = export_full.command {
         assert!(args.include_dev_enabled());
+        assert!(args.allow_missing_toolchains);
         assert_eq!(args.toolchain_profile, CliToolchainProfile::Full);
     } else {
         return Err("Expected Commands::Export".into());

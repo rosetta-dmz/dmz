@@ -376,4 +376,71 @@ mod tests {
         let env_sh_3 = fs::read_to_string(ws.join(".dmz/env.sh")).unwrap();
         assert_eq!(env_sh_1, env_sh_3);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_env_sh_activates_venv_unsets_pythonhome_and_exposes_dmz_site_packages() {
+        let temp = tempdir().unwrap();
+        let ws = temp.path();
+
+        let py_tc_bin = ws.join(".dmz/toolchains/python/bin");
+        let venv_bin = ws.join(".venv/bin");
+        let dmz_sp = ws.join(".dmz/venv/lib/python3.11/site-packages");
+        let venv_sp = ws.join(".venv/lib/python3.11/site-packages");
+        fs::create_dir_all(&py_tc_bin).unwrap();
+        fs::create_dir_all(ws.join(".dmz/toolchains/python/lib")).unwrap();
+        fs::create_dir_all(&venv_bin).unwrap();
+        fs::create_dir_all(&dmz_sp).unwrap();
+        fs::create_dir_all(&venv_sp).unwrap();
+        fs::write(py_tc_bin.join("python3"), "#!/bin/sh\necho toolchain\n").unwrap();
+        fs::write(venv_bin.join("python3"), "#!/bin/sh\necho venv\n").unwrap();
+
+        ToolchainSetup::setup_imported_toolchains(ws).unwrap();
+
+        let env_sh = fs::read_to_string(ws.join(".dmz/env.sh")).unwrap();
+        assert!(
+            !env_sh.contains("export PYTHONHOME="),
+            "env.sh must not export PYTHONHOME over .venv/pyvenv.cfg"
+        );
+        assert!(
+            env_sh.contains("unset PYTHONHOME"),
+            "env.sh must unset stale PYTHONHOME"
+        );
+
+        let probe_cmd = format!(
+            "export PYTHONHOME=/stale/pythonhome; . \"{}/.dmz/env.sh\" >/dev/null; printf '%s|%s|%s|%s' \"${{PYTHONHOME:-UNSET}}\" \"$VIRTUAL_ENV\" \"$PATH\" \"$PYTHONPATH\"",
+            ws.to_string_lossy()
+        );
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&probe_cmd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "Sourcing env.sh failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let parts: Vec<&str> = stdout.split('|').collect();
+        assert_eq!(parts.len(), 4, "Unexpected probe output: {}", stdout);
+        assert_eq!(parts[0], "UNSET", "PYTHONHOME must be unset");
+        assert!(
+            parts[1].ends_with("/.venv"),
+            "VIRTUAL_ENV should point to .venv, got: {}",
+            parts[1]
+        );
+        let venv_idx = parts[2].find(".venv/bin");
+        let tc_idx = parts[2].find(".dmz/toolchains/python/bin");
+        assert!(
+            matches!((venv_idx, tc_idx), (Some(v), Some(t)) if v < t),
+            ".venv/bin must precede .dmz/toolchains/python/bin on PATH: {}",
+            parts[2]
+        );
+        assert!(
+            parts[3].contains(".dmz/venv/lib/python3.11/site-packages"),
+            "PYTHONPATH should expose .dmz/venv site-packages: {}",
+            parts[3]
+        );
+    }
 }

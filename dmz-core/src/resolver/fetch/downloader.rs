@@ -1,7 +1,7 @@
 //! Single package fetch orchestrator coordinating cache validation, URL resolution, and streamed transport.
 
 use crate::resolver::fetch::cache::check_cached_artifact;
-use crate::resolver::fetch::ecosystems::resolve_download_url;
+use crate::resolver::fetch::ecosystems::resolve_download_url_with_python_tag;
 use crate::resolver::fetch::stream::stream_download_with_retry;
 use crate::resolver::lockfile::LockedPackage;
 use crate::resolver::manifest::ManifestScanner;
@@ -20,6 +20,7 @@ pub fn fetch_single_package(
     pypi_base: &str,
     golang_proxy_base: &str,
     target_platform: Option<&str>,
+    preferred_cp_tag: Option<&str>,
     map_key: String,
     pkg: LockedPackage,
 ) -> Result<Option<(String, LockedPackage)>, ResolverError> {
@@ -79,12 +80,13 @@ pub fn fetch_single_package(
         return Ok(Some((cached_key, cached_pkg)));
     }
 
-    let resolved = resolve_download_url(
+    let resolved = resolve_download_url_with_python_tag(
         client,
         &pkg,
         &clean_pkg_name,
         clean_version,
         target_platform,
+        preferred_cp_tag,
         crates_api_base,
         crates_dl_base,
         npm_base,

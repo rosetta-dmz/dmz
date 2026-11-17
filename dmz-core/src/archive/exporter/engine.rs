@@ -442,7 +442,7 @@ impl AirGapExporter {
         let mut toolchain_manifest_entries = Vec::new();
         if config.with_toolchain {
             info!("Initiating host toolchain discovery and packaging");
-            match crate::toolchain::ToolchainPackager::package_toolchains_with_options_and_project(
+            match crate::toolchain::ToolchainPackager::package_toolchains_with_options_and_project_checked(
                 &workspace_root,
                 Some(&lockfile),
                 ws_project_opt.as_ref(),
@@ -453,6 +453,7 @@ impl AirGapExporter {
                 },
                 config.toolchain_profile,
                 target_platform.as_deref(),
+                config.allow_missing_toolchains,
             ) {
                 Ok(entries) => {
                     info!(

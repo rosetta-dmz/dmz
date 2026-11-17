@@ -115,8 +115,71 @@ if [ -d "$DMZ_WS/.dmz/toolchains/go" ] && ([ -f "$DMZ_WS/.dmz/toolchains/go/bin/
     export GOROOT="$DMZ_WS/.dmz/toolchains/go"
 fi
 
-if [ -d "$DMZ_WS/.dmz/toolchains/python" ] && ([ -d "$DMZ_WS/.dmz/toolchains/python/lib" ] || [ -d "$DMZ_WS/.dmz/toolchains/python/Lib" ]); then
-    export PYTHONHOME="$DMZ_WS/.dmz/toolchains/python"
+# Configure Python virtual environment (.venv) and offline site-packages cleanly.
+# Unset PYTHONHOME so .venv/pyvenv.cfg and relative standalone sys.prefix resolution work
+# without pinning sys.prefix exclusively to .dmz/toolchains/python (which excludes site-packages).
+unset PYTHONHOME 2>/dev/null || true
+
+_DMZ_VENV=""
+if [ -d "$PWD/.venv" ]; then
+    case "$PWD" in
+        "$DMZ_WS"|"$DMZ_WS"/*) _DMZ_VENV="$PWD/.venv" ;;
+    esac
+fi
+if [ -z "$_DMZ_VENV" ] && [ -d "$DMZ_WS/.venv" ]; then
+    _DMZ_VENV="$DMZ_WS/.venv"
+fi
+if [ -z "$_DMZ_VENV" ] && [ -d "$DMZ_WS/workspaces" ]; then
+    for _cand_venv in "$DMZ_WS"/workspaces/*/.venv "$DMZ_WS"/workspaces/*/*/.venv; do
+        if [ -d "$_cand_venv" ]; then
+            _DMZ_VENV="$_cand_venv"
+            break
+        fi
+    done
+fi
+if [ -z "$_DMZ_VENV" ]; then
+    for _cand_venv in "$DMZ_WS"/*/.venv; do
+        if [ -d "$_cand_venv" ]; then
+            _DMZ_VENV="$_cand_venv"
+            break
+        fi
+    done
+fi
+
+_DMZ_PYPATH=""
+if [ -n "$_DMZ_VENV" ] && [ -d "$_DMZ_VENV" ]; then
+    export VIRTUAL_ENV="$_DMZ_VENV"
+    if [ -d "$_DMZ_VENV/bin" ]; then
+        case ":$PATH:" in
+            *":$_DMZ_VENV/bin:"*) ;;
+            *) export PATH="$_DMZ_VENV/bin:$PATH" ;;
+        esac
+    fi
+    _DMZ_VENV_PARENT="$(cd -P "$_DMZ_VENV/.." 2>/dev/null && pwd -P)"
+    for _py_sp in \
+        "$_DMZ_VENV"/lib/python3.*/site-packages \
+        "$_DMZ_VENV_PARENT"/.dmz/venv/lib/python3.*/site-packages \
+        "$DMZ_WS"/.dmz/venv/lib/python3.*/site-packages; do
+        if [ -d "$_py_sp" ]; then
+            case ":$_DMZ_PYPATH:" in
+                *":$_py_sp:"*) ;;
+                *) _DMZ_PYPATH="${_DMZ_PYPATH:+$_DMZ_PYPATH:}$_py_sp" ;;
+            esac
+        fi
+    done
+elif [ -d "$DMZ_WS/.dmz/venv" ]; then
+    for _py_sp in "$DMZ_WS"/.dmz/venv/lib/python3.*/site-packages; do
+        if [ -d "$_py_sp" ]; then
+            case ":$_DMZ_PYPATH:" in
+                *":$_py_sp:"*) ;;
+                *) _DMZ_PYPATH="${_DMZ_PYPATH:+$_DMZ_PYPATH:}$_py_sp" ;;
+            esac
+        fi
+    done
+fi
+
+if [ -n "$_DMZ_PYPATH" ]; then
+    export PYTHONPATH="$_DMZ_PYPATH${PYTHONPATH:+:$PYTHONPATH}"
 fi
 
 if [ -d "$DMZ_WS/.dmz/toolchains/node" ]; then
@@ -272,10 +335,32 @@ if exist "%DMZ_WORKSPACE%\.dmz\toolchains\go\bin\go.exe" (
     set "GOROOT=%DMZ_WORKSPACE%\.dmz\toolchains\go"
 )
 
-if exist "%DMZ_WORKSPACE%\.dmz\toolchains\python\Lib" (
-    set "PYTHONHOME=%DMZ_WORKSPACE%\.dmz\toolchains\python"
-) else if exist "%DMZ_WORKSPACE%\.dmz\toolchains\python\lib" (
-    set "PYTHONHOME=%DMZ_WORKSPACE%\.dmz\toolchains\python"
+set "PYTHONHOME="
+set "_DMZ_VENV="
+if exist "%CD%\.venv" (
+    set "_DMZ_VENV=%CD%\.venv"
+) else if exist "%DMZ_WORKSPACE%\.venv" (
+    set "_DMZ_VENV=%DMZ_WORKSPACE%\.venv"
+) else (
+    for /d %%D in ("%DMZ_WORKSPACE%\workspaces\*") do (
+        if not defined _DMZ_VENV if exist "%%D\.venv" set "_DMZ_VENV=%%D\.venv"
+    )
+)
+if defined _DMZ_VENV (
+    set "VIRTUAL_ENV=%_DMZ_VENV%"
+    if exist "%_DMZ_VENV%\Scripts" (
+        echo ;%PATH%; | findstr /I /C:";%_DMZ_VENV%\Scripts;" >nul || set "PATH=%_DMZ_VENV%\Scripts;%PATH%"
+    )
+    if exist "%_DMZ_VENV%\Lib\site-packages" (
+        set "PYTHONPATH=%_DMZ_VENV%\Lib\site-packages;%PYTHONPATH%"
+    )
+    for /d %%S in ("%_DMZ_VENV%\..\.dmz\venv\lib\python3.*") do (
+        if exist "%%S\site-packages" set "PYTHONPATH=%%S\site-packages;%PYTHONPATH%"
+    )
+) else (
+    for /d %%S in ("%DMZ_WORKSPACE%\.dmz\venv\lib\python3.*") do (
+        if exist "%%S\site-packages" set "PYTHONPATH=%%S\site-packages;%PYTHONPATH%"
+    )
 )
 
 if exist "%DMZ_WORKSPACE%\.dmz\toolchains\node\lib\node_modules" (

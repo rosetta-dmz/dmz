@@ -172,6 +172,7 @@ pub fn run_bundle(args: BundleArgs) -> anyhow::Result<i32> {
         include_dev,
         toolchain_profile: args.toolchain_profile.into(),
         multi_workspace,
+        allow_missing_toolchains: args.allow_missing_toolchains,
     };
 
     match AirGapExporter::export(&config) {

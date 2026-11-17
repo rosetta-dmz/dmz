@@ -1,6 +1,6 @@
 //! Multi-ecosystem registry querying and download URL resolution.
 
-use crate::resolver::fetch::pypi::select_pypi_artifact;
+use crate::resolver::fetch::pypi::select_pypi_artifact_for_python;
 use crate::resolver::lockfile::LockedPackage;
 use crate::resolver::ResolverError;
 
@@ -17,8 +17,38 @@ pub fn resolve_download_url(
     client: &reqwest::blocking::Client,
     pkg: &LockedPackage,
     clean_pkg_name: &str,
+    clean_version: String,
+    target_platform: Option<&str>,
+    crates_api_base: &str,
+    crates_dl_base: &str,
+    npm_base: &str,
+    pypi_base: &str,
+    golang_proxy_base: &str,
+) -> Result<ResolvedPackageUrl, ResolverError> {
+    resolve_download_url_with_python_tag(
+        client,
+        pkg,
+        clean_pkg_name,
+        clean_version,
+        target_platform,
+        None,
+        crates_api_base,
+        crates_dl_base,
+        npm_base,
+        pypi_base,
+        golang_proxy_base,
+    )
+}
+
+/// Resolves the concrete download URL and version with an optional preferred CPython wheel tag (`"cp312"`).
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_download_url_with_python_tag(
+    client: &reqwest::blocking::Client,
+    pkg: &LockedPackage,
+    clean_pkg_name: &str,
     mut clean_version: String,
     target_platform: Option<&str>,
+    preferred_cp_tag: Option<&str>,
     crates_api_base: &str,
     crates_dl_base: &str,
     npm_base: &str,
@@ -68,6 +98,7 @@ pub fn resolve_download_url(
             clean_pkg_name,
             &mut clean_version,
             target_platform,
+            preferred_cp_tag,
             &mut discovered_requires_dist,
         ),
         "go" | "golang" => {
@@ -635,6 +666,7 @@ fn resolve_npm_url(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_pypi_url(
     client: &reqwest::blocking::Client,
     pypi_base: &str,
@@ -642,6 +674,7 @@ fn resolve_pypi_url(
     clean_pkg_name: &str,
     clean_version: &mut String,
     target_platform: Option<&str>,
+    preferred_cp_tag: Option<&str>,
     discovered_requires_dist: &mut Vec<String>,
 ) -> String {
     let mut resolved_url = String::new();
@@ -680,7 +713,11 @@ fn resolve_pypi_url(
                             }
                         }
                         if let Some(urls) = json.get("urls").and_then(|u| u.as_array()) {
-                            if let Some(best) = select_pypi_artifact(urls, target_platform) {
+                            if let Some(best) = select_pypi_artifact_for_python(
+                                urls,
+                                target_platform,
+                                preferred_cp_tag,
+                            ) {
                                 resolved_url = best;
                                 break;
                             } else if let Some(first_entry) = urls.first() {
