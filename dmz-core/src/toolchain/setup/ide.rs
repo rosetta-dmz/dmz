@@ -605,20 +605,47 @@ pub(crate) fn build_multi_root_workspace_doc(
         )
     };
 
+    let has_cmake = workspace_root.join("CMakeLists.txt").exists()
+        || members.iter().any(|m| {
+            m.fs_dir.join("CMakeLists.txt").exists()
+                || is_ecosystem_member(m.ecosystem, &["cmake", "juce"])
+        })
+        || crate::toolchain::ToolchainEnv::find_binary(&toolchains_dir.join("cmake"), "bin/cmake")
+            .is_some();
+
+    let mut workspace_settings = serde_json::json!({
+        "rust-analyzer.linkedProjects": linked_rust_projects,
+        "terminal.integrated.env.osx": {
+            "PATH": unix_path
+        },
+        "terminal.integrated.env.linux": {
+            "PATH": unix_path
+        },
+        "terminal.integrated.env.windows": {
+            "PATH": win_path
+        }
+    });
+
+    if !has_cmake {
+        if let Some(obj) = workspace_settings.as_object_mut() {
+            obj.insert(
+                "cmake.configureOnOpen".to_string(),
+                serde_json::Value::Bool(false),
+            );
+            obj.insert(
+                "cmake.autoSelectActiveFolder".to_string(),
+                serde_json::Value::Bool(false),
+            );
+            obj.insert(
+                "cmake.enableAutomaticKitScan".to_string(),
+                serde_json::Value::Bool(false),
+            );
+        }
+    }
+
     serde_json::json!({
         "folders": folders,
-        "settings": {
-            "rust-analyzer.linkedProjects": linked_rust_projects,
-            "terminal.integrated.env.osx": {
-                "PATH": unix_path
-            },
-            "terminal.integrated.env.linux": {
-                "PATH": unix_path
-            },
-            "terminal.integrated.env.windows": {
-                "PATH": win_path
-            }
-        }
+        "settings": workspace_settings
     })
 }
 
@@ -750,5 +777,48 @@ ecosystem = "node"
             "Ambiguous unlabeled ${{workspaceFolder}} should not appear in multi-root PATH: {}",
             osx_path
         );
+        assert_eq!(cw["settings"]["cmake.configureOnOpen"], false);
+        assert_eq!(cw["settings"]["cmake.autoSelectActiveFolder"], false);
+        assert_eq!(cw["settings"]["cmake.enableAutomaticKitScan"], false);
+    }
+
+    #[test]
+    fn test_generate_multi_root_workspace_preserves_cmake_when_member_uses_cmake() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+
+        fs::create_dir_all(root.join("workspaces/native-lib")).unwrap();
+        fs::create_dir_all(root.join("workspaces/ui")).unwrap();
+        fs::write(
+            root.join("workspaces/native-lib/CMakeLists.txt"),
+            "cmake_minimum_required(VERSION 3.20)\nproject(native_lib)\n",
+        )
+        .unwrap();
+        fs::write(root.join("workspaces/ui/package.json"), r#"{"name":"ui"}"#).unwrap();
+        fs::write(
+            root.join("dmz-workspace.toml"),
+            r#"
+name = "native-suite"
+
+[[members]]
+id = "native-lib"
+path = "workspaces/native-lib"
+role = "primary"
+
+[[members]]
+id = "ui"
+path = "workspaces/ui"
+role = "sidecar"
+"#,
+        )
+        .unwrap();
+
+        generate_multi_root_workspace(root).unwrap();
+        let cw_text = fs::read_to_string(root.join("native-suite.code-workspace")).unwrap();
+        let cw: serde_json::Value = serde_json::from_str(&cw_text).unwrap();
+
+        assert!(cw["settings"].get("cmake.configureOnOpen").is_none());
+        assert!(cw["settings"].get("cmake.autoSelectActiveFolder").is_none());
+        assert!(cw["settings"].get("cmake.enableAutomaticKitScan").is_none());
     }
 }
