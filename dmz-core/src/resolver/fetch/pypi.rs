@@ -1,5 +1,6 @@
 //! Python PyPI artifact selection, PEP 425 ABI/platform evaluation, and `v2` store key formatting.
 
+use crate::toolchain::PythonTargetAbi;
 use crate::workspace::resolve_target_os_arch;
 use tracing::warn;
 
@@ -77,17 +78,8 @@ fn parse_wheel_tags(filename_or_url: &str) -> Option<WheelTags<'_>> {
     })
 }
 
-fn parse_cp_minor(tag: &str) -> Option<(u8, bool)> {
-    let lower = tag.trim().to_ascii_lowercase();
-    let rest = lower.strip_prefix("cp3")?;
-    let (digits, freethreaded) = match rest.strip_suffix('t') {
-        Some(d) => (d, true),
-        None => (rest, false),
-    };
-    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    Some((digits.parse::<u8>().ok()?, freethreaded))
+fn parse_cp_minor(tag: &str) -> Option<PythonTargetAbi> {
+    PythonTargetAbi::parse_pep425_tag(tag)
 }
 
 fn is_windows_wheel_plat(plat_lower: &str) -> bool {
@@ -168,55 +160,77 @@ fn classify_platform(plat_tags_lower: &str, target_os: &str, target_arch: &str) 
 fn classify_abi(
     py_tags_lower: &str,
     abi_tags_lower: &str,
-    desired_cp: Option<(u8, bool)>,
+    desired_cp: Option<PythonTargetAbi>,
 ) -> AbiMatch {
     if abi_tags_lower.split('.').any(|a| a == "none") {
         if py_tags_lower
             .split('.')
-            .any(|p| p.starts_with("py3") || p.starts_with("py2") || p.starts_with("cp3"))
+            .any(|p| p.starts_with("py3") || p.starts_with("py2") || p.starts_with("cp"))
         {
             return AbiMatch::NoneAbi;
         }
         return AbiMatch::MismatchedCp;
     }
 
-    let target_cp = desired_cp.unwrap_or((11, false));
+    // Preserve legacy cp311 baseline when no explicit runtime ABI is supplied.
+    let target_cp = desired_cp.unwrap_or_else(|| PythonTargetAbi::new(3, 11, false));
     let exact_abi = abi_tags_lower
         .split('.')
         .any(|a| parse_cp_minor(a) == Some(target_cp));
-    let exact_py = py_tags_lower
-        .split('.')
-        .any(|p| parse_cp_minor(p) == Some(target_cp) || p == "py3");
+    // PEP 425 / PEP 703 free-threaded wheels typically use `py_tag = cp314` with `abi_tag = cp314t`.
+    let exact_py = py_tags_lower.split('.').any(|p| {
+        p == "py3"
+            || parse_cp_minor(p)
+                .is_some_and(|a| (a.major, a.minor) == (target_cp.major, target_cp.minor))
+    });
     if exact_abi && exact_py {
         return AbiMatch::ExactCp;
     }
 
-    if abi_tags_lower.split('.').any(|a| a == "abi3") {
+    if target_cp.free_threaded {
+        if abi_tags_lower.split('.').any(|a| a == "abi3t") {
+            let min_cp_ok = py_tags_lower.split('.').any(|p| {
+                p == "py3"
+                    || parse_cp_minor(p)
+                        .is_some_and(|a| (a.major, a.minor) <= (target_cp.major, target_cp.minor))
+            });
+            if min_cp_ok {
+                return AbiMatch::StableAbi3;
+            }
+        }
+    } else if abi_tags_lower.split('.').any(|a| a == "abi3") {
         let min_cp_ok = py_tags_lower.split('.').any(|p| {
-            p == "py3" || parse_cp_minor(p).is_some_and(|(m, ft)| !ft && m <= target_cp.0)
+            p == "py3"
+                || parse_cp_minor(p).is_some_and(|a| {
+                    !a.free_threaded && (a.major, a.minor) <= (target_cp.major, target_cp.minor)
+                })
         });
         if min_cp_ok {
             return AbiMatch::StableAbi3;
         }
     }
 
-    // When no explicit preference is given, keep fallback ordering over alternate cp3X tags
-    if desired_cp.is_none()
-        && abi_tags_lower
-            .split('.')
-            .any(|a| parse_cp_minor(a).is_some())
-    {
-        return AbiMatch::MismatchedCp;
-    }
-
     AbiMatch::MismatchedCp
+}
+
+fn compute_dynamic_cp_fallback_bonus(
+    abi_tags_lower: &str,
+    desired_cp: Option<PythonTargetAbi>,
+) -> i32 {
+    let want_ft = desired_cp.is_some_and(|c| c.free_threaded);
+    abi_tags_lower
+        .split('.')
+        .filter_map(parse_cp_minor)
+        .map(|abi| i32::from(abi.minor).min(99) * 2 + i32::from(abi.free_threaded == want_ft))
+        .max()
+        .unwrap_or(0)
 }
 
 fn score_wheel_tags(
     tags: &WheelTags<'_>,
     target_os: &str,
     target_arch: &str,
-    desired_cp: Option<(u8, bool)>,
+    desired_cp: Option<PythonTargetAbi>,
 ) -> Option<(i32, bool)> {
     let py_lower = tags.py_tags.to_ascii_lowercase();
     let abi_lower = tags.abi_tags.to_ascii_lowercase();
@@ -233,16 +247,7 @@ fn score_wheel_tags(
         return Some((800, false));
     }
 
-    // Fallback minor preference bonus when `preferred_cp_tag` is None or comparing cp3X fallbacks
-    let fallback_cp_bonus: i32 = if abi_lower.contains("cp311") {
-        12
-    } else if abi_lower.contains("cp312") {
-        8
-    } else if abi_lower.contains("cp313") || abi_lower.contains("cp310") {
-        4
-    } else {
-        0
-    };
+    let fallback_cp_bonus = compute_dynamic_cp_fallback_bonus(&abi_lower, desired_cp);
 
     let arch_affinity: i32 = if (target_arch == "aarch64"
         && (plat_lower.contains("aarch64") || plat_lower.contains("arm64")))
@@ -322,6 +327,41 @@ pub(crate) fn select_pypi_artifact_with_digest_for_python(
     target_platform: Option<&str>,
     preferred_cp_tag: Option<&str>,
 ) -> Option<(String, Option<String>)> {
+    select_pypi_artifact_internal(urls, target_platform, preferred_cp_tag, true).0
+}
+
+/// Evaluates Python wheel ABI tags strictly when `preferred_cp_tag` is known, returning `None`
+/// if only mismatched `cp3X` or foreign-OS wheels are available.
+#[must_use]
+pub fn select_pypi_artifact_for_python_strict(
+    urls: &[serde_json::Value],
+    target_platform: Option<&str>,
+    preferred_cp_tag: Option<&str>,
+) -> Option<String> {
+    select_pypi_artifact_strict_with_digest_for_python(urls, target_platform, preferred_cp_tag)
+        .0
+        .map(|(url, _)| url)
+}
+
+/// Evaluates Python wheel ABI tags strictly when `preferred_cp_tag` is known, refusing mismatched
+/// `cp3X` or foreign-OS binary wheels instead of bundling artifacts guaranteed to fail on import.
+/// Returns `(selection, saw_incompatible_wheel_only)`.
+#[must_use]
+pub(crate) fn select_pypi_artifact_strict_with_digest_for_python(
+    urls: &[serde_json::Value],
+    target_platform: Option<&str>,
+    preferred_cp_tag: Option<&str>,
+) -> (Option<(String, Option<String>)>, bool) {
+    let allow_mismatched = preferred_cp_tag.is_none();
+    select_pypi_artifact_internal(urls, target_platform, preferred_cp_tag, allow_mismatched)
+}
+
+fn select_pypi_artifact_internal(
+    urls: &[serde_json::Value],
+    target_platform: Option<&str>,
+    preferred_cp_tag: Option<&str>,
+    allow_mismatched_fallback: bool,
+) -> (Option<(String, Option<String>)>, bool) {
     let (target_os, target_arch) = resolve_target_os_arch(target_platform);
     let desired_cp = preferred_cp_tag.and_then(parse_cp_minor);
 
@@ -329,6 +369,7 @@ pub(crate) fn select_pypi_artifact_with_digest_for_python(
     let mut best_selection: Option<(String, Option<String>)> = None;
     let mut best_is_mismatch = false;
     let mut best_name = String::new();
+    let mut saw_rejected_incompatible_wheel = false;
 
     for entry in urls {
         let Some(url_str) = entry.get("url").and_then(|u| u.as_str()) else {
@@ -344,8 +385,15 @@ pub(crate) fn select_pypi_artifact_with_digest_for_python(
         let (score, is_mismatch) = if lower.ends_with(".whl") {
             if let Some(tags) = parse_wheel_tags(&lower) {
                 match score_wheel_tags(&tags, target_os, target_arch, desired_cp) {
+                    Some((_, true)) if !allow_mismatched_fallback => {
+                        saw_rejected_incompatible_wheel = true;
+                        continue;
+                    }
                     Some(res) => res,
-                    None => continue,
+                    None => {
+                        saw_rejected_incompatible_wheel = true;
+                        continue;
+                    }
                 }
             } else {
                 if target_os != "windows"
@@ -354,6 +402,7 @@ pub(crate) fn select_pypi_artifact_with_digest_for_python(
                         || lower.contains("win32")
                         || lower.contains("-windows"))
                 {
+                    saw_rejected_incompatible_wheel = true;
                     continue;
                 }
                 (300, false)
@@ -382,7 +431,10 @@ pub(crate) fn select_pypi_artifact_with_digest_for_python(
         );
     }
 
-    best_selection
+    (
+        best_selection,
+        best_score < 0 && saw_rejected_incompatible_wheel,
+    )
 }
 
 fn sanitize_store_tag_segment(raw: &str, max_len: usize) -> String {
@@ -565,5 +617,75 @@ mod tests {
             Some("cp312")
         )
         .is_some());
+    }
+
+    #[test]
+    fn test_select_pypi_artifact_supports_cp314_cp314t_and_strict_mismatch_rejection() {
+        let urls = vec![
+            serde_json::json!({
+                "filename": "PyYAML-6.0.3-cp312-cp312-macosx_11_0_arm64.whl",
+                "url": "https://example.invalid/cp312.whl"
+            }),
+            serde_json::json!({
+                "filename": "PyYAML-6.0.3-cp314-cp314-macosx_11_0_arm64.whl",
+                "url": "https://example.invalid/cp314.whl"
+            }),
+            serde_json::json!({
+                "filename": "PyYAML-6.0.3-cp314-cp314t-macosx_11_0_arm64.whl",
+                "url": "https://example.invalid/cp314t.whl"
+            }),
+            serde_json::json!({
+                "filename": "PyYAML-6.0.3-cp39-abi3-macosx_11_0_arm64.whl",
+                "url": "https://example.invalid/abi3.whl"
+            }),
+        ];
+
+        assert_eq!(
+            select_pypi_artifact_for_python(&urls, Some("macos-arm64"), Some("cp314")).as_deref(),
+            Some("https://example.invalid/cp314.whl")
+        );
+        // Free-threaded cp314-cp314t wheel matches cp314t
+        assert_eq!(
+            select_pypi_artifact_for_python(&urls, Some("macos-arm64"), Some("cp314t")).as_deref(),
+            Some("https://example.invalid/cp314t.whl")
+        );
+
+        // GIL abi3 must not match free-threaded cp314t; sdist must win when cp314t wheel is absent
+        let gil_only_with_sdist = vec![
+            serde_json::json!({
+                "filename": "demo-1.0.0.tar.gz",
+                "url": "https://example.invalid/demo.tar.gz"
+            }),
+            serde_json::json!({
+                "filename": "demo-1.0.0-cp314-cp314-macosx_11_0_arm64.whl",
+                "url": "https://example.invalid/cp314.whl"
+            }),
+            serde_json::json!({
+                "filename": "demo-1.0.0-cp39-abi3-macosx_11_0_arm64.whl",
+                "url": "https://example.invalid/abi3.whl"
+            }),
+        ];
+        assert_eq!(
+            select_pypi_artifact_for_python(
+                &gil_only_with_sdist,
+                Some("macos-arm64"),
+                Some("cp314t")
+            )
+            .as_deref(),
+            Some("https://example.invalid/demo.tar.gz")
+        );
+
+        // Strict selection rejects cp312-only binary wheels for cp314 when no sdist/abi3 exists
+        let cp312_only = vec![serde_json::json!({
+            "filename": "PyYAML-6.0.2-cp312-cp312-macosx_11_0_arm64.whl",
+            "url": "https://example.invalid/cp312.whl"
+        })];
+        let (strict_sel, saw_incompatible) = select_pypi_artifact_strict_with_digest_for_python(
+            &cp312_only,
+            Some("macos-arm64"),
+            Some("cp314"),
+        );
+        assert!(strict_sel.is_none());
+        assert!(saw_incompatible);
     }
 }

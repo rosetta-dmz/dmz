@@ -369,5 +369,75 @@ mod tests {
         )
         .expect("cp312 lookup should hit immutable v2 entry");
         assert_eq!(hit_312.1.sha256, cp312_sha);
+
+        // Coexist cp314 & cp314t in v2/ for PyYAML; ensure cp312 misses and cp314 / cp314t stay isolated.
+        let yaml_dir = dir.path().join("pyyaml");
+        let yaml_v2 = yaml_dir.join("v2");
+        std::fs::create_dir_all(&yaml_v2).unwrap();
+        let write_yaml_entry = |stem: &str, payload: &[u8]| -> String {
+            let sha =
+                crate::archive::exporter::hashing::format_sha256_hex(&Sha256::digest(payload));
+            std::fs::write(yaml_v2.join(format!("{stem}.archive")), payload).unwrap();
+            let entry = LockedPackage {
+                name: "PyYAML".to_string(),
+                version: "6.0.3".to_string(),
+                ecosystem: Ecosystem::PyPI,
+                sha256: sha.clone(),
+                source_url: None,
+                dependencies: Vec::new(),
+                member_id: None,
+            };
+            std::fs::write(
+                yaml_v2.join(format!("{stem}.meta.json")),
+                serde_json::to_string_pretty(&entry).unwrap(),
+            )
+            .unwrap();
+            sha
+        };
+
+        let _sha_312 = write_yaml_entry("pyyaml-6.0.3-cp312-cp312-macosx_11_0_arm64", b"cp312");
+        assert!(check_cached_pypi_artifact(
+            &yaml_dir,
+            "pyyaml",
+            "6.0.3",
+            "pypi:PyYAML",
+            Some("macos-arm64"),
+            Some("cp314"),
+        )
+        .is_none());
+
+        let sha_314 = write_yaml_entry("pyyaml-6.0.3-cp314-cp314-macosx_11_0_arm64", b"cp314");
+        assert!(check_cached_pypi_artifact(
+            &yaml_dir,
+            "pyyaml",
+            "6.0.3",
+            "pypi:PyYAML",
+            Some("macos-arm64"),
+            Some("cp314t"),
+        )
+        .is_none());
+
+        let sha_314t = write_yaml_entry("pyyaml-6.0.3-cp314-cp314t-macosx_11_0_arm64", b"cp314t");
+        let hit_314 = check_cached_pypi_artifact(
+            &yaml_dir,
+            "pyyaml",
+            "6.0.3",
+            "pypi:PyYAML",
+            Some("macos-arm64"),
+            Some("cp314"),
+        )
+        .expect("cp314 lookup should hit immutable v2 entry");
+        assert_eq!(hit_314.1.sha256, sha_314);
+
+        let hit_314t = check_cached_pypi_artifact(
+            &yaml_dir,
+            "pyyaml",
+            "6.0.3",
+            "pypi:PyYAML",
+            Some("macos-arm64"),
+            Some("cp314t"),
+        )
+        .expect("cp314t lookup should hit immutable v2 entry");
+        assert_eq!(hit_314t.1.sha256, sha_314t);
     }
 }

@@ -1,3 +1,4 @@
+use super::super::python_abi::PythonTargetAbi;
 use super::super::types::{
     DiscoveredToolchain, ToolchainDiscoveryContext, ToolchainEcosystem, ToolchainProfile,
 };
@@ -319,17 +320,49 @@ fn collect_python_candidates() -> Vec<PathBuf> {
         }
     }
 
-    // Fallback to all system PATH entries and standard host bin directories
-    for bin_name in [
-        "python3",
-        "python3.13",
-        "python3.12",
-        "python3.11",
-        "python3.10",
-    ] {
-        push_system_bin_candidates(&mut candidates, bin_name);
+    // Dynamically scan PATH and standard bin directories for any `python3` or `python<major>.<minor>[t]`
+    // binary rather than maintaining a hardcoded list of minor versions.
+    push_system_bin_candidates(&mut candidates, "python3");
+    let mut search_dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    for fallback_dir in ["/usr/local/bin", "/usr/bin", "/bin"] {
+        let p = PathBuf::from(fallback_dir);
+        if !search_dirs.contains(&p) {
+            search_dirs.push(p);
+        }
+    }
+    for bin_path in collect_versioned_python_bins_in_dirs(&search_dirs) {
+        push_unique_path(&mut candidates, bin_path);
     }
     candidates
+}
+
+fn collect_versioned_python_bins_in_dirs(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut discovered: Vec<(PythonTargetAbi, PathBuf)> = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if let Some(abi) = PythonTargetAbi::parse_versioned_name(fname) {
+                discovered.push((abi, path));
+            }
+        }
+    }
+    discovered.sort_by(|(abi_a, path_a), (abi_b, path_b)| {
+        let key_a = (abi_a.major, abi_a.minor, !abi_a.free_threaded);
+        let key_b = (abi_b.major, abi_b.minor, !abi_b.free_threaded);
+        key_b.cmp(&key_a).then_with(|| path_a.cmp(path_b))
+    });
+    discovered.into_iter().map(|(_, p)| p).collect()
 }
 
 /// Checks whether a Python binary links dynamically to non-standalone package-manager paths
@@ -421,6 +454,24 @@ fn resolve_python_root(canonical_bin: &Path) -> Option<PathBuf> {
 }
 
 fn read_python_version(py_bin: &Path) -> String {
+    if let Ok(output) = Command::new(py_bin)
+        .args([
+            "-c",
+            "import sys; v=sys.version_info; t='t' if (hasattr(sys,'_is_gil_enabled') and not sys._is_gil_enabled()) else ''; print(f'Python {v[0]}.{v[1]}.{v[2]}{t}')",
+        ])
+        .stdin(Stdio::null())
+        .output()
+    {
+        if output.status.success() {
+            if let Ok(ver) = String::from_utf8(output.stdout) {
+                let trimmed = ver.trim();
+                if trimmed.starts_with("Python ") {
+                    return trimmed.to_string();
+                }
+            }
+        }
+    }
+
     Command::new(py_bin)
         .arg("--version")
         .stdin(Stdio::null())
@@ -691,81 +742,34 @@ fn collect_python_libraries_for_os(
 /// Parses a Python version constraint or pin (e.g. `"3.12"`, `"Python 3.12.7"`, `">=3.12"`, `"==3.11.*"`)
 /// into a `(major, minor)` pair when an explicit major.minor token is present.
 pub(crate) fn parse_python_minor_spec(raw: &str) -> Option<(u8, u8)> {
-    for clause in raw.split(',') {
-        let trimmed = clause
-            .trim()
-            .trim_start_matches(['>', '<', '=', '~', '!', '^'])
-            .trim();
-        let cleaned = trimmed
-            .strip_prefix("Python ")
-            .or_else(|| trimmed.strip_prefix("python "))
-            .or_else(|| trimmed.strip_prefix("python"))
-            .unwrap_or(trimmed)
-            .trim();
-        let mut parts = cleaned.split('.');
-        let major_str = parts.next()?.trim();
-        let minor_str = parts.next()?.trim();
-        let major = major_str.parse::<u8>().ok()?;
-        let minor_digits: String = minor_str
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        if minor_digits.is_empty() {
-            continue;
-        }
-        let minor = minor_digits.parse::<u8>().ok()?;
-        if major == 3 {
-            return Some((major, minor));
-        }
-    }
-    None
+    PythonTargetAbi::parse_runtime_spec(raw).map(|abi| (abi.major, abi.minor))
 }
 
-/// Scans `lib_dir` for versioned `python3.<minor>` directories and returns `(minor, "python3.<minor>")`
+/// Scans `lib_dir` for versioned `python3.<minor>[t]` directories and returns `(minor, dir_name)`
 /// for the highest numeric minor version found.
 #[must_use]
 pub(crate) fn find_highest_python_minor_dir(lib_dir: &Path) -> Option<(u8, String)> {
-    let entries = fs::read_dir(lib_dir).ok()?;
-    let mut best: Option<(u8, String)> = None;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let s = name.to_string_lossy();
-        let Some(rest) = s.strip_prefix("python3.") else {
-            continue;
-        };
-        if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        if !entry.path().is_dir() {
-            continue;
-        }
-        if let Ok(minor) = rest.parse::<u8>() {
-            if best.as_ref().is_none_or(|(b, _)| minor > *b) {
-                best = Some((minor, s.to_string()));
-            }
-        }
-    }
-    best
+    PythonTargetAbi::find_highest_lib_dir(lib_dir).map(|(abi, name)| (abi.minor, name))
 }
 
-fn detect_bundled_python_minor(workspace_root: &Path) -> Option<(u8, u8)> {
+fn detect_bundled_python_abi(workspace_root: &Path) -> Option<PythonTargetAbi> {
     let lib_dir = workspace_root
         .join(".dmz")
         .join("toolchains")
         .join("python")
         .join("lib");
-    find_highest_python_minor_dir(&lib_dir).map(|(minor, _)| (3, minor))
+    PythonTargetAbi::find_highest_lib_dir(&lib_dir).map(|(abi, _)| abi)
 }
 
-/// Resolves the concrete `(major, minor)` Python ABI for dependency fetching and PEP 508 markers,
-/// aligning with the already-bundled runtime or the standalone host Python selected by `PythonDiscoverer`.
-pub(crate) fn resolve_effective_python_minor(
+/// Resolves the concrete [`PythonTargetAbi`] (including free-threaded `'t'` status) for
+/// dependency fetching, wheel ABI selection, and PEP 508 markers.
+pub(crate) fn resolve_effective_python_abi(
     workspace_root: Option<&Path>,
     member_roots: &[PathBuf],
     target_platform: Option<&str>,
-) -> Option<(u8, u8)> {
+) -> Option<PythonTargetAbi> {
     if let Some(ws) = workspace_root {
-        if let Some(bundled) = detect_bundled_python_minor(ws) {
+        if let Some(bundled) = detect_bundled_python_abi(ws) {
             return Some(bundled);
         }
     }
@@ -775,12 +779,23 @@ pub(crate) fn resolve_effective_python_minor(
             prioritize_candidates_by_minor(collect_python_candidates(), manifest_minor);
         if let Some(py_bin) = filter_and_select_python(candidates) {
             let ver = read_python_version(&py_bin);
-            if let Some(parsed) = parse_python_minor_spec(&ver) {
+            if let Some(parsed) = PythonTargetAbi::parse_runtime_spec(&ver) {
                 return Some(parsed);
             }
         }
     }
-    manifest_minor
+    manifest_minor.map(|(major, minor)| PythonTargetAbi::new(major, minor, false))
+}
+
+/// Resolves the concrete `(major, minor)` Python ABI for dependency fetching and PEP 508 markers,
+/// aligning with the already-bundled runtime or the standalone host Python selected by `PythonDiscoverer`.
+pub(crate) fn resolve_effective_python_minor(
+    workspace_root: Option<&Path>,
+    member_roots: &[PathBuf],
+    target_platform: Option<&str>,
+) -> Option<(u8, u8)> {
+    resolve_effective_python_abi(workspace_root, member_roots, target_platform)
+        .map(|abi| (abi.major, abi.minor))
 }
 
 /// Resolves the desired `(major, minor)` Python version declared by `.python-version`,
@@ -1684,11 +1699,49 @@ mod tests {
             Some((3, 11))
         );
 
-        // Once .dmz/toolchains/python ships 3.12, it overrides `>=3.11` lower-bound heuristics.
+        // Once .dmz/toolchains/python ships 3.14t or 3.12, it overrides `>=3.11` lower-bound heuristics.
         fs::create_dir_all(ws.join(".dmz/toolchains/python/lib/python3.12"))?;
         assert_eq!(
             resolve_effective_python_minor(Some(ws), &[], None),
             Some((3, 12))
+        );
+
+        fs::create_dir_all(ws.join(".dmz/toolchains/python/lib/python3.14t"))?;
+        assert_eq!(
+            resolve_effective_python_abi(Some(ws), &[], None),
+            Some(PythonTargetAbi::new(3, 14, true))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_collect_versioned_python_bins_in_dirs_discovers_314_314t_and_315_dynamically(
+    ) -> std::io::Result<()> {
+        let tmp = tempdir()?;
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir)?;
+        for name in [
+            "python3.12",
+            "python3.14",
+            "python3.14t",
+            "python3.15",
+            "python3.14-config",
+        ] {
+            fs::write(bin_dir.join(name), b"")?;
+        }
+        let found = collect_versioned_python_bins_in_dirs(std::slice::from_ref(&bin_dir));
+        let names: Vec<String> = found
+            .iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_string))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "python3.15".to_string(),
+                "python3.14".to_string(),
+                "python3.14t".to_string(),
+                "python3.12".to_string(),
+            ]
         );
         Ok(())
     }

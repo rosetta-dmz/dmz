@@ -208,6 +208,8 @@ impl AirGapImporter {
         let mut parsed_lockfile: Option<DmzLockfile> = None;
         let mut workspace_project = None;
         let mut extracted_store_files: Vec<(PathBuf, PathBuf)> = Vec::new();
+        let mut cleaned_toolchain_ecosystems: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         // Single-pass entry iteration, extraction, and verification
         let mut file_count: usize = 0;
@@ -419,6 +421,11 @@ impl AirGapImporter {
                 }
 
                 let tc_root = effective_workspace.join(".dmz/toolchains");
+                prepare_clean_toolchain_ecosystem_dir(
+                    &tc_root,
+                    rel_path,
+                    &mut cleaned_toolchain_ecosystems,
+                )?;
                 let written = unpack_tar_entry_contained_bounded(
                     &mut entry,
                     &tc_root,
@@ -450,19 +457,21 @@ impl AirGapImporter {
                     if let Ok(artifact_path) =
                         crate::install::locate_locked_store_artifact(effective_store, pkg)
                     {
-                        if let Ok(rel) = artifact_path.strip_prefix(effective_store) {
-                            expected_store_files.insert(rel.to_path_buf());
-                        }
+                        let canon = fs::canonicalize(&artifact_path).unwrap_or(artifact_path);
+                        expected_store_files.insert(canon);
                     } else {
                         let safe_name = pkg.name.replace('/', "__");
-                        if effective_store.join(&safe_name).is_file() {
-                            expected_store_files.insert(PathBuf::from(safe_name));
+                        let flat = effective_store.join(&safe_name);
+                        if flat.is_file() {
+                            expected_store_files.insert(fs::canonicalize(&flat).unwrap_or(flat));
                         }
                     }
                 }
 
-                for (rel_path, abs_path) in extracted_store_files {
-                    if !expected_store_files.contains(&rel_path)
+                for (_rel_path, abs_path) in extracted_store_files {
+                    let canon_abs =
+                        fs::canonicalize(&abs_path).unwrap_or_else(|_| abs_path.clone());
+                    if !expected_store_files.contains(&canon_abs)
                         && abs_path.is_file()
                         && fs::remove_file(&abs_path).is_ok()
                     {
@@ -721,4 +730,55 @@ impl AirGapImporter {
             vcs: vcs_provenance,
         })
     }
+}
+
+/// Clears stale `.dmz/toolchains/<eco>` directories once per archive import before unpacking,
+/// preventing mixed-version stdlib dirs (e.g. leftover `python3.14` alongside `python3.12`)
+/// after validating that `rel_path` contains no traversal or absolute components (CWE-22).
+fn prepare_clean_toolchain_ecosystem_dir(
+    tc_root: &Path,
+    rel_path: &Path,
+    cleaned_ecosystems: &mut std::collections::HashSet<String>,
+) -> Result<(), ImportError> {
+    use std::path::Component;
+
+    let mut normal_components = Vec::new();
+    for component in rel_path.components() {
+        match component {
+            Component::Normal(seg) => normal_components.push(seg),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(ImportError::VerificationFailed(format!(
+                    "Security violation: unsafe path component in toolchain entry {:?}",
+                    rel_path
+                )));
+            }
+        }
+    }
+
+    let Some(first) = normal_components.first() else {
+        return Ok(());
+    };
+    let eco_name = first.to_string_lossy().to_string();
+    if eco_name.is_empty() || !cleaned_ecosystems.insert(eco_name.clone()) {
+        return Ok(());
+    }
+
+    let eco_dir = tc_root.join(&eco_name);
+    if eco_dir.is_symlink() {
+        fs::remove_file(&eco_dir).map_err(|e| {
+            ImportError::IoError(format!(
+                "Failed to remove symlinked toolchain path {:?}: {}",
+                eco_dir, e
+            ))
+        })?;
+    } else if eco_dir.is_dir() {
+        fs::remove_dir_all(&eco_dir).map_err(|e| {
+            ImportError::IoError(format!(
+                "Failed to replace existing toolchain directory {:?}: {}",
+                eco_dir, e
+            ))
+        })?;
+    }
+    Ok(())
 }

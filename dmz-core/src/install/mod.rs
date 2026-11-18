@@ -686,16 +686,19 @@ pub fn locate_locked_store_artifact(
     }
 
     let is_pypi = pkg.ecosystem == crate::resolver::manifest::Ecosystem::PyPI;
-    let mut store_dir_names = vec![safe_name.clone()];
+    let mut store_dir_names = Vec::new();
     if is_pypi {
         let lower_name = safe_name.to_ascii_lowercase();
-        if !store_dir_names.contains(&lower_name) {
+        if !lower_name.is_empty() {
             store_dir_names.push(lower_name);
         }
         let norm_name = crate::resolver::manifest::ManifestScanner::normalize_pypi_name(&pkg.name);
         if !norm_name.is_empty() && !store_dir_names.contains(&norm_name) {
             store_dir_names.push(norm_name);
         }
+    }
+    if !store_dir_names.contains(&safe_name) {
+        store_dir_names.push(safe_name.clone());
     }
 
     let primary_pkg_dir = store_dir.join(&safe_name);

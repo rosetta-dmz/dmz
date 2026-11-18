@@ -5,6 +5,7 @@ use crate::resolver::manifest::ManifestScanner;
 use crate::toolchain::discovery::python::{
     find_highest_python_minor_dir, resolve_workspace_python_minor,
 };
+use crate::toolchain::PythonTargetAbi;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -16,12 +17,6 @@ pub struct PyPiMapper;
 impl PyPiMapper {
     fn find_python_minor_dir(lib_dir: &Path) -> Option<String> {
         find_highest_python_minor_dir(lib_dir).map(|(_, name)| name)
-    }
-
-    fn parse_python_minor_tuple(py_ver: &str) -> Option<(u8, u8)> {
-        let rest = py_ver.strip_prefix("python")?;
-        let (maj_str, min_str) = rest.split_once('.')?;
-        Some((maj_str.parse().ok()?, min_str.parse().ok()?))
     }
 
     fn remove_stale_typing_backport(site_packages: &Path, target_py: Option<(u8, u8)>) {
@@ -234,40 +229,10 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
         let _ = fs::write(&ps1_path, ps1_content);
     }
 
-    fn extract_cpython_minor_tag(entry_name: &str) -> Option<u8> {
-        let lower = entry_name.to_ascii_lowercase();
-        if !(lower.ends_with(".so") || lower.ends_with(".pyd")) || lower.contains(".abi3.") {
-            return None;
-        }
-        for marker in [".cpython-3", ".cp3"] {
-            if let Some((_, rest)) = lower.split_once(marker) {
-                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if !digits.is_empty() {
-                    return digits.parse::<u8>().ok();
-                }
-            }
-        }
-        None
-    }
-
-    fn is_foreign_os_extension(entry_lower: &str, target_os: &str) -> bool {
-        if target_os == "macos" {
-            entry_lower.ends_with(".pyd")
-                || entry_lower.contains("linux-gnu.so")
-                || entry_lower.contains("linux-musl.so")
-        } else if target_os == "linux" {
-            entry_lower.ends_with(".pyd") || entry_lower.contains("-darwin.so")
-        } else if target_os == "windows" {
-            entry_lower.ends_with(".so")
-        } else {
-            false
-        }
-    }
-
     fn verify_wheel_extension_abi(
         pkg_name: &str,
         archive_path: &Path,
-        target_py: Option<(u8, u8)>,
+        target_py: Option<PythonTargetAbi>,
     ) -> Result<(), InstallError> {
         Self::verify_wheel_extension_abi_for_os(
             pkg_name,
@@ -280,65 +245,11 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
     fn verify_wheel_extension_abi_for_os(
         pkg_name: &str,
         archive_path: &Path,
-        target_py: Option<(u8, u8)>,
+        target_py: Option<PythonTargetAbi>,
         target_os: &str,
     ) -> Result<(), InstallError> {
-        let Some((major, target_minor)) = target_py else {
-            return Ok(());
-        };
-        let Ok(file) = fs::File::open(archive_path) else {
-            return Ok(());
-        };
-        let Ok(archive) = zip::ZipArchive::new(std::io::BufReader::new(file)) else {
-            return Ok(());
-        };
-
-        let mut has_compatible_ext = false;
-        let mut mismatched: Vec<String> = Vec::new();
-
-        for name_res in archive.file_names() {
-            let Ok(name) = name_res else {
-                continue;
-            };
-            let lower = name.to_ascii_lowercase();
-            if !(lower.ends_with(".so") || lower.ends_with(".pyd")) {
-                continue;
-            }
-            if Self::is_foreign_os_extension(&lower, target_os) {
-                let tag = format!("foreign-os({})", name.rsplit('/').next().unwrap_or(&name));
-                if !mismatched.contains(&tag) {
-                    mismatched.push(tag);
-                }
-                continue;
-            }
-            if lower.contains(".abi3.") {
-                has_compatible_ext = true;
-                continue;
-            }
-            if let Some(ext_minor) = Self::extract_cpython_minor_tag(&name) {
-                if ext_minor == target_minor {
-                    has_compatible_ext = true;
-                } else {
-                    let tag = format!("cp{major}{ext_minor}");
-                    if !mismatched.contains(&tag) {
-                        mismatched.push(tag);
-                    }
-                }
-            }
-        }
-
-        if !mismatched.is_empty() && !has_compatible_ext {
-            return Err(InstallError::MapperError(format!(
-                "Python ABI/OS mismatch for package '{}': wheel contains incompatible compiled extension(s) [{}], but target runtime is python{}.{} on {}. Re-run `dmz bundle --refresh-lock` to fetch matching wheels.",
-                pkg_name,
-                mismatched.join(", "),
-                major,
-                target_minor,
-                target_os
-            )));
-        }
-
-        Ok(())
+        PythonTargetAbi::verify_wheel_extension_abi(pkg_name, archive_path, target_py, target_os)
+            .map_err(InstallError::MapperError)
     }
 
     /// Unpacks a Python package archive into `.dmz/venv`, creates `.venv` `.pth` wiring,
@@ -352,7 +263,8 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
         archive_path: &Path,
     ) -> Result<(), InstallError> {
         let py_ver = Self::detect_python_version(workspace_path);
-        let target_py = Self::parse_python_minor_tuple(&py_ver);
+        let target_abi = PythonTargetAbi::parse_runtime_spec(&py_ver);
+        let target_py = target_abi.map(|a| (a.major, a.minor));
         let venv_site_packages = workspace_path
             .join(".dmz")
             .join("venv")
@@ -371,7 +283,7 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
             return Ok(());
         }
 
-        Self::verify_wheel_extension_abi(&pkg.name, archive_path, target_py)?;
+        Self::verify_wheel_extension_abi(&pkg.name, archive_path, target_abi)?;
 
         fs::create_dir_all(&venv_site_packages).map_err(|e| {
             InstallError::IoError(format!("Failed to create python site-packages dir: {}", e))
@@ -964,11 +876,56 @@ mod tests {
         let os_err = PyPiMapper::verify_wheel_extension_abi_for_os(
             "pydantic_core",
             &wheel_linux_312,
-            Some((3, 12)),
+            Some(PythonTargetAbi::new(3, 12, false)),
             "macos",
         )
         .expect_err("linux-gnu.so extension must be rejected for macos runtime");
         assert!(os_err.to_string().contains("foreign-os"));
+
+        // Python 3.14 & free-threaded 3.14t ABI verification
+        let ws_314_dir = tempdir()?;
+        let ws_314 = ws_314_dir.path();
+        fs::create_dir_all(ws_314.join(".dmz/toolchains/python/lib/python3.14"))?;
+        assert_eq!(PyPiMapper::detect_python_version(ws_314), "python3.14");
+
+        let yaml_312 = ws_314.join("PyYAML-6.0.2-cp312-cp312-macosx_11_0_arm64.archive");
+        write_mock_wheel_with_entry(&yaml_312, "yaml/_yaml.cpython-312-darwin.so", b"cp312")?;
+        let yaml_pkg = LockedPackage {
+            name: "PyYAML".to_string(),
+            version: "6.0.2".to_string(),
+            ..pkg.clone()
+        };
+        let err_314 = PyPiMapper::map_package(ws_314, &yaml_pkg, &yaml_312)
+            .expect_err("cp312 PyYAML wheel must be rejected for python3.14 runtime");
+        assert!(err_314.to_string().contains("cp312"));
+        assert!(err_314.to_string().contains("python3.14"));
+
+        let yaml_314 = ws_314.join("PyYAML-6.0.3-cp314-cp314-macosx_11_0_arm64.archive");
+        write_mock_wheel_with_entry(&yaml_314, "yaml/_yaml.cpython-314-darwin.so", b"cp314")?;
+        if cfg!(target_os = "macos") {
+            PyPiMapper::map_package(ws_314, &yaml_pkg, &yaml_314)?;
+        } else {
+            PyPiMapper::verify_wheel_extension_abi_for_os(
+                "PyYAML",
+                &yaml_314,
+                Some(PythonTargetAbi::new(3, 14, false)),
+                "macos",
+            )?;
+        }
+
+        // Free-threaded python3.14t accepts cp314t and rejects GIL cp314/abi3
+        let ws_314t_dir = tempdir()?;
+        let ws_314t = ws_314t_dir.path();
+        fs::create_dir_all(ws_314t.join(".dmz/toolchains/python/lib/python3.14t"))?;
+        assert_eq!(PyPiMapper::detect_python_version(ws_314t), "python3.14t");
+        let err_314t = PyPiMapper::verify_wheel_extension_abi_for_os(
+            "PyYAML",
+            &yaml_314,
+            Some(PythonTargetAbi::new(3, 14, true)),
+            "macos",
+        )
+        .expect_err("GIL cp314 wheel must be rejected for python3.14t runtime");
+        assert!(err_314t.to_string().contains("python3.14t"));
         Ok(())
     }
 }

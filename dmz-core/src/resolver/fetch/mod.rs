@@ -9,7 +9,9 @@ pub mod stream;
 use crate::resolver::lockfile::{DmzLockfile, LockedPackage};
 use crate::resolver::manifest::{Ecosystem, ManifestScanner};
 use crate::resolver::ResolverError;
-pub use pypi::{select_pypi_artifact, select_pypi_artifact_for_python};
+pub use pypi::{
+    select_pypi_artifact, select_pypi_artifact_for_python, select_pypi_artifact_for_python_strict,
+};
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -103,12 +105,13 @@ impl DependencyFetcher {
         let member_roots = workspace_dir
             .map(|ws| crate::toolchain::ToolchainDetector::collect_workspace_member_dirs(ws, None))
             .unwrap_or_default();
-        let target_py_minor = crate::toolchain::discovery::python::resolve_effective_python_minor(
+        let target_py_abi = crate::toolchain::discovery::python::resolve_effective_python_abi(
             workspace_dir,
             &member_roots,
             target_platform.as_deref(),
         );
-        let preferred_cp_tag = target_py_minor.map(|(major, minor)| format!("cp{major}{minor}"));
+        let target_py_minor = target_py_abi.map(|abi| (abi.major, abi.minor));
+        let preferred_cp_tag = target_py_abi.map(crate::toolchain::PythonTargetAbi::cp_tag);
 
         // Defensive sanitation of lockfile packages against stale/dirty names (e.g. from prior PEP 508 bugs)
         let mut sanitized_packages = std::collections::BTreeMap::new();

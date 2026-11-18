@@ -243,6 +243,7 @@ impl AirGapExporter {
 
         // Append store items (if mode is Unified or DepsOnly)
         let mut packed_count = 0;
+        let mut packed_pypi_artifacts: Vec<(String, PathBuf)> = Vec::new();
         if config.mode == ExportMode::Unified || config.mode == ExportMode::DepsOnly {
             let mut packed_store_rel_paths: HashSet<PathBuf> = HashSet::new();
             for pkg_info in lockfile.packages.values() {
@@ -311,6 +312,9 @@ impl AirGapExporter {
                     &normalized_dest,
                     deterministic_epoch,
                 )?;
+                if pkg_info.ecosystem == crate::resolver::manifest::Ecosystem::PyPI {
+                    packed_pypi_artifacts.push((pkg_info.name.clone(), resolved_artifact));
+                }
                 packed_count += 1;
             }
         }
@@ -463,12 +467,26 @@ impl AirGapExporter {
                     toolchain_manifest_entries = entries;
                 }
                 Err(e) => {
+                    drop(tar_builder);
+                    let _ = fs::remove_file(&effective_output);
                     return Err(ExportError::ArchiveError(format!(
                         "Toolchain packaging failed: {}",
                         e
                     )));
                 }
             }
+        }
+
+        if let Err(err) = validate_exported_python_closure(
+            &workspace_root,
+            ws_project_opt.as_ref(),
+            &toolchain_manifest_entries,
+            &packed_pypi_artifacts,
+            target_platform.as_deref(),
+        ) {
+            drop(tar_builder);
+            let _ = fs::remove_file(&effective_output);
+            return Err(err);
         }
 
         // Write air-gap manifest header
@@ -575,4 +593,43 @@ impl AirGapExporter {
     pub fn calculate_file_sha256(path: &Path) -> Result<String, std::io::Error> {
         hash_file_sha256(path)
     }
+}
+
+fn validate_exported_python_closure(
+    workspace_root: &Path,
+    ws_project_opt: Option<&WorkspaceProjectConfig>,
+    toolchain_entries: &[crate::toolchain::ToolchainManifestEntry],
+    packed_pypi_artifacts: &[(String, PathBuf)],
+    target_platform: Option<&str>,
+) -> Result<(), ExportError> {
+    if packed_pypi_artifacts.is_empty() {
+        return Ok(());
+    }
+
+    let bundled_py_abi = toolchain_entries
+        .iter()
+        .find(|tc| tc.ecosystem == crate::toolchain::ToolchainEcosystem::Python)
+        .and_then(|tc| crate::toolchain::PythonTargetAbi::parse_runtime_spec(&tc.version));
+
+    let target_abi = bundled_py_abi.or_else(|| {
+        let member_roots = crate::toolchain::ToolchainDetector::collect_workspace_member_dirs(
+            workspace_root,
+            ws_project_opt,
+        );
+        crate::toolchain::discovery::python::resolve_workspace_python_minor(
+            Some(workspace_root),
+            &member_roots,
+        )
+        .map(|(maj, min)| crate::toolchain::PythonTargetAbi::new(maj, min, false))
+    });
+
+    let (target_os, _) = crate::workspace::resolve_target_os_arch(target_platform);
+    crate::toolchain::PythonTargetAbi::verify_bundle_python_closure(
+        packed_pypi_artifacts
+            .iter()
+            .map(|(name, path)| (name.as_str(), path.as_path())),
+        target_abi,
+        target_os,
+    )
+    .map_err(ExportError::ArchiveError)
 }

@@ -3,6 +3,7 @@ pub mod discovery;
 pub mod env;
 pub mod packager;
 pub mod preflight;
+pub mod python_abi;
 pub mod setup;
 pub mod types;
 
@@ -24,6 +25,7 @@ pub use preflight::{
     verify_apple_prereq_for_ecosystems, verify_apple_prereq_for_workspace,
     workspace_requires_apple_clt, ApplePrereqStatus,
 };
+pub use python_abi::PythonTargetAbi;
 pub use setup::ToolchainSetup;
 pub use types::{
     DiscoveredToolchain, ToolchainDiscoveryContext, ToolchainEcosystem, ToolchainManifestEntry,
