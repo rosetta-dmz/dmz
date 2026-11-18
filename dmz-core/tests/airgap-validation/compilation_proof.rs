@@ -286,6 +286,7 @@ fn test_compilation_proof_node() {
     );
     assert!(String::from_utf8_lossy(&node_exec.stdout).contains("Hermetic Node Success"));
 
+    #[cfg(unix)]
     for mgr in ["npm", "pnpm"] {
         let mgr_path = node_bin_dir.join(mgr);
         if mgr_path.exists() {

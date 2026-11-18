@@ -251,11 +251,34 @@ fn probe_node_version(node_bin: &Path) -> String {
 }
 
 fn collect_node_binaries_for(node_bin: &Path, managers: &[&str]) -> Vec<(PathBuf, String)> {
-    let mut bin_files = vec![(node_bin.to_path_buf(), "bin/node".into())];
+    let node_rel = if cfg!(windows)
+        && node_bin
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+    {
+        "bin/node.exe".to_string()
+    } else {
+        "bin/node".to_string()
+    };
+    let mut bin_files = vec![(node_bin.to_path_buf(), node_rel)];
     let bin_dir = node_bin.parent().filter(|p| !p.as_os_str().is_empty());
 
     for mgr in managers {
         if let Some(dir) = bin_dir {
+            if cfg!(windows) {
+                let mut found_win = false;
+                for ext in ["exe", "cmd"] {
+                    let win_cp = dir.join(format!("{}.{}", mgr, ext));
+                    if win_cp.is_file() {
+                        bin_files.push((win_cp, format!("bin/{}.{}", mgr, ext)));
+                        found_win = true;
+                    }
+                }
+                if found_win {
+                    continue;
+                }
+            }
             let cp = dir.join(mgr);
             if cp.is_file() {
                 let resolved = fs::canonicalize(&cp).unwrap_or_else(|_| cp.clone());
@@ -266,13 +289,6 @@ fn collect_node_binaries_for(node_bin: &Path, managers: &[&str]) -> Vec<(PathBuf
                     continue;
                 }
                 emit_non_relocatable_notice(&resolved);
-            }
-            if cfg!(windows) {
-                let cmd_cp = dir.join(format!("{}.cmd", mgr));
-                if cmd_cp.is_file() {
-                    bin_files.push((cmd_cp, format!("bin/{}.cmd", mgr)));
-                    continue;
-                }
             }
         }
         if let Ok(found) = which::which(mgr) {

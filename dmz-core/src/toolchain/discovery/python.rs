@@ -432,8 +432,9 @@ fn filter_and_select_python(candidates: Vec<PathBuf>) -> Option<PathBuf> {
     selected
 }
 
-/// Resolves the installation prefix root for either a `bin/python*` binary or a macOS
-/// Framework `Resources/Python.app/Contents/MacOS/Python` binary, refusing `"/"`.
+/// Resolves the installation prefix root for a `bin/python*` binary, a `Scripts/python*` binary,
+/// a direct-in-prefix Windows `python.exe`, or a macOS Framework `Resources/Python.app/Contents/MacOS/Python`
+/// binary, refusing filesystem/drive roots (`/` or `C:\`).
 fn resolve_python_root(canonical_bin: &Path) -> Option<PathBuf> {
     let prefix = if canonical_bin.ends_with("Resources/Python.app/Contents/MacOS/Python") {
         canonical_bin
@@ -443,10 +444,19 @@ fn resolve_python_root(canonical_bin: &Path) -> Option<PathBuf> {
             .and_then(Path::parent)
             .and_then(Path::parent)
     } else {
-        canonical_bin.parent().and_then(Path::parent)
+        let bin_dir = canonical_bin.parent()?;
+        if bin_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case("bin") || n.eq_ignore_ascii_case("scripts"))
+        {
+            bin_dir.parent()
+        } else {
+            Some(bin_dir)
+        }
     }?;
 
-    if prefix.as_os_str().is_empty() || prefix == Path::new("/") {
+    if prefix.as_os_str().is_empty() || prefix == Path::new("/") || prefix.parent().is_none() {
         return None;
     }
 
@@ -1490,6 +1500,22 @@ mod tests {
                 "/Library/Frameworks/Python.framework/Versions/3.12"
             ))
         );
+        assert_eq!(
+            resolve_python_root(Path::new("/opt/python/3.12.8/python3")),
+            Some(PathBuf::from("/opt/python/3.12.8"))
+        );
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                resolve_python_root(Path::new(
+                    r"C:\hostedtoolcache\windows\Python\3.12.8\x64\python.exe"
+                )),
+                Some(PathBuf::from(
+                    r"C:\hostedtoolcache\windows\Python\3.12.8\x64"
+                ))
+            );
+            assert_eq!(resolve_python_root(Path::new(r"C:\python.exe")), None);
+        }
         assert_eq!(resolve_python_root(Path::new("/bin/python3")), None);
         assert_eq!(resolve_python_root(Path::new("/python3")), None);
     }

@@ -50,7 +50,12 @@ impl ToolchainDiscoverer for GoDiscoverer {
             "Discovered host Go toolchain"
         );
 
-        let bin_files = vec![(go_bin, "bin/go".into())];
+        let go_rel = if cfg!(windows) {
+            "bin/go.exe"
+        } else {
+            "bin/go"
+        };
+        let bin_files = vec![(go_bin, go_rel.into())];
         let lib_files =
             collect_go_libs_for_context(&goroot_dir, ctx.profile, ctx.target_platform.as_deref());
 
@@ -66,9 +71,10 @@ impl ToolchainDiscoverer for GoDiscoverer {
 
 fn collect_go_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
+    let go_exe = if cfg!(windows) { "go.exe" } else { "go" };
 
     if let Some(goroot) = std::env::var_os("GOROOT").filter(|v| !v.is_empty()) {
-        let bin = PathBuf::from(goroot).join("bin/go");
+        let bin = PathBuf::from(goroot).join("bin").join(go_exe);
         if bin.is_file() {
             push_unique_path(&mut candidates, bin);
         }
@@ -84,14 +90,14 @@ fn collect_go_candidates() -> Vec<PathBuf> {
         .filter(|v| !v.is_empty())
     {
         let home_path = PathBuf::from(home);
-        let user_go = home_path.join("go/bin/go");
+        let user_go = home_path.join("go/bin").join(go_exe);
         if user_go.is_file() {
             push_unique_path(&mut candidates, user_go);
         }
         let sdk = home_path.join("sdk");
         if let Ok(entries) = fs::read_dir(sdk) {
             for entry in entries.flatten() {
-                let bin = entry.path().join("bin/go");
+                let bin = entry.path().join("bin").join(go_exe);
                 if bin.is_file() {
                     push_unique_path(&mut candidates, bin);
                 }

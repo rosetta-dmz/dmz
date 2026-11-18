@@ -577,18 +577,33 @@ mod tests {
             scratchpad_bytes: 1024 * 1024,
         };
 
-        let mode = if cfg!(windows) {
+        let no_net_mode = if cfg!(windows) {
             SandboxIsolationMode::BestEffort
         } else {
             SandboxIsolationMode::StrictKernel
         };
+        let proxy_mode = if cfg!(target_os = "macos") {
+            SandboxIsolationMode::StrictKernel
+        } else {
+            SandboxIsolationMode::BestEffort
+        };
+
+        if cfg!(target_os = "linux") {
+            let strict_proxy_res = runner
+                .spawn_agent_with_mode(proxy_cfg.clone(), SandboxIsolationMode::StrictKernel)
+                .await;
+            assert!(
+                matches!(strict_proxy_res, Err(AgentRunnerError::Platform(_))),
+                "Linux StrictKernel must reject loopback proxy without veth/slirp bridge"
+            );
+        }
 
         runner
-            .spawn_agent_with_mode(no_net_cfg, mode)
+            .spawn_agent_with_mode(no_net_cfg, no_net_mode)
             .await
             .expect("spawn no-network agent");
         runner
-            .spawn_agent_with_mode(proxy_cfg, mode)
+            .spawn_agent_with_mode(proxy_cfg, proxy_mode)
             .await
             .expect("spawn proxy agent");
 
@@ -605,11 +620,11 @@ mod tests {
         } else if cfg!(target_os = "linux") {
             assert_eq!(
                 postures.get("posture-no-net").copied(),
-                Some("kernel-netns-no-network")
+                Some("kernel-netns")
             );
             assert_eq!(
                 postures.get("posture-proxy").copied(),
-                Some("kernel-netns-loopback-proxy")
+                Some("linux-userns-proxy")
             );
         }
 
