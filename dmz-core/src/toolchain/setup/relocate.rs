@@ -3,7 +3,9 @@
 use super::super::ToolchainError;
 use std::fs::{self, File};
 use std::io::Read;
-use std::path::{Component, Path, PathBuf};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::path::PathBuf;
+use std::path::{Component, Path};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::process::Command;
 

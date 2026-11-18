@@ -507,14 +507,14 @@ pub(super) fn detect_dmz_cli() -> DmzCliInvocation {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn escape_applescript_string(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace(['\r', '\n'], "")
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 pub(super) fn escape_posix_single_quotes(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
@@ -582,6 +582,7 @@ fn launch_external_terminal(
     let abs_workspace =
         std::fs::canonicalize(workspace_path).unwrap_or_else(|_| PathBuf::from(workspace_path));
     let extra_flags_vec = build_shell_extra_flags(sandboxed, allow_network, strict_metadata);
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     let extra_flags = if extra_flags_vec.is_empty() {
         String::new()
     } else {

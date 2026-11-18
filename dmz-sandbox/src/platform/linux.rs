@@ -118,9 +118,11 @@ pub fn build_command(
                         let mut ifr: libc::ifreq = std::mem::zeroed();
                         ifr.ifr_name[0] = b'l' as libc::c_char;
                         ifr.ifr_name[1] = b'o' as libc::c_char;
-                        ifr.ifr_ifru.ifru_flags =
-                            (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
-                        let _ = libc::ioctl(sock, libc::SIOCSIFFLAGS as _, &ifr);
+                        if let Ok(flags) = libc::c_short::try_from(libc::IFF_UP | libc::IFF_RUNNING)
+                        {
+                            ifr.ifr_ifru.ifru_flags = flags;
+                            let _ = libc::ioctl(sock, libc::SIOCSIFFLAGS as _, &ifr);
+                        }
                         let _ = libc::close(sock);
                     }
                 }

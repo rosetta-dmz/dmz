@@ -469,7 +469,7 @@ mod tests {
         fs::write(nm.join("global-third-party-tool/package.json"), "{}")?;
         fs::write(nm.join("@scope/leaked-pkg/package.json"), "{}")?;
 
-        let minimal_bins: Vec<String> = collect_node_binaries_for(&bin, &["pnpm"])
+        let minimal_bins: Vec<String> = collect_node_binaries_for(&bin.join("node"), &["pnpm"])
             .into_iter()
             .map(|(_, r)| r)
             .collect();

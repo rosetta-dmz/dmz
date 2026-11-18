@@ -196,6 +196,7 @@ pub fn generate_clang_wrappers(_workspace_root: &Path) -> Result<(), ToolchainEr
 }
 
 /// Returns `true` when `path` is absent or appears to be a text/shebang script rather than a compiled native binary.
+#[cfg(unix)]
 fn is_absent_or_script_shim(path: &Path) -> bool {
     let Ok(sym) = fs::symlink_metadata(path) else {
         return true;
