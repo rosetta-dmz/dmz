@@ -874,12 +874,15 @@ mod tests {
         let ws = tmp.path();
         fs::create_dir_all(ws.join(".dmz/toolchains/python/lib/python3.12"))?;
 
+        let host_cp311_entry = if cfg!(target_os = "macos") {
+            "pydantic_core/_pydantic_core.cpython-311-darwin.so"
+        } else if cfg!(target_os = "linux") {
+            "pydantic_core/_pydantic_core.cpython-311-x86_64-linux-gnu.so"
+        } else {
+            "pydantic_core/_pydantic_core.cp311-win_amd64.pyd"
+        };
         let wheel_311 = ws.join("pydantic_core-2.27.1-cp311-cp311-macosx_11_0_arm64.archive");
-        write_mock_wheel_with_entry(
-            &wheel_311,
-            "pydantic_core/_pydantic_core.cpython-311-darwin.so",
-            b"fake-macho",
-        )?;
+        write_mock_wheel_with_entry(&wheel_311, host_cp311_entry, b"fake-macho")?;
 
         let pkg = LockedPackage {
             name: "pydantic_core".to_string(),

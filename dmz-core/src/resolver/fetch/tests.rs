@@ -38,9 +38,27 @@ where
         while !shutdown_srv.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    // Accepted TcpStreams on Windows inherit non-blocking mode from the listener.
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
                     let mut buf = [0u8; 4096];
-                    let n = stream.read(&mut buf).unwrap_or(0);
-                    let req = String::from_utf8_lossy(buf.get(..n).unwrap_or_default());
+                    let mut total = 0usize;
+                    while total < buf.len() {
+                        match stream.read(buf.get_mut(total..).unwrap_or_default()) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                total += n;
+                                if buf
+                                    .get(..total)
+                                    .is_some_and(|s| s.windows(4).any(|w| w == b"\r\n\r\n"))
+                                {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    let req = String::from_utf8_lossy(buf.get(..total).unwrap_or_default());
                     let path = req
                         .lines()
                         .next()
@@ -672,6 +690,11 @@ fn test_fetch_dependencies_npm_transitive_semver_and_cache_preserves_member_id()
         let esbuild_tgz = b"mock-esbuild-tarball-bytes".to_vec();
         match path {
             "/vite" => {
+                let foreign_opt = if cfg!(windows) {
+                    "fsevents-darwin-only-nonexistent-darwin-arm64"
+                } else {
+                    "fsevents-win32-only-nonexistent-win32-x64"
+                };
                 let json = format!(
                     r#"{{
                         "dist-tags": {{"latest": "6.0.11"}},
@@ -681,7 +704,7 @@ fn test_fetch_dependencies_npm_transitive_semver_and_cache_preserves_member_id()
                             }},
                             "6.0.11": {{
                                 "dependencies": {{"esbuild": "^0.24.0"}},
-                                "optionalDependencies": {{"fsevents-win32-only-nonexistent-win32-x64": "1.0.0"}},
+                                "optionalDependencies": {{"{foreign_opt}": "1.0.0"}},
                                 "dist": {{"tarball": "{base}/vite/-/vite-6.0.11.tgz"}}
                             }},
                             "7.0.0-alpha.1": {{

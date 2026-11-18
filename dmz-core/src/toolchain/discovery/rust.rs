@@ -292,8 +292,13 @@ mod tests {
         let sysroot = temp.path().join("fake_sysroot");
         let bin = sysroot.join("bin");
         let host = crate::workspace::host_target_triple();
+        let foreign_triple = if host == "x86_64-pc-windows-msvc" {
+            "aarch64-apple-darwin"
+        } else {
+            "x86_64-pc-windows-msvc"
+        };
         let host_rustlib = sysroot.join("lib/rustlib").join(host).join("lib");
-        let foreign_rustlib = sysroot.join("lib/rustlib/x86_64-pc-windows-msvc/lib");
+        let foreign_rustlib = sysroot.join("lib/rustlib").join(foreign_triple).join("lib");
 
         fs::create_dir_all(&bin).unwrap();
         fs::create_dir_all(&host_rustlib).unwrap();
@@ -330,9 +335,7 @@ mod tests {
                 .map(|(_, r)| r)
                 .collect();
         assert!(minimal_libs.iter().any(|p| p.contains(host)));
-        assert!(!minimal_libs
-            .iter()
-            .any(|p| p.contains("x86_64-pc-windows-msvc")));
+        assert!(!minimal_libs.iter().any(|p| p.contains(foreign_triple)));
     }
 
     #[test]

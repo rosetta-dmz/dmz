@@ -255,14 +255,21 @@ mod tests {
         fs::create_dir_all(goroot.join("pkg/include"))?;
         fs::create_dir_all(goroot.join("pkg/tool/linux_amd64"))?;
         fs::create_dir_all(goroot.join("pkg/tool/windows_amd64"))?;
+        fs::create_dir_all(goroot.join("pkg/tool/darwin_arm64"))?;
         fs::create_dir_all(goroot.join("pkg/tool/freebsd_amd64"))?;
 
         fs::write(goroot.join("src/fmt/print.go"), "package fmt")?;
         fs::write(goroot.join("pkg/include/textflag.h"), "#define NOSPLIT")?;
         fs::write(goroot.join("pkg/tool/linux_amd64/compile"), "linux")?;
         fs::write(goroot.join("pkg/tool/windows_amd64/compile.exe"), "win")?;
+        fs::write(goroot.join("pkg/tool/darwin_arm64/compile"), "darwin")?;
         fs::write(goroot.join("pkg/tool/freebsd_amd64/compile"), "bsd")?;
 
+        let foreign_target = if cfg!(windows) {
+            "darwin_arm64"
+        } else {
+            "windows_amd64"
+        };
         let min_rels: Vec<String> =
             collect_go_libs_for_context(&goroot, ToolchainProfile::Minimal, Some("linux-x64"))
                 .into_iter()
@@ -271,7 +278,7 @@ mod tests {
         assert!(min_rels.contains(&"pkg/tool/linux_amd64/compile".to_string()));
         assert!(min_rels.contains(&"pkg/include/textflag.h".to_string()));
         assert!(min_rels.contains(&"src/fmt/print.go".to_string()));
-        assert!(!min_rels.iter().any(|r| r.contains("windows_amd64")));
+        assert!(!min_rels.iter().any(|r| r.contains(foreign_target)));
         assert!(!min_rels.iter().any(|r| r.contains("freebsd_amd64")));
 
         let full_rels: Vec<String> =

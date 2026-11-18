@@ -9,7 +9,7 @@ fn first_nested_cargo_manifest_rel(root: &Path) -> Option<String> {
         .into_iter()
         .find_map(|dir| {
             let rel = dir.strip_prefix(root).ok()?;
-            Some(rel.join("Cargo.toml").to_string_lossy().into_owned())
+            Some(rel.join("Cargo.toml").to_string_lossy().replace('\\', "/"))
         })
 }
 
@@ -25,7 +25,7 @@ fn first_nested_node_dir_rel(root: &Path, marker: Option<&str>) -> Option<String
     if rel.as_os_str().is_empty() {
         None
     } else {
-        Some(rel.to_string_lossy().into_owned())
+        Some(rel.to_string_lossy().replace('\\', "/"))
     }
 }
 

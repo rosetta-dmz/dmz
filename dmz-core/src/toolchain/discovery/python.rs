@@ -1651,7 +1651,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn test_filter_and_select_python_skips_stub_when_standalone_present() -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
@@ -1838,8 +1838,13 @@ mod tests {
         );
 
         // Cross-target without host bundling keeps manifest minor
+        let cross_target = if cfg!(target_os = "windows") {
+            "linux-x86_64"
+        } else {
+            "windows-x86_64"
+        };
         assert_eq!(
-            resolve_effective_python_minor(Some(ws), &[], Some("windows-x86_64")),
+            resolve_effective_python_minor(Some(ws), &[], Some(cross_target)),
             Some((3, 11))
         );
 

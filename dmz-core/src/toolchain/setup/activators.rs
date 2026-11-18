@@ -12,27 +12,31 @@ pub fn generate_activator_scripts(workspace_root: &Path) -> Result<(), Toolchain
     let env_sh_path = workspace_root.join(".dmz/env.sh");
     let env_bat_path = workspace_root.join(".dmz/env.bat");
 
+    let default_ws_escaped = workspace_root.to_string_lossy().replace('\'', "'\\''");
     let mut env_sh_content = r#"#!/bin/sh
 # DMZ Toolchain Environment Activator
 # Source this script to activate bundled compilers and runtimes:
 #   source .dmz/env.sh
 
 # Ensure safe globbing behavior across shells (POSIX sh, bash, and zsh)
-if [ -n "$ZSH_VERSION" ]; then
+if [ -n "${ZSH_VERSION:-}" ]; then
     setopt localoptions nonomatch nullglob 2>/dev/null || true
 fi
 
 # Determine DMZ workspace root reliably across bash, zsh, and dash/POSIX sh
-if [ -n "$BASH_SOURCE" ]; then
+_DMZ_SELF=""
+if [ -n "${BASH_SOURCE:-}" ]; then
     _DMZ_SELF="$BASH_SOURCE"
-elif [ -n "$ZSH_VERSION" ]; then
-    _DMZ_SELF="${(%):-%x}"
+elif [ -n "${ZSH_VERSION:-}" ]; then
+    eval '_DMZ_SELF="${(%):-%x}"'
 else
-    _DMZ_SELF="$0"
+    case "$0" in
+        */env.sh|env.sh) _DMZ_SELF="$0" ;;
+    esac
 fi
 
 # Resolve physical path to handle symlinked .dmz directories in member workspaces
-if [ -f "$_DMZ_SELF" ]; then
+if [ -n "$_DMZ_SELF" ] && [ -f "$_DMZ_SELF" ]; then
     _DMZ_DIR="$(cd -P "$(dirname "$_DMZ_SELF")" 2>/dev/null && pwd -P)"
     DMZ_WS="$(cd -P "$_DMZ_DIR/.." 2>/dev/null && pwd -P)"
 elif [ -d "./.dmz" ]; then
@@ -45,7 +49,12 @@ elif [ -d "../../.dmz" ]; then
     _DMZ_DIR="$(cd -P "../../.dmz" 2>/dev/null && pwd -P)"
     DMZ_WS="$(cd -P "$_DMZ_DIR/.." 2>/dev/null && pwd -P)"
 else
-    DMZ_WS="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
+    _DMZ_DEFAULT_WS='__DMZ_DEFAULT_WS__'
+    if [ -n "$_DMZ_DEFAULT_WS" ] && [ -d "$_DMZ_DEFAULT_WS/.dmz" ]; then
+        DMZ_WS="$(cd -P "$_DMZ_DEFAULT_WS" 2>/dev/null && pwd -P)"
+    else
+        DMZ_WS="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
+    fi
 fi
 
 # Fallback parent directory traversal if .dmz/toolchains is in an ancestor directory
@@ -314,7 +323,7 @@ if [ -d "$DMZ_WS/.dmz/toolchains/pkgconfig" ]; then
     fi
 fi
 "#
-    .to_string();
+    .replace("__DMZ_DEFAULT_WS__", &default_ws_escaped);
 
     if cfg!(target_os = "macos")
         || workspace_root.join(".dmz/toolchains/cmake").exists()
