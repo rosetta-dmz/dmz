@@ -394,14 +394,18 @@ async fn test_sidecar_orchestrator_sandbox_and_no_sandbox_modes() {
 
     let mut primary = WorkspaceMember::new("primary", "primary", MemberRole::Primary);
     primary.exec_command = Some("/bin/sh".to_string());
-    // Must run with DMZ_SANDBOX=1 and fail to read outside_secret when sandboxed
-    primary.exec_args = Some(vec![
-        "-c".to_string(),
+    // Must run with DMZ_SANDBOX=1 and enforce OS-specific kernel confinement:
+    // macOS Seatbelt blocks reads outside workspace; Linux enforces PR_SET_NO_NEW_PRIVS=1.
+    let sandbox_probe_script = if cfg!(target_os = "macos") {
         format!(
             "test \"$DMZ_SANDBOX\" = \"1\" && ! /bin/cat \"{}\"",
             outside_secret.display()
-        ),
-    ]);
+        )
+    } else {
+        "test \"$DMZ_SANDBOX\" = \"1\" && grep -q '^NoNewPrivs:[[:space:]]*1$' /proc/self/status"
+            .to_string()
+    };
+    primary.exec_args = Some(vec!["-c".to_string(), sandbox_probe_script]);
 
     let mut sidecar = WorkspaceMember::new("sidecar", "sidecar", MemberRole::Sidecar);
     sidecar.exec_command = Some("/bin/sh".to_string());

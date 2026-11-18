@@ -734,8 +734,18 @@ snapshots:
     );
 
     // Execute the offline `vite` shim via node if host has `node` available
+    let vite_shim = if cfg!(windows) {
+        imported_frontend.join("node_modules/.bin/vite.cmd")
+    } else {
+        imported_frontend.join("node_modules/.bin/vite")
+    };
+    assert!(
+        vite_shim.is_file(),
+        "Expected executable vite shim at {:?}",
+        vite_shim
+    );
     if which::which("node").is_ok() {
-        let out = std::process::Command::new(imported_frontend.join("node_modules/.bin/vite"))
+        let out = std::process::Command::new(&vite_shim)
             .current_dir(&imported_frontend)
             .output()
             .expect("run offline vite shim");
