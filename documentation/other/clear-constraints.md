@@ -6,7 +6,7 @@
   - **Languages & Runtimes:** Rust, Go, Python, Node.js, Ruby, PHP.
   - **Native Build Generators:** Kitware CMake, Ninja, GNU Make, Juce Projucer, PkgConfig.
   - **C/C++ Compilers & Linkers:** Standalone Clang/LLVM, GCC, `llvm-ar`, `ar`, `llvm-ranlib`, `ranlib`, `lld`, `ld`, and compiler builtin header packages (`clang -print-resource-dir`).
-  - **Mobile & Platform SDKs:** Android NDK (Clang cross-compilers, sysroots, and `android.toolchain.cmake`), Apple Developer Toolchains (Xcode Command Line Tools, Clang, Swift, `xcodebuild`, `xcrun`, and macOS/iOS SDKs).
+  - **Mobile & Platform SDKs:** Android NDK (Clang cross-compilers, sysroots, and `android.toolchain.cmake`). Apple Developer Toolchains (Xcode Command Line Tools / Xcode, Apple Clang, Swift, `xcodebuild`, `xcrun`, and macOS SDKs) are treated as a **macOS host OS baseline prerequisite** rather than bundled into archives.
 
 * **Zero-Configuration Autonomous Discovery:**
   - Filesystem manifest scanning up to directory depth 3 without requiring user flags.
@@ -42,13 +42,13 @@
 * **Boundary:** On Linux, compiled binaries packaged on a system with a newer `glibc` version (e.g. `glibc 2.38`) cannot execute on an older target host with an outdated runtime (e.g. `glibc 2.31`). The target host must meet or exceed the minimum glibc baseline of the packaged binaries.
 
 ### Constraint 3: Root-Managed System Path Relocatability
-* **Constraint:** Host compilers installed into non-relocatable root directories (e.g. `/usr/bin/gcc`, `/usr/lib64`) have hardcoded library search paths and lack standalone isolation.
-* **Boundary:** DMZ detects and packages standalone toolchains cleanly. When only root-managed non-relocatable system compilers are found, DMZ emits an advisory notice recommending standalone/hermetic distributions (e.g. LLVM toolchains, rustup toolchains, standalone NDK).
+* **Constraint:** Host compilers and runtimes installed into non-relocatable root directories (e.g. `/usr/bin/gcc`, `/usr/lib64`, `/opt/homebrew/*`, `/usr/bin/python3`, or Xcode stubs) have hardcoded library search paths or OS stub linkage and lack standalone isolation.
+* **Boundary:** DMZ detects and packages standalone provider toolchains cleanly (for Python: official `python.org` installers or standalone `uv python install` builds, strictly excluding host `site-packages` and `dist-packages` so PyPI dependencies flow solely through `dmz.lock`). Target import machines require zero pre-installed runtimes; on the export host, `--with-toolchain` exports fail fast when a required standalone primary runtime (such as Python) is missing unless `--allow-missing-toolchains` or `--no-toolchain` is explicitly specified.
 
 ### Constraint 4: User-Space Execution (No Root/Kernel Modules)
 * **Constraint:** DMZ runs under standard unprivileged user credentials within the `.dmz/` workspace.
 * **Boundary:** Builds requiring root privileges (`sudo`), kernel module insertion, hardware loop mounts, or direct device driver manipulation cannot be executed via user-space sandboxing.
 
 ### Constraint 5: Proprietary SDK Licensing & Hardware Drivers
-* **Constraint:** Apple Developer SDKs, Xcode Command Line Tools, and proprietary graphics/compute runtimes (e.g. NVIDIA CUDA drivers) are subject to vendor license agreements and hardware driver presence.
+* **Constraint:** Apple Developer SDKs, Xcode Command Line Tools (`xcode-select --install`), and proprietary graphics/compute runtimes (e.g. NVIDIA CUDA drivers) are subject to vendor license agreements and OS/hardware driver integration. DMZ treats Apple CLT / Xcode as an OS baseline prerequisite on macOS targets (mirroring `glibc` on Linux and system DLLs on Windows), enforces pre-flight readiness (`xcode-select -p` / `xcrun --sdk macosx --show-sdk-path`), and runs `Make`, `Cc`, `CMake`, `Rust`, and `AppleSdk` workloads natively against the host Apple SDK/CLT without redistributing proprietary Apple binaries.
 * **Boundary:** DMZ discovers and packages existing SDKs on the export machine. It does not license Apple or NVIDIA proprietary software, nor does it emulate GPU hardware drivers on air-gapped target machines lacking physical hardware support.

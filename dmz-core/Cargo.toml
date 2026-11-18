@@ -2,6 +2,8 @@
 name = "dmz-core"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+publish = false
 
 [dependencies]
 thiserror.workspace = true
@@ -18,10 +20,12 @@ reqwest.workspace = true
 sha2.workspace = true
 toml.workspace = true
 libc.workspace = true
-windows-sys.workspace = true
 tempfile = { workspace = true }
 which.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
 dmz-sandbox.workspace = true
+
+[lints]
+workspace = true

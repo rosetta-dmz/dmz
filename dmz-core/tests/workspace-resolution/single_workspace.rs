@@ -1,3 +1,4 @@
+use dmz_core::resolver::manifest::Ecosystem;
 use dmz_core::resolver::ResolverEngine;
 use std::fs;
 use tempfile::tempdir;
@@ -41,8 +42,12 @@ fn test_workspace_resolution_fail_fast_and_inheritance() {
 
     let lockfile = lockfile_result.unwrap();
     assert!(
-        lockfile.packages.contains_key("serde:1.0"),
-        "Inherited workspace dependency 'serde' was missing from closure packages"
+        lockfile
+            .packages
+            .values()
+            .any(|p| p.ecosystem == Ecosystem::Cargo && p.name == "serde"),
+        "Inherited workspace dependency 'serde' was missing from closure packages: {:?}",
+        lockfile.packages.keys().collect::<Vec<_>>()
     );
 }
 
@@ -100,7 +105,24 @@ fn test_npm_workspace_resolution() {
     );
     assert!(
         lockfile.packages.contains_key("jest:29.7.0"),
-        "NPM workspace devDependency 'jest' was missing from closure packages"
+        "NPM workspace devDependency 'jest' should be included by default (include_dev=true)"
+    );
+
+    let lockfile_prod_only = dmz_core::resolver::ResolverEngine::resolve_workspace_with_options(
+        root,
+        dmz_core::resolver::ResolveOptions {
+            target_platform: None,
+            include_dev: false,
+        },
+    )
+    .expect("Resolver failed with include_dev=false");
+    assert!(
+        lockfile_prod_only.packages.contains_key("express:4.19.2"),
+        "Runtime dependency 'express' must remain present with include_dev=false"
+    );
+    assert!(
+        !lockfile_prod_only.packages.contains_key("jest:29.7.0"),
+        "NPM workspace devDependency 'jest' must be excluded when include_dev=false"
     );
 }
 
@@ -138,8 +160,22 @@ fn test_mixed_cargo_workspace_and_paths() {
     assert!(lockfile_result.is_ok());
 
     let lockfile = lockfile_result.unwrap();
-    assert!(lockfile.packages.contains_key("tokio:1.38"));
-    assert!(lockfile.packages.contains_key("serde:1.0"));
+    assert!(
+        lockfile
+            .packages
+            .values()
+            .any(|p| p.ecosystem == Ecosystem::Cargo && p.name == "tokio"),
+        "Inherited workspace dependency 'tokio' missing from: {:?}",
+        lockfile.packages.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        lockfile
+            .packages
+            .values()
+            .any(|p| p.ecosystem == Ecosystem::Cargo && p.name == "serde"),
+        "Direct dependency 'serde' missing from: {:?}",
+        lockfile.packages.keys().collect::<Vec<_>>()
+    );
 }
 
 #[test]

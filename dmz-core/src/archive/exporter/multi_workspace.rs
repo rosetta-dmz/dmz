@@ -1,8 +1,8 @@
-use super::packaging::{append_dir_all, append_filtered_files};
+use super::packaging::{append_dir_all, append_dir_all_excluding, append_filtered_files_prefixed};
 use super::types::ExportError;
 use crate::resolver::lockfile::DmzLockfile;
 use crate::workspace::{MemberRole, WorkspaceProjectConfig};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ pub fn package_multi_workspace_umbrella<W: Write>(
     ws_project: &WorkspaceProjectConfig,
     manifest_path_opt: Option<&Path>,
     changed_files_filter: Option<&HashSet<PathBuf>>,
-    lockfile: &DmzLockfile,
+    _lockfile: &DmzLockfile,
     deterministic_epoch: u64,
     with_toolchain: bool,
 ) -> Result<WorkspaceProjectConfig, ExportError> {
@@ -27,19 +27,31 @@ pub fn package_multi_workspace_umbrella<W: Write>(
         .unwrap_or("primary")
         .to_string();
 
-    let mut member_folder_names = HashMap::new();
-    let mut member_host_paths = HashMap::new();
+    let mut member_entries: Vec<(PathBuf, String)> = Vec::with_capacity(ws_project.members.len());
+    let mut used_folder_names: HashSet<String> = HashSet::new();
+    let mut primary_folder_name = primary_raw_name.clone();
+
+    // Assign primary folder name first so sidecar disambiguation never collides with it
+    if let Some(primary) = ws_project.primary_member() {
+        primary_folder_name =
+            if !primary.id.is_empty() && primary.id != "primary" && primary.id != "default" {
+                primary.id.clone()
+            } else {
+                primary_raw_name.clone()
+            };
+    }
 
     for member in &ws_project.members {
         if member.role == MemberRole::Primary {
-            let folder_name =
-                if !member.id.is_empty() && member.id != "primary" && member.id != "default" {
-                    member.id.clone()
-                } else {
-                    primary_raw_name.clone()
-                };
-            member_folder_names.insert(member.id.clone(), folder_name);
-            member_host_paths.insert(member.id.clone(), workspace_root.to_path_buf());
+            let mut folder_name = primary_folder_name.clone();
+            if !used_folder_names.insert(folder_name.clone()) {
+                let mut suffix = 2usize;
+                while !used_folder_names.insert(format!("{}-{}", folder_name, suffix)) {
+                    suffix += 1;
+                }
+                folder_name = format!("{}-{}", folder_name, suffix);
+            }
+            member_entries.push((workspace_root.to_path_buf(), folder_name));
         } else {
             let host_path = if member.path.is_relative() {
                 if let Some(m_path) = manifest_path_opt {
@@ -57,7 +69,7 @@ pub fn package_multi_workspace_umbrella<W: Write>(
                 .filter(|n| !n.is_empty())
                 .unwrap_or(&member.id)
                 .to_string();
-            let folder_name = if !member.id.is_empty()
+            let base_name = if !member.id.is_empty()
                 && member.id != "sidecar"
                 && member.id != "service"
                 && member.id != "default"
@@ -66,31 +78,29 @@ pub fn package_multi_workspace_umbrella<W: Write>(
             } else {
                 raw_name
             };
-            member_folder_names.insert(member.id.clone(), folder_name);
-            member_host_paths.insert(member.id.clone(), host_path);
+            let mut folder_name = if base_name == primary_folder_name {
+                format!("{}-sidecar", base_name)
+            } else {
+                base_name
+            };
+            if !used_folder_names.insert(folder_name.clone()) {
+                let mut suffix = 2usize;
+                while !used_folder_names.insert(format!("{}-{}", folder_name, suffix)) {
+                    suffix += 1;
+                }
+                folder_name = format!("{}-{}", folder_name, suffix);
+            }
+            member_entries.push((host_path, folder_name));
         }
     }
 
-    // Disambiguate if primary and sidecar resolve to the same folder name
-    let primary_folder_name = member_folder_names
-        .get(
-            ws_project
-                .primary_member()
-                .map(|m| m.id.as_str())
-                .unwrap_or("primary"),
-        )
-        .cloned()
-        .unwrap_or_else(|| primary_raw_name.clone());
-
-    for (id, name) in member_folder_names.iter_mut() {
-        let is_primary = ws_project
-            .primary_member()
-            .map(|m| m.id == *id)
-            .unwrap_or(false);
-        if !is_primary && *name == primary_folder_name {
-            *name = format!("{}-sidecar", name);
-        }
-    }
+    let primary_folder_name = ws_project
+        .members
+        .iter()
+        .enumerate()
+        .find(|(_, m)| m.role == MemberRole::Primary)
+        .and_then(|(idx, _)| member_entries.get(idx).map(|(_, f)| f.clone()))
+        .unwrap_or(primary_folder_name);
 
     // 1. Package Primary Repository into its dedicated workspaces/<primary_folder> namespace
     let primary_dest = PathBuf::from(format!("workspaces/{}", primary_folder_name));
@@ -99,44 +109,61 @@ pub fn package_multi_workspace_umbrella<W: Write>(
         path = ?workspace_root,
         "Packaging primary workspace files into workspaces namespace"
     );
+    let root_canon =
+        fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
+    let primary_excluded: Vec<PathBuf> = member_entries
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| {
+            ws_project
+                .members
+                .get(*idx)
+                .is_some_and(|m| m.role != MemberRole::Primary)
+        })
+        .filter_map(|(_, (p, _))| {
+            let c = fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+            (c != root_canon && c.starts_with(&root_canon)).then_some(c)
+        })
+        .collect();
+
     if let Some(changed_files) = changed_files_filter {
-        append_filtered_files(
+        append_filtered_files_prefixed(
             tar_builder,
             workspace_root,
+            &primary_dest,
             changed_files,
             deterministic_epoch,
         )?;
     } else {
-        append_dir_all(
+        append_dir_all_excluding(
             tar_builder,
             workspace_root,
             &primary_dest,
             true,
             deterministic_epoch,
+            &primary_excluded,
         )?;
     }
 
     // 2. Package each Sidecar / Service Member into its dedicated workspaces/<sidecar_folder> namespace
-    for member in &ws_project.members {
+    for (idx, member) in ws_project.members.iter().enumerate() {
         if member.role != MemberRole::Primary {
-            if let Some(host_path) = member_host_paths.get(&member.id) {
-                if let Some(folder_name) = member_folder_names.get(&member.id) {
-                    if host_path.is_dir() {
-                        let sidecar_dest = PathBuf::from(format!("workspaces/{}", folder_name));
-                        info!(
-                            member = %member.id,
-                            src = ?host_path,
-                            dest = %sidecar_dest.display(),
-                            "Packaging sidecar workspace files into workspaces namespace"
-                        );
-                        append_dir_all(
-                            tar_builder,
-                            host_path,
-                            &sidecar_dest,
-                            true,
-                            deterministic_epoch,
-                        )?;
-                    }
+            if let Some((host_path, folder_name)) = member_entries.get(idx) {
+                if host_path.is_dir() {
+                    let sidecar_dest = PathBuf::from(format!("workspaces/{}", folder_name));
+                    info!(
+                        member = %member.id,
+                        src = ?host_path,
+                        dest = %sidecar_dest.display(),
+                        "Packaging sidecar workspace files into workspaces namespace"
+                    );
+                    append_dir_all(
+                        tar_builder,
+                        host_path,
+                        &sidecar_dest,
+                        true,
+                        deterministic_epoch,
+                    )?;
                 }
             }
         }
@@ -144,8 +171,8 @@ pub fn package_multi_workspace_umbrella<W: Write>(
 
     // 3. Serialize and embed normalized dmz-workspace.toml pointing to workspaces/<folder> subfolders
     let mut normalized_project = ws_project.clone();
-    for m in &mut normalized_project.members {
-        if let Some(folder_name) = member_folder_names.get(&m.id) {
+    for (idx, m) in normalized_project.members.iter_mut().enumerate() {
+        if let Some((_, folder_name)) = member_entries.get(idx) {
             m.path = PathBuf::from(format!("workspaces/{}", folder_name));
         }
     }
@@ -167,145 +194,44 @@ pub fn package_multi_workspace_umbrella<W: Write>(
     }
 
     // 4. Generate and embed VS Code Multi-Root Workspace (.code-workspace)
-    let mut folders = Vec::new();
-    let mut linked_rust_projects = Vec::new();
-    let mut node_bin_unix = Vec::new();
-    let mut node_bin_win = Vec::new();
-
-    for m in &normalized_project.members {
-        let folder_path = m.path.to_string_lossy().replace('\\', "/");
-        let short_folder_name = m.path.file_name().and_then(|n| n.to_str()).unwrap_or(&m.id);
-        let host_dir = member_host_paths
-            .get(&m.id)
-            .map(|p| p.as_path())
-            .unwrap_or(workspace_root);
-
-        let is_python = m.ecosystem.as_deref() == Some("python")
-            || m.ecosystem.as_deref() == Some("pypi")
-            || host_dir.join("requirements.txt").exists()
-            || host_dir.join("pyproject.toml").exists();
-
-        let is_rust = m.ecosystem.as_deref() == Some("rust")
-            || m.ecosystem.as_deref() == Some("cargo")
-            || host_dir.join("Cargo.toml").exists()
-            || host_dir.join("src-tauri/Cargo.toml").exists();
-
-        let is_node = m.ecosystem.as_deref() == Some("node")
-            || m.ecosystem.as_deref() == Some("npm")
-            || host_dir.join("package.json").exists();
-
-        if is_rust {
-            if host_dir.join("Cargo.toml").exists() {
-                linked_rust_projects.push(format!("{}/Cargo.toml", folder_path));
-            }
-            if host_dir.join("src-tauri/Cargo.toml").exists() {
-                linked_rust_projects.push(format!("{}/src-tauri/Cargo.toml", folder_path));
-            }
-        }
-
-        let label = if !m.id.is_empty() {
-            m.id.clone()
-        } else {
-            short_folder_name.to_string()
-        };
-
-        if is_node {
-            node_bin_unix.push(format!("${{workspaceFolder:{}}}/node_modules/.bin", label));
-            node_bin_unix.push(format!(
-                "${{workspaceFolder}}/{}/node_modules/.bin",
-                folder_path
-            ));
-            node_bin_win.push(format!(
-                "${{workspaceFolder:{}}}\\\\node_modules\\\\.bin",
-                label
-            ));
-            node_bin_win.push(format!(
-                "${{workspaceFolder}}\\{}\\node_modules\\.bin",
-                folder_path.replace('/', "\\")
-            ));
-        }
-
-        let mut folder_entry = serde_json::json!({
-            "name": label,
-            "path": folder_path
-        });
-
-        if is_python {
-            let mut py_settings = serde_json::json!({
-                "python.terminal.activateEnvironment": true
-            });
-
-            let has_bundled_py =
-                with_toolchain || workspace_root.join(".dmz/toolchains/python").exists();
-            let member_venv = host_dir.join(".venv");
-            let has_locked_pypi = lockfile
-                .packages
-                .values()
-                .any(|p| p.ecosystem == crate::resolver::manifest::Ecosystem::PyPI);
-
-            let depth = m
-                .path
-                .components()
-                .filter(|c| matches!(c, std::path::Component::Normal(_)))
-                .count();
-            let rel_prefix = if depth == 0 {
-                ".".to_string()
+    let folder_storage: Vec<(String, String, &Path, &Path, Option<&str>)> = normalized_project
+        .members
+        .iter()
+        .enumerate()
+        .map(|(idx, m)| {
+            let folder_path = m.path.to_string_lossy().replace('\\', "/");
+            let short_folder_name = m.path.file_name().and_then(|n| n.to_str()).unwrap_or(&m.id);
+            let label = if !m.id.is_empty() {
+                m.id.clone()
             } else {
-                vec![".."; depth].join("/")
+                short_folder_name.to_string()
             };
+            let host_dir = member_entries
+                .get(idx)
+                .map(|(p, _)| p.as_path())
+                .unwrap_or(workspace_root);
+            (
+                label,
+                folder_path,
+                m.path.as_path(),
+                host_dir,
+                m.ecosystem.as_deref(),
+            )
+        })
+        .collect();
 
-            let py_bin_exists = member_venv.join("bin/python").exists()
-                || member_venv.join("bin/python3").exists()
-                || member_venv.join("Scripts/python.exe").exists()
-                || member_venv.join("Scripts/python.bat").exists()
-                || member_venv.join("Scripts/python.cmd").exists()
-                || member_venv.join("pyvenv.cfg").exists();
-
-            if (member_venv.exists() && py_bin_exists) || has_locked_pypi {
-                let py_bin = if cfg!(windows) {
-                    "${workspaceFolder}/.venv/Scripts/python.exe"
-                } else {
-                    "${workspaceFolder}/.venv/bin/python"
-                };
-                if let Some(obj) = py_settings.as_object_mut() {
-                    obj.insert(
-                        "python.defaultInterpreterPath".to_string(),
-                        serde_json::Value::String(py_bin.to_string()),
-                    );
-                }
-            } else if has_bundled_py {
-                let py_bin = if rel_prefix == "." {
-                    if cfg!(windows) {
-                        "${workspaceFolder}/.dmz/toolchains/python/python.exe".to_string()
-                    } else {
-                        "${workspaceFolder}/.dmz/toolchains/python/bin/python3".to_string()
-                    }
-                } else if cfg!(windows) {
-                    format!(
-                        "${{workspaceFolder}}/{}/.dmz/toolchains/python/python.exe",
-                        rel_prefix
-                    )
-                } else {
-                    format!(
-                        "${{workspaceFolder}}/{}/.dmz/toolchains/python/bin/python3",
-                        rel_prefix
-                    )
-                };
-                if let Some(obj) = py_settings.as_object_mut() {
-                    obj.insert(
-                        "python.defaultInterpreterPath".to_string(),
-                        serde_json::Value::String(py_bin),
-                    );
-                }
+    let folder_inputs: Vec<crate::toolchain::setup::ide::WorkspaceFolderInput<'_>> = folder_storage
+        .iter()
+        .map(|(label, folder_path, rel_path, fs_dir, ecosystem)| {
+            crate::toolchain::setup::ide::WorkspaceFolderInput {
+                label: label.as_str(),
+                folder_path: folder_path.as_str(),
+                rel_path,
+                fs_dir,
+                ecosystem: *ecosystem,
             }
-
-            if let Some(obj) = folder_entry.as_object_mut() {
-                obj.insert("settings".to_string(), py_settings);
-            }
-        }
-
-        folders.push(folder_entry);
-    }
+        })
+        .collect();
 
     let workspace_display_name = if !ws_project.name.is_empty() {
         &ws_project.name
@@ -313,33 +239,12 @@ pub fn package_multi_workspace_umbrella<W: Write>(
         "workspace"
     };
 
-    let unix_node_prefix = if !node_bin_unix.is_empty() {
-        format!("{}:", node_bin_unix.join(":"))
-    } else {
-        String::new()
-    };
-
-    let win_node_prefix = if !node_bin_win.is_empty() {
-        format!("{};", node_bin_win.join(";"))
-    } else {
-        String::new()
-    };
-
-    let code_workspace_obj = serde_json::json!({
-        "folders": folders,
-        "settings": {
-            "rust-analyzer.linkedProjects": linked_rust_projects,
-            "terminal.integrated.env.osx": {
-                "PATH": format!("{}${{workspaceFolder}}/.dmz/toolchains/node/bin:${{workspaceFolder}}/.dmz/toolchains/rust/bin:${{workspaceFolder}}/.dmz/toolchains/python/bin:${{env:PATH}}", unix_node_prefix)
-            },
-            "terminal.integrated.env.linux": {
-                "PATH": format!("{}${{workspaceFolder}}/.dmz/toolchains/node/bin:${{workspaceFolder}}/.dmz/toolchains/rust/bin:${{workspaceFolder}}/.dmz/toolchains/python/bin:${{env:PATH}}", unix_node_prefix)
-            },
-            "terminal.integrated.env.windows": {
-                "PATH": format!("{}${{workspaceFolder}}\\.dmz\\toolchains\\node\\bin;${{workspaceFolder}}\\.dmz\\toolchains\\rust\\bin;${{workspaceFolder}}\\.dmz\\toolchains\\python;${{env:PATH}}", win_node_prefix)
-            }
-        }
-    });
+    let code_workspace_obj = crate::toolchain::setup::ide::build_multi_root_workspace_doc(
+        workspace_root,
+        &folder_inputs,
+        with_toolchain,
+        false,
+    );
 
     if let Ok(cw_bytes) = serde_json::to_vec_pretty(&code_workspace_obj) {
         let mut header = tar::Header::new_gnu();

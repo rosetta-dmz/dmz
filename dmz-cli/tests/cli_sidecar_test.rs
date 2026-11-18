@@ -78,7 +78,7 @@ fn test_cli_sidecar_flag_parsing() {
         _ => panic!("Expected Commands::Shell"),
     }
 
-    // Sandbox with --sidecar
+    // Sandbox with --sidecar and --strict-kernel
     let args = vec![
         "dmz",
         "sandbox",
@@ -87,6 +87,7 @@ fn test_cli_sidecar_flag_parsing() {
         "--sidecar",
         "./my-sidecar",
         "--allow-network",
+        "--strict-kernel",
     ];
     let parsed = Cli::try_parse_from(args).expect("Failed to parse sandbox command");
     match parsed.command {
@@ -94,11 +95,13 @@ fn test_cli_sidecar_flag_parsing() {
             workspace,
             sidecar,
             allow_network,
+            strict_kernel,
             ..
         } => {
             assert_eq!(workspace, PathBuf::from("./my-app"));
             assert_eq!(sidecar, Some(PathBuf::from("./my-sidecar")));
             assert!(allow_network);
+            assert!(strict_kernel);
         }
         _ => panic!("Expected Commands::Sandbox"),
     }
@@ -345,4 +348,310 @@ fn test_cli_resolve_workspace_relative_path_resolution() {
     let res_rel =
         dmz_cli::commands::resolve_workspace_relative_path(ws, rel_candidate, ".dmz/store");
     assert_eq!(res_rel, PathBuf::from("/workspace/sub/custom_store"));
+}
+
+#[test]
+fn test_cli_include_dev_and_toolchain_profile_defaults_and_overrides(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use dmz_cli::cli::CliToolchainProfile;
+
+    let res_default = Cli::try_parse_from(["dmz", "resolve"])?;
+    if let Commands::Resolve {
+        include_dev,
+        prod_only,
+        ..
+    } = res_default.command
+    {
+        assert!(include_dev);
+        assert!(!prod_only);
+    } else {
+        return Err("Expected Commands::Resolve".into());
+    }
+
+    let res_prod = Cli::try_parse_from(["dmz", "resolve", "--prod-only"])?;
+    if let Commands::Resolve {
+        include_dev,
+        prod_only,
+        ..
+    } = res_prod.command
+    {
+        assert!(include_dev);
+        assert!(prod_only);
+    } else {
+        return Err("Expected Commands::Resolve".into());
+    }
+
+    let bundle_default = Cli::try_parse_from(["dmz", "bundle"])?;
+    if let Commands::Bundle(args) = bundle_default.command {
+        assert!(args.include_dev_enabled());
+        assert!(!args.allow_missing_toolchains);
+        assert_eq!(args.toolchain_profile, CliToolchainProfile::Minimal);
+    } else {
+        return Err("Expected Commands::Bundle".into());
+    }
+
+    let bundle_allow_missing =
+        Cli::try_parse_from(["dmz", "bundle", "--allow-missing-toolchains"])?;
+    if let Commands::Bundle(args) = bundle_allow_missing.command {
+        assert!(args.allow_missing_toolchains);
+    } else {
+        return Err("Expected Commands::Bundle".into());
+    }
+
+    let bundle_prod =
+        Cli::try_parse_from(["dmz", "bundle", "--no-dev", "--toolchain-profile", "full"])?;
+    if let Commands::Bundle(args) = bundle_prod.command {
+        assert!(!args.include_dev_enabled());
+        assert_eq!(args.toolchain_profile, CliToolchainProfile::Full);
+    } else {
+        return Err("Expected Commands::Bundle".into());
+    }
+
+    // --include-dev passed after --prod-only overrides back to true (explicit intent wins)
+    let bundle_override = Cli::try_parse_from(["dmz", "bundle", "--prod-only", "--include-dev"])?;
+    if let Commands::Bundle(args) = bundle_override.command {
+        assert!(args.include_dev_enabled());
+    } else {
+        return Err("Expected Commands::Bundle".into());
+    }
+
+    let export_full = Cli::try_parse_from([
+        "dmz",
+        "export",
+        "--output",
+        "out.tar.zst",
+        "--toolchain-profile",
+        "full",
+        "--allow-missing-toolchains",
+    ])?;
+    if let Commands::Export(args) = export_full.command {
+        assert!(args.include_dev_enabled());
+        assert!(args.allow_missing_toolchains);
+        assert_eq!(args.toolchain_profile, CliToolchainProfile::Full);
+    } else {
+        return Err("Expected Commands::Export".into());
+    }
+
+    let export_prod =
+        Cli::try_parse_from(["dmz", "export", "--output", "out.tar.zst", "--prod-only"])?;
+    if let Commands::Export(args) = export_prod.command {
+        assert!(!args.include_dev_enabled());
+    } else {
+        return Err("Expected Commands::Export".into());
+    }
+
+    let import_dev =
+        Cli::try_parse_from(["dmz", "import", "--archive", "in.tar.zst", "--include-dev"])?;
+    if let Commands::Import(args) = import_dev.command {
+        assert!(args.include_dev_enabled());
+    } else {
+        return Err("Expected Commands::Import".into());
+    }
+
+    let import_prod =
+        Cli::try_parse_from(["dmz", "import", "--archive", "in.tar.zst", "--prod-only"])?;
+    if let Commands::Import(args) = import_prod.command {
+        assert!(!args.include_dev_enabled());
+    } else {
+        return Err("Expected Commands::Import".into());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_cli_bundle_ignores_unrelated_ancestor_dmz_workspace_toml(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use dmz_core::resolver::lockfile::{DmzLockfile, LockedPackage};
+    use dmz_core::resolver::manifest::Ecosystem;
+
+    let tmp = tempfile::tempdir()?;
+    let ancestor = tmp.path();
+    let child_ws = ancestor.join("standalone-app");
+    let out_archive = child_ws.join("dist/bundle.tar.zst");
+
+    // Ancestor umbrella referencing an unrelated non-existent sibling member.
+    // If `run_bundle` climbed ancestors, exporting the umbrella would fail.
+    std::fs::write(
+        ancestor.join("dmz-workspace.toml"),
+        r#"
+name = "unrelated-umbrella"
+[[members]]
+id = "missing-sidecar"
+path = "nonexistent-sibling"
+role = "sidecar"
+ecosystem = "python"
+"#,
+    )?;
+
+    std::fs::create_dir_all(child_ws.join("src"))?;
+    std::fs::write(
+        child_ws.join("Cargo.toml"),
+        "[package]\nname = \"standalone-app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )?;
+    std::fs::write(child_ws.join("src/lib.rs"), "pub fn ok() {}\n")?;
+
+    let lockfile = DmzLockfile::new(vec![LockedPackage {
+        name: "standalone-app".to_string(),
+        version: "path:Cargo.toml".to_string(),
+        ecosystem: Ecosystem::Cargo,
+        sha256: DmzLockfile::hash_bytes(b"standalone-app"),
+        source_url: None,
+        dependencies: Vec::new(),
+        member_id: None,
+    }]);
+    lockfile.save(&child_ws.join("dmz.lock"))?;
+
+    let ws_str = child_ws.to_string_lossy().into_owned();
+    let out_str = out_archive.to_string_lossy().into_owned();
+    let parsed = Cli::try_parse_from([
+        "dmz",
+        "bundle",
+        "--workspace",
+        &ws_str,
+        "--output",
+        &out_str,
+        "--mode",
+        "code-only",
+        "--no-toolchain",
+    ])?;
+
+    let exit_code = dmz_cli::commands::dispatch(parsed.command)?;
+    assert_eq!(exit_code, 0);
+    assert!(out_archive.is_file());
+
+    Ok(())
+}
+
+#[test]
+fn test_cli_strict_metadata_flag_parsing() -> Result<(), Box<dyn std::error::Error>> {
+    let sb_default = Cli::try_parse_from(["dmz", "sandbox"])?;
+    if let Commands::Sandbox {
+        strict_metadata, ..
+    } = sb_default.command
+    {
+        assert!(!strict_metadata);
+    } else {
+        return Err("Expected Commands::Sandbox".into());
+    }
+
+    let sb_strict = Cli::try_parse_from(["dmz", "sandbox", "--strict-metadata"])?;
+    if let Commands::Sandbox {
+        strict_metadata, ..
+    } = sb_strict.command
+    {
+        assert!(strict_metadata);
+    } else {
+        return Err("Expected Commands::Sandbox".into());
+    }
+
+    let sh_default = Cli::try_parse_from(["dmz", "shell"])?;
+    if let Commands::Shell {
+        strict_metadata, ..
+    } = sh_default.command
+    {
+        assert!(!strict_metadata);
+    } else {
+        return Err("Expected Commands::Shell".into());
+    }
+
+    let sh_strict = Cli::try_parse_from(["dmz", "shell", "--strict-metadata"])?;
+    if let Commands::Shell {
+        strict_metadata, ..
+    } = sh_strict.command
+    {
+        assert!(strict_metadata);
+    } else {
+        return Err("Expected Commands::Shell".into());
+    }
+
+    let run_strict = Cli::try_parse_from(["dmz", "run", "--strict-metadata"])?;
+    if let Commands::Run(run_args) = run_strict.command {
+        assert!(run_args.strict_metadata);
+    } else {
+        return Err("Expected Commands::Run".into());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_cli_run_nested_sandbox_guard() {
+    let ws = Path::new("./project");
+    assert!(dmz_cli::commands::run::nested_sandbox_error(None, None, ws).is_none());
+    assert!(dmz_cli::commands::run::nested_sandbox_error(Some("0"), Some("/tmp/ws"), ws).is_none());
+
+    let msg = dmz_cli::commands::run::nested_sandbox_error(Some("1"), Some("/tmp/ws"), ws);
+    assert!(msg.is_some());
+    if let Some(text) = msg {
+        assert!(text.contains("cannot be nested"));
+        assert!(text.contains("DMZ_WORKSPACE=/tmp/ws"));
+        assert!(text.contains("exit"));
+        assert!(text.contains("dmz run --workspace ./project"));
+    }
+}
+
+#[test]
+fn test_cli_import_next_steps_dual_vs_single_repo() -> Result<(), Box<dyn std::error::Error>> {
+    use dmz_core::archive::ImportResult;
+    use dmz_core::workspace::{MemberRole, WorkspaceMember, WorkspaceProjectConfig};
+
+    let tmp = tempfile::tempdir()?;
+    let target = Path::new("./imported-dual");
+
+    let dual_project = WorkspaceProjectConfig::new(
+        "desktop-ai-suite",
+        vec![
+            WorkspaceMember::new("client", "workspaces/client", MemberRole::Primary),
+            WorkspaceMember::new("backend", "workspaces/backend", MemberRole::Sidecar),
+        ],
+    );
+    let dual_result = ImportResult {
+        imported_packages: 10,
+        installed_packages: 10,
+        install_warning: None,
+        closure_signature: "abc123".to_string(),
+        store_path: tmp.path().join(".dmz/store"),
+        workspace_path: tmp.path().to_path_buf(),
+        is_delta: false,
+        has_git_history: false,
+        has_toolchains: true,
+        workspace_project: Some(dual_project),
+        vcs: None,
+    };
+    let dual_steps = dmz_cli::commands::import::format_import_next_steps(target, &dual_result);
+    assert!(dual_steps.contains("cd ./imported-dual"));
+    assert!(dual_steps.contains("dmz run --workspace ."));
+    assert!(dual_steps.contains("host shell"));
+    assert!(dual_steps.contains("code desktop-ai-suite.code-workspace"));
+
+    // Verify shell-quoting for paths containing spaces and read_dir fallback when proj.name differs from disk
+    std::fs::write(tmp.path().join("actual-on-disk.code-workspace"), "{}")?;
+    let spaced_steps = dmz_cli::commands::import::format_import_next_steps(
+        Path::new("/tmp/my imported ws"),
+        &dual_result,
+    );
+    if cfg!(windows) {
+        assert!(spaced_steps.contains("cd \"/tmp/my imported ws\""));
+    } else {
+        assert!(spaced_steps.contains("cd '/tmp/my imported ws'"));
+    }
+    assert!(spaced_steps.contains("code actual-on-disk.code-workspace"));
+
+    let single_result = ImportResult {
+        workspace_project: None,
+        ..dual_result
+    };
+    let single_steps =
+        dmz_cli::commands::import::format_import_next_steps(Path::new("./single"), &single_result);
+    assert!(single_steps.contains("cd ./single"));
+    assert!(single_steps.contains("dmz shell"));
+    if cfg!(windows) {
+        assert!(single_steps.contains(r".dmz\env.bat"));
+    } else {
+        assert!(single_steps.contains("source .dmz/env.sh"));
+    }
+    assert!(!single_steps.contains("dmz run --workspace ."));
+
+    Ok(())
 }

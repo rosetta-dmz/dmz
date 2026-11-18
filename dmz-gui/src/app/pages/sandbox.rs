@@ -5,7 +5,10 @@ use std::thread;
 
 use super::super::components;
 use dmz_core::diagnostics::DiagnosticError;
-use dmz_sandbox::platform::{run_sandboxed, SandboxConfig};
+use dmz_sandbox::platform::{
+    run_sandboxed_with_options, MetadataReadMode, SandboxConfig, SandboxIsolationMode,
+    SandboxPolicyOptions,
+};
 
 pub(super) struct SandboxTaskOutcome {
     output_line: String,
@@ -16,6 +19,8 @@ pub(super) struct SandboxState {
     closure_path: String,
     pub(super) sandboxed: bool,
     pub(super) allow_network: bool,
+    pub(super) strict_kernel: bool,
+    pub(super) strict_metadata: bool,
     pub(super) diagnose: bool,
     command: String,
     console_output: String,
@@ -29,6 +34,8 @@ impl Default for SandboxState {
             closure_path: String::from(".dmz/store"),
             sandboxed: true,
             allow_network: false,
+            strict_kernel: false,
+            strict_metadata: false,
             diagnose: true,
             command: String::from("cargo check --offline"),
             console_output: String::from(
@@ -146,6 +153,37 @@ pub(super) fn show(
                 );
             });
         });
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            components::toggle(ui, &mut state.strict_kernel);
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Strict Kernel Isolation Mode").strong());
+                ui.label(
+                    egui::RichText::new(
+                        "Fails closed unless OS kernel confinement (Seatbelt / CLONE_NEWNET) enforces network policy",
+                    )
+                    .color(ui.visuals().widgets.noninteractive.fg_stroke.color)
+                    .size(12.0),
+                );
+            });
+        });
+
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            components::toggle(ui, &mut state.strict_metadata);
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Strict Ancestor Metadata Rules").strong());
+                ui.label(
+                    egui::RichText::new(
+                        "Restricts macOS Seatbelt metadata (stat/lstat) reads strictly to workspace and store ancestor paths (default uses Bazel-style global metadata reads)",
+                    )
+                    .color(ui.visuals().widgets.noninteractive.fg_stroke.color)
+                    .size(12.0),
+                );
+            });
+        });
     });
 
     ui.add_space(16.0);
@@ -179,15 +217,19 @@ pub(super) fn show(
 
                     let sandboxed = state.sandboxed;
                     let allow_network = state.allow_network;
+                    let strict_kernel = state.strict_kernel;
+                    let strict_metadata = state.strict_metadata;
                     let diagnose = state.diagnose;
                     let command = state.command.clone();
 
                     state.console_output.push_str(&format!(
-                        "\n>>> [{}] Executing: {} (sandboxed: {}, network: {})\n",
+                        "\n>>> [{}] Executing: {} (sandboxed: {}, network: {}, strict_kernel: {}, strict_metadata: {})\n",
                         chrono_timestamp(),
                         command,
                         sandboxed,
-                        allow_network
+                        allow_network,
+                        strict_kernel,
+                        strict_metadata
                     ));
 
                     let mut envs =
@@ -234,7 +276,23 @@ pub(super) fn show(
                                 ipc_socket_path: None,
                             };
 
-                            let outcome = match run_sandboxed(&config) {
+                            let isolation_mode = if strict_kernel {
+                                SandboxIsolationMode::StrictKernel
+                            } else {
+                                SandboxIsolationMode::BestEffort
+                            };
+                            let metadata_mode = if strict_metadata {
+                                MetadataReadMode::StrictAncestors
+                            } else {
+                                MetadataReadMode::Global
+                            };
+                            let options = SandboxPolicyOptions {
+                                isolation_mode,
+                                metadata_mode,
+                                ..SandboxPolicyOptions::default()
+                            };
+
+                            let outcome = match run_sandboxed_with_options(&config, &options) {
                                 Ok(status) => {
                                     let elapsed = start_time.elapsed();
                                     let code = status.code().unwrap_or(-1);
@@ -364,7 +422,12 @@ pub(super) fn show(
                 }
 
                 if components::action_button(ui, "Launch Interactive Shell", false).clicked() {
-                    launch_external_terminal(workspace_path, state.sandboxed, state.allow_network);
+                    launch_external_terminal(
+                        workspace_path,
+                        state.sandboxed,
+                        state.allow_network,
+                        state.strict_metadata,
+                    );
                     *status_message =
                         String::from("Launched interactive terminal shell session for workspace.");
                 }
@@ -444,31 +507,90 @@ pub(super) fn detect_dmz_cli() -> DmzCliInvocation {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn escape_applescript_string(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace(['\r', '\n'], "")
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(super) fn escape_posix_single_quotes(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
-fn launch_external_terminal(workspace_path: &str, sandboxed: bool, allow_network: bool) {
+fn build_shell_extra_flags(
+    sandboxed: bool,
+    allow_network: bool,
+    strict_metadata: bool,
+) -> Vec<&'static str> {
+    if !sandboxed {
+        return vec!["--no-sandbox"];
+    }
+    let mut flags = Vec::new();
+    if allow_network {
+        flags.push("--allow-network");
+    }
+    if strict_metadata {
+        flags.push("--strict-metadata");
+    }
+    flags
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn build_linux_shell_argv(
+    invocation: &DmzCliInvocation,
+    ws_str: &str,
+    extra_flags: &[&str],
+) -> Vec<String> {
+    let mut argv = match invocation {
+        DmzCliInvocation::Binary(bin) => vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "cd \"$1\" && _bin=\"$2\" && shift 2 && \"$_bin\" shell \"$@\"".to_string(),
+            "_".to_string(),
+            ws_str.to_string(),
+            bin.display().to_string(),
+        ],
+        DmzCliInvocation::Cargo => vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "cd \"$1\" && shift 1 && cargo run -p dmz-cli -- shell \"$@\"".to_string(),
+            "_".to_string(),
+            ws_str.to_string(),
+        ],
+        DmzCliInvocation::FallbackShell => {
+            return vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "cd \"$1\" && exec $SHELL".to_string(),
+                "_".to_string(),
+                ws_str.to_string(),
+            ]
+        }
+    };
+    argv.extend(extra_flags.iter().map(|s| (*s).to_string()));
+    argv
+}
+
+fn launch_external_terminal(
+    workspace_path: &str,
+    sandboxed: bool,
+    allow_network: bool,
+    strict_metadata: bool,
+) {
     let abs_workspace =
         std::fs::canonicalize(workspace_path).unwrap_or_else(|_| PathBuf::from(workspace_path));
+    let extra_flags_vec = build_shell_extra_flags(sandboxed, allow_network, strict_metadata);
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let extra_flags = if extra_flags_vec.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", extra_flags_vec.join(" "))
+    };
 
     #[cfg(target_os = "macos")]
     {
-        let extra_flags = if !sandboxed {
-            " --no-sandbox"
-        } else if allow_network {
-            " --allow-network"
-        } else {
-            ""
-        };
         let ws_str = escape_applescript_string(&abs_workspace.display().to_string());
         let script = match detect_dmz_cli() {
             DmzCliInvocation::Binary(bin) => {
@@ -499,13 +621,6 @@ fn launch_external_terminal(workspace_path: &str, sandboxed: bool, allow_network
 
     #[cfg(target_os = "linux")]
     {
-        let extra_flag = if !sandboxed {
-            "--no-sandbox"
-        } else if allow_network {
-            "--allow-network"
-        } else {
-            ""
-        };
         let terminals = [
             std::env::var("TERMINAL").ok(),
             Some("x-terminal-emulator".to_string()),
@@ -522,57 +637,14 @@ fn launch_external_terminal(workspace_path: &str, sandboxed: bool, allow_network
         for term_opt in terminals.into_iter().flatten() {
             if which::which(&term_opt).is_ok() {
                 let mut cmd = std::process::Command::new(&term_opt);
-                let spawned = match &invocation {
-                    DmzCliInvocation::Binary(bin) => {
-                        let bin_str = bin.display().to_string();
-                        let shell_script = if extra_flag.is_empty() {
-                            "cd \"$1\" && \"$2\" shell"
-                        } else {
-                            "cd \"$1\" && \"$2\" shell \"$3\""
-                        };
-                        if term_opt == "gnome-terminal" {
-                            cmd.args(["--", "sh", "-c", shell_script, "_", &ws_str, &bin_str]);
-                            if !extra_flag.is_empty() {
-                                cmd.arg(extra_flag);
-                            }
-                        } else {
-                            cmd.args(["-e", "sh", "-c", shell_script, "_", &ws_str, &bin_str]);
-                            if !extra_flag.is_empty() {
-                                cmd.arg(extra_flag);
-                            }
-                        }
-                        cmd.spawn()
-                    }
-                    DmzCliInvocation::Cargo => {
-                        let shell_script = if extra_flag.is_empty() {
-                            "cd \"$1\" && cargo run -p dmz-cli -- shell"
-                        } else {
-                            "cd \"$1\" && cargo run -p dmz-cli -- shell \"$2\""
-                        };
-                        if term_opt == "gnome-terminal" {
-                            cmd.args(["--", "sh", "-c", shell_script, "_", &ws_str]);
-                            if !extra_flag.is_empty() {
-                                cmd.arg(extra_flag);
-                            }
-                        } else {
-                            cmd.args(["-e", "sh", "-c", shell_script, "_", &ws_str]);
-                            if !extra_flag.is_empty() {
-                                cmd.arg(extra_flag);
-                            }
-                        }
-                        cmd.spawn()
-                    }
-                    DmzCliInvocation::FallbackShell => {
-                        if term_opt == "gnome-terminal" {
-                            cmd.args(["--", "sh", "-c", "cd \"$1\" && exec $SHELL", "_", &ws_str])
-                                .spawn()
-                        } else {
-                            cmd.args(["-e", "sh", "-c", "cd \"$1\" && exec $SHELL", "_", &ws_str])
-                                .spawn()
-                        }
-                    }
+                let argv = build_linux_shell_argv(&invocation, &ws_str, &extra_flags_vec);
+                let lead_flag = if term_opt == "gnome-terminal" {
+                    "--"
+                } else {
+                    "-e"
                 };
-                if spawned.is_ok() {
+                cmd.arg(lead_flag).args(&argv);
+                if cmd.spawn().is_ok() {
                     break;
                 }
             }
@@ -581,13 +653,6 @@ fn launch_external_terminal(workspace_path: &str, sandboxed: bool, allow_network
 
     #[cfg(target_os = "windows")]
     {
-        let extra_flags = if !sandboxed {
-            " --no-sandbox"
-        } else if allow_network {
-            " --allow-network"
-        } else {
-            ""
-        };
         let ws_str = abs_workspace.display().to_string().replace('"', "\\\"");
         let cmd_line = match detect_dmz_cli() {
             DmzCliInvocation::Binary(bin) => {
@@ -637,6 +702,8 @@ mod tests {
     fn test_sandbox_state_cancellation_latch() {
         let mut state = SandboxState::default();
         assert!(!state.is_busy());
+        assert!(!state.strict_kernel);
+        assert!(!state.strict_metadata);
 
         let latch = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         state.cancel_handle = Some(latch.clone());
@@ -647,6 +714,55 @@ mod tests {
             cancel.store(true, std::sync::atomic::Ordering::SeqCst);
         }
         assert!(latch.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_build_shell_extra_flags() {
+        assert!(build_shell_extra_flags(true, false, false).is_empty());
+        assert_eq!(
+            build_shell_extra_flags(true, false, true),
+            vec!["--strict-metadata"]
+        );
+        assert_eq!(
+            build_shell_extra_flags(true, true, true),
+            vec!["--allow-network", "--strict-metadata"]
+        );
+        assert_eq!(
+            build_shell_extra_flags(false, true, true),
+            vec!["--no-sandbox"]
+        );
+    }
+
+    #[test]
+    fn test_build_linux_shell_argv_shifts_positional_args() {
+        let flags = vec!["--allow-network", "--strict-metadata"];
+        let bin_argv = build_linux_shell_argv(
+            &DmzCliInvocation::Binary(PathBuf::from("/usr/local/bin/dmz")),
+            "/tmp/my ws",
+            &flags,
+        );
+        assert!(bin_argv.get(2).is_some_and(|s| s.contains("shift 2")));
+        assert_eq!(
+            bin_argv.get(4..),
+            Some(
+                [
+                    "/tmp/my ws",
+                    "/usr/local/bin/dmz",
+                    "--allow-network",
+                    "--strict-metadata"
+                ]
+                .as_slice()
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .as_slice()
+            )
+        );
+
+        let cargo_argv =
+            build_linux_shell_argv(&DmzCliInvocation::Cargo, "/tmp/my ws", &["--no-sandbox"]);
+        assert!(cargo_argv.get(2).is_some_and(|s| s.contains("shift 1")));
+        assert_eq!(cargo_argv.last().map(String::as_str), Some("--no-sandbox"));
     }
 
     #[test]

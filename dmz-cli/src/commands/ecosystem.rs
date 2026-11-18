@@ -30,6 +30,13 @@ pub fn run_ecosystem(action: EcosystemAction) -> anyhow::Result<i32> {
         } => {
             info!("Verifying workspace ecosystems at {:?}", workspace);
             let ws_canon = std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
+            if !dmz_core::toolchain::has_usable_apple_sdk_or_clt(&ws_canon) {
+                if let Err(e) =
+                    dmz_core::toolchain::verify_apple_prereq_for_workspace(&ws_canon, None)
+                {
+                    warn!("{}", e);
+                }
+            }
             let registry = EcosystemRegistry::new();
             let active = registry.discover_active(&ws_canon);
             if active.is_empty() {
@@ -56,6 +63,22 @@ pub fn run_ecosystem(action: EcosystemAction) -> anyhow::Result<i32> {
                         &ws_canon,
                         &mut toolchain_envs,
                     );
+
+                    if let Some(stub_path) =
+                        dmz_core::toolchain::should_skip_uninstalled_macos_clt_command(
+                            &cmd.program,
+                            &toolchain_envs,
+                            &ws_canon,
+                        )
+                    {
+                        warn!(
+                            ecosystem = %eco.name(),
+                            stub = ?stub_path,
+                            "Skipping verification for '{}' because it resolves to macOS Apple CLT stub without Command Line Tools installed",
+                            eco.name()
+                        );
+                        continue;
+                    }
 
                     let status_res = if no_sandbox {
                         info!("Executing verification unsandboxed (--no-sandbox requested)");

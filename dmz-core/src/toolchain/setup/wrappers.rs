@@ -60,27 +60,15 @@ if [ ! -f "$_REAL" ]; then
     esac
 fi
 
-# Locate Apple SDK root
+# Locate Apple SDK root from explicit SDKROOT or host macOS CLT/Xcode prerequisite
 _SDK="${SDKROOT}"
 if [ -z "$_SDK" ] || [ ! -d "$_SDK" ]; then
-    for _candidate in \
-        "$_DIR/../../applesdk/SDKs/MacOSX.sdk" \
-        "$_DIR/../../applesdk/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
-    do
-        if [ -d "$_candidate" ]; then
-            _SDK="$_candidate"
-            break
+    if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ -x /usr/bin/xcrun ] && { [ -d /Library/Developer/CommandLineTools/SDKs ] || [ -L /var/db/xcode_select_link ] || [ -n "${DEVELOPER_DIR:-}" ]; }; then
+        _HOST_SDK="$(/usr/bin/xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
+        if [ -n "$_HOST_SDK" ] && [ -d "$_HOST_SDK" ]; then
+            _SDK="$_HOST_SDK"
         fi
-    done
-fi
-
-if [ -z "$_SDK" ] || [ ! -d "$_SDK" ]; then
-    for _glob in "$_DIR"/../../applesdk/SDKs/MacOSX*.sdk "$_DIR"/../../applesdk/Platforms/MacOSX.platform/Developer/SDKs/MacOSX*.sdk; do
-        if [ -d "$_glob" ]; then
-            _SDK="$_glob"
-            break
-        fi
-    done
+    fi
 fi
 
 # Check if -isysroot or --sysroot is already specified in arguments
@@ -207,6 +195,26 @@ pub fn generate_clang_wrappers(_workspace_root: &Path) -> Result<(), ToolchainEr
     Ok(())
 }
 
+/// Returns `true` when `path` is absent or appears to be a text/shebang script rather than a compiled native binary.
+#[cfg(unix)]
+fn is_absent_or_script_shim(path: &Path) -> bool {
+    let Ok(sym) = fs::symlink_metadata(path) else {
+        return true;
+    };
+    if sym.file_type().is_symlink() {
+        return true;
+    }
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut header = [0u8; 4];
+    use std::io::Read;
+    let Ok(n) = file.read(&mut header) else {
+        return false;
+    };
+    n >= 2 && header.starts_with(b"#!")
+}
+
 /// Ensures Node.js companion package managers (npm, npx, pnpm, yarn) are correctly wired
 /// to their module entry points in `lib/node_modules/`.
 pub fn setup_node_package_managers(workspace_root: &Path) -> Result<(), ToolchainError> {
@@ -225,18 +233,37 @@ pub fn setup_node_package_managers(workspace_root: &Path) -> Result<(), Toolchai
         if nm_dir.is_dir() {
             let _ = fs::create_dir_all(&bin_dir);
 
-            let managers = [
-                ("npm", "lib/node_modules/npm/bin/npm-cli.js"),
-                ("npx", "lib/node_modules/npm/bin/npx-cli.js"),
-                ("pnpm", "lib/node_modules/pnpm/bin/pnpm.cjs"),
-                ("yarn", "lib/node_modules/yarn/bin/yarn.js"),
-                ("corepack", "lib/node_modules/corepack/dist/corepack.js"),
+            let managers: [(&str, &[&str]); 5] = [
+                ("npm", &["lib/node_modules/npm/bin/npm-cli.js"]),
+                ("npx", &["lib/node_modules/npm/bin/npx-cli.js"]),
+                (
+                    "pnpm",
+                    &[
+                        "lib/node_modules/pnpm/bin/pnpm.cjs",
+                        "lib/node_modules/corepack/dist/pnpm.js",
+                    ],
+                ),
+                (
+                    "yarn",
+                    &[
+                        "lib/node_modules/yarn/bin/yarn.js",
+                        "lib/node_modules/corepack/dist/yarn.js",
+                    ],
+                ),
+                ("corepack", &["lib/node_modules/corepack/dist/corepack.js"]),
             ];
 
-            for (name, rel_target) in &managers {
-                let target_full = node_dir.join(rel_target);
-                if target_full.exists() {
-                    let link_path = bin_dir.join(name);
+            for (name, candidates) in &managers {
+                let link_path = bin_dir.join(name);
+                // Never overwrite a standalone native executable binary (e.g. standalone `pnpm`).
+                if !is_absent_or_script_shim(&link_path) {
+                    continue;
+                }
+                if let Some(rel_target) = candidates
+                    .iter()
+                    .copied()
+                    .find(|rel| node_dir.join(rel).exists())
+                {
                     let rel_symlink_target = format!("../{}", rel_target);
                     if link_path.exists() || fs::symlink_metadata(&link_path).is_ok() {
                         let _ = fs::remove_file(&link_path);

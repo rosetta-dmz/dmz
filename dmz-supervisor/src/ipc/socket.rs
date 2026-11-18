@@ -11,11 +11,6 @@ impl SocketGuard {
     pub fn new(path: PathBuf) -> Self {
         Self { path, active: true }
     }
-
-    #[allow(dead_code)]
-    pub fn disarm(&mut self) {
-        self.active = false;
-    }
 }
 
 impl Drop for SocketGuard {

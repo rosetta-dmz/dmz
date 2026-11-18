@@ -20,6 +20,12 @@ fn main() -> eframe::Result<()> {
         .with_active(true)
         .with_visible(true);
 
+    #[cfg(target_os = "macos")]
+    let viewport_builder = viewport_builder
+        .with_fullsize_content_view(true)
+        .with_titlebar_shown(false)
+        .with_title_shown(false);
+
     #[cfg(not(target_os = "macos"))]
     let viewport_builder = {
         match image::load_from_memory(include_bytes!("../../assets/dmz-icon.png")) {

@@ -1,6 +1,8 @@
 # Running Tools After Air-Gap Import
 
-After importing an air-gap bundle with `dmz import`, your workspace, locked dependencies, and any bundled toolchains (Rust, Node.js, Python, Go, PHP, Ruby) are automatically unpacked and configured into `.dmz/toolchains/`.
+After importing an air-gap bundle with `dmz import`, your workspace, locked dependencies, and any bundled toolchains (Rust, Node.js, Python, Go, PHP, Ruby) are automatically unpacked and configured into `.dmz/toolchains/`. `dmz import` prints a **Next steps** summary tailored to your workspace layout.
+
+> **Dual-Repo Workspaces (`dmz-workspace.toml`):** To launch both primary and companion repositories together under supervised IPC, run `dmz run --workspace .` directly from your **host shell** (do **not** run `dmz run` inside `dmz shell`, which sets `DMZ_SANDBOX=1`). Use Options 1–3 below when running single-repo builds, tests, or interactive inspection.
 
 You can run your project's commands, compilers, or test suites in any of the following three ways:
 

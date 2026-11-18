@@ -98,9 +98,16 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), ToolchainError
         }
     }
 
-    // Configure terminal environment for bundled toolchains (e.g., Rust, Go, Python)
-    if toolchains_dir.exists() {
-        let mut bin_subpaths: Vec<String> = Vec::new();
+    // Configure terminal environment for virtual environments and bundled toolchains (e.g., Rust, Go, Python)
+    if toolchains_dir.exists() || workspace_root.join(".venv").is_dir() {
+        let mut unix_subpaths: Vec<String> = Vec::new();
+        let mut win_subpaths: Vec<String> = Vec::new();
+        if workspace_root.join(".venv/bin").is_dir() {
+            unix_subpaths.push("${workspaceFolder}/.venv/bin".into());
+        }
+        if workspace_root.join(".venv/Scripts").is_dir() {
+            win_subpaths.push("${workspaceFolder}\\.venv\\Scripts".into());
+        }
         if let Ok(entries) = fs::read_dir(&toolchains_dir) {
             for entry in entries.flatten() {
                 let name_os = entry.file_name();
@@ -114,36 +121,45 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), ToolchainError
                 let bin = entry.path().join("bin");
                 if bin.exists() {
                     let name = name_os.to_string_lossy().to_string();
-                    bin_subpaths.push(format!("${{workspaceFolder}}/.dmz/toolchains/{}/bin", name));
+                    unix_subpaths
+                        .push(format!("${{workspaceFolder}}/.dmz/toolchains/{}/bin", name));
+                    win_subpaths.push(format!(
+                        "${{workspaceFolder}}\\.dmz\\toolchains\\{}\\bin",
+                        name
+                    ));
                 }
             }
         }
 
-        if !bin_subpaths.is_empty() {
-            let unix_path = format!("{}:${{env:PATH}}", bin_subpaths.join(":"));
-            let win_path = format!("{};${{env:PATH}}", bin_subpaths.join(";"));
+        if !unix_subpaths.is_empty() || !win_subpaths.is_empty() {
+            let unix_path = format!("{}:${{env:PATH}}", unix_subpaths.join(":"));
+            let win_path = format!("{};${{env:PATH}}", win_subpaths.join(";"));
 
             for platform in &[
                 "terminal.integrated.env.osx",
                 "terminal.integrated.env.linux",
             ] {
-                let mut env_obj = settings
-                    .get(*platform)
-                    .and_then(|v| v.as_object().cloned())
-                    .unwrap_or_default();
-                env_obj.insert("PATH".into(), serde_json::Value::String(unix_path.clone()));
-                settings.insert(platform.to_string(), serde_json::Value::Object(env_obj));
+                if !unix_subpaths.is_empty() {
+                    let mut env_obj = settings
+                        .get(*platform)
+                        .and_then(|v| v.as_object().cloned())
+                        .unwrap_or_default();
+                    env_obj.insert("PATH".into(), serde_json::Value::String(unix_path.clone()));
+                    settings.insert(platform.to_string(), serde_json::Value::Object(env_obj));
+                }
             }
 
-            let mut win_env = settings
-                .get("terminal.integrated.env.windows")
-                .and_then(|v| v.as_object().cloned())
-                .unwrap_or_default();
-            win_env.insert("PATH".into(), serde_json::Value::String(win_path));
-            settings.insert(
-                "terminal.integrated.env.windows".into(),
-                serde_json::Value::Object(win_env),
-            );
+            if !win_subpaths.is_empty() {
+                let mut win_env = settings
+                    .get("terminal.integrated.env.windows")
+                    .and_then(|v| v.as_object().cloned())
+                    .unwrap_or_default();
+                win_env.insert("PATH".into(), serde_json::Value::String(win_path));
+                settings.insert(
+                    "terminal.integrated.env.windows".into(),
+                    serde_json::Value::Object(win_env),
+                );
+            }
         }
 
         // Configure rust-analyzer if Rust is bundled
@@ -264,16 +280,11 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), ToolchainError
                         )),
                     );
                 }
-                if let Some(sdk_path) = crate::toolchain::ToolchainEnv::find_apple_sdk_root(
-                    &toolchains_dir.join("applesdk"),
-                ) {
-                    if let Ok(rel) = sdk_path.strip_prefix(workspace_root) {
-                        let rel_str = rel.to_string_lossy().replace('\\', "/");
-                        ra_extra_env.insert(
-                            "SDKROOT".into(),
-                            serde_json::Value::String(format!("${{workspaceFolder}}/{}", rel_str)),
-                        );
-                    }
+                if let Some(sdk_path) = crate::toolchain::preflight::resolve_host_macos_sdk_path() {
+                    ra_extra_env.insert(
+                        "SDKROOT".into(),
+                        serde_json::Value::String(sdk_path.to_string_lossy().to_string()),
+                    );
                 }
                 settings.insert(
                     (*env_setting_key).into(),
@@ -300,46 +311,44 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), ToolchainError
             || workspace_root.join("setup.py").is_file()
             || workspace_root.join("Pipfile").is_file();
         let member_venv = workspace_root.join(".venv");
-        let has_valid_venv = member_venv.join("bin/python").exists()
-            || member_venv.join("bin/python3").exists()
-            || member_venv.join("Scripts/python.exe").exists()
-            || member_venv.join("Scripts/python.bat").exists()
-            || member_venv.join("Scripts/python.cmd").exists()
-            || member_venv.join("pyvenv.cfg").exists();
+        let venv_rel = crate::workspace::interpreter::venv_interpreter_rel(&member_venv);
+        let bundled_rel =
+            crate::workspace::interpreter::bundled_interpreter_rel(&toolchains_dir.join("python"));
 
-        if !is_umbrella && (!is_umbrella_member || has_python_project || has_valid_venv) {
-            if has_valid_venv {
-                let py_bin = if cfg!(windows) {
-                    "${workspaceFolder}/.venv/Scripts/python.exe"
-                } else {
-                    "${workspaceFolder}/.venv/bin/python"
-                };
+        if !is_umbrella && !is_umbrella_member {
+            if let Some(rel) = venv_rel {
                 settings.insert(
                     "python.defaultInterpreterPath".into(),
-                    serde_json::Value::String(py_bin.into()),
+                    serde_json::Value::String(format!("${{workspaceFolder}}/.venv/{}", rel)),
                 );
                 settings.insert(
                     "python.terminal.activateEnvironment".into(),
                     serde_json::Value::Bool(true),
                 );
-            } else if toolchains_dir.join("python").exists() {
-                let py_dir = toolchains_dir.join("python");
-                let has_py_bin = py_dir.join("bin/python3").exists()
-                    || py_dir.join("bin/python").exists()
-                    || py_dir.join("bin/pip").exists()
-                    || py_dir.join("python.exe").exists()
-                    || py_dir.join("bin/python.exe").exists();
-                if has_py_bin {
-                    let py_bin = if cfg!(windows) {
-                        "${workspaceFolder}/.dmz/toolchains/python/python.exe"
-                    } else {
-                        "${workspaceFolder}/.dmz/toolchains/python/bin/python3"
-                    };
-                    settings.insert(
-                        "python.defaultInterpreterPath".into(),
-                        serde_json::Value::String(py_bin.into()),
-                    );
-                }
+            } else if let Some(rel) = bundled_rel {
+                settings.insert(
+                    "python.defaultInterpreterPath".into(),
+                    serde_json::Value::String(format!(
+                        "${{workspaceFolder}}/.dmz/toolchains/python/{}",
+                        rel
+                    )),
+                );
+            } else {
+                settings.remove("python.defaultInterpreterPath");
+                settings.remove("python.pythonPath");
+            }
+        } else {
+            // Umbrella roots and multi-root members must never set an unlabeled
+            // `${workspaceFolder}/...` `python.defaultInterpreterPath` in folder-level
+            // `.vscode/settings.json`; multi-root `.code-workspace` configures each
+            // member via `${workspaceFolder:<label>}/.venv/...`.
+            settings.remove("python.defaultInterpreterPath");
+            settings.remove("python.pythonPath");
+            if is_umbrella_member && (has_python_project || venv_rel.is_some()) {
+                settings.insert(
+                    "python.terminal.activateEnvironment".into(),
+                    serde_json::Value::Bool(true),
+                );
             }
         }
 
@@ -403,71 +412,118 @@ pub fn generate_ide_settings(workspace_root: &Path) -> Result<(), ToolchainError
     Ok(())
 }
 
-/// Generates or updates `<project>.code-workspace` for multi-root projects
-pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), ToolchainError> {
-    let manifest_path = workspace_root.join("dmz-workspace.toml");
-    if !manifest_path.exists() {
-        return Ok(());
+/// Input descriptor for one member folder included in a generated `.code-workspace` file.
+pub(crate) struct WorkspaceFolderInput<'a> {
+    pub label: &'a str,
+    pub folder_path: &'a str,
+    pub rel_path: &'a Path,
+    pub fs_dir: &'a Path,
+    pub ecosystem: Option<&'a str>,
+}
+
+fn is_ecosystem_member(ecosystem: Option<&str>, candidates: &[&str]) -> bool {
+    ecosystem.is_some_and(|e| candidates.contains(&e))
+}
+
+fn toolchain_root_var(first_member: Option<&WorkspaceFolderInput<'_>>) -> String {
+    match first_member {
+        Some(m) => {
+            let folder_var = crate::workspace::interpreter::workspace_folder_var(Some(m.label));
+            let prefix = crate::workspace::interpreter::relative_root_prefix(m.rel_path);
+            if prefix == "." {
+                folder_var
+            } else {
+                format!("{}/{}", folder_var, prefix)
+            }
+        }
+        None => "${workspaceFolder}".to_string(),
     }
+}
 
-    let ws_project = match crate::workspace::WorkspaceProjectConfig::load_from_file(&manifest_path)
-    {
-        Ok(p) => p,
-        Err(_) => return Ok(()),
-    };
-
+/// Builds a multi-root VS Code / Cursor `.code-workspace` document shared between air-gap
+/// bundle export and post-import workspace setup.
+///
+/// Uses unambiguous `${workspaceFolder:<label>}` variable scoping for member interpreters,
+/// `node_modules/.bin`, and umbrella `.dmz/toolchains/*/bin` paths.
+pub(crate) fn build_multi_root_workspace_doc(
+    workspace_root: &Path,
+    members: &[WorkspaceFolderInput<'_>],
+    assume_bundled_python: bool,
+    include_documentation: bool,
+) -> serde_json::Value {
     let mut folders = Vec::new();
     let mut linked_rust_projects = Vec::new();
     let mut node_bin_unix = Vec::new();
     let mut node_bin_win = Vec::new();
 
-    for m in &ws_project.members {
-        let m_path_str = m.path.to_string_lossy().to_string();
-        let member_full_path = workspace_root.join(&m.path);
+    for m in members {
+        let is_python = is_ecosystem_member(m.ecosystem, &["python", "pypi"])
+            || m.fs_dir.join("requirements.txt").exists()
+            || m.fs_dir.join("pyproject.toml").exists();
 
-        let is_python = m.ecosystem.as_deref() == Some("python")
-            || m.ecosystem.as_deref() == Some("pypi")
-            || member_full_path.join("requirements.txt").exists()
-            || member_full_path.join("pyproject.toml").exists();
+        let cargo_dirs = crate::workspace::discover_tauri_cargo_dirs(m.fs_dir);
+        let node_dirs = crate::workspace::discover_node_project_roots(m.fs_dir);
 
-        let is_rust = m.ecosystem.as_deref() == Some("rust")
-            || m.ecosystem.as_deref() == Some("cargo")
-            || member_full_path.join("Cargo.toml").exists()
-            || member_full_path.join("src-tauri/Cargo.toml").exists();
+        let is_rust =
+            is_ecosystem_member(m.ecosystem, &["rust", "cargo"]) || !cargo_dirs.is_empty();
 
-        let is_node = m.ecosystem.as_deref() == Some("node")
-            || m.ecosystem.as_deref() == Some("npm")
-            || member_full_path.join("package.json").exists();
+        let is_node = is_ecosystem_member(m.ecosystem, &["node", "npm"]) || !node_dirs.is_empty();
 
         if is_rust {
-            if member_full_path.join("Cargo.toml").exists() {
-                linked_rust_projects.push(format!("{}/Cargo.toml", m_path_str));
-            }
-            if member_full_path.join("src-tauri/Cargo.toml").exists() {
-                linked_rust_projects.push(format!("{}/src-tauri/Cargo.toml", m_path_str));
+            for cargo_dir in cargo_dirs {
+                if let Ok(rel) = cargo_dir.strip_prefix(m.fs_dir) {
+                    let rel_unix = rel.to_string_lossy().replace('\\', "/");
+                    if rel_unix.is_empty() || rel_unix == "." {
+                        linked_rust_projects.push(format!("{}/Cargo.toml", m.folder_path));
+                    } else {
+                        linked_rust_projects
+                            .push(format!("{}/{}/Cargo.toml", m.folder_path, rel_unix));
+                    }
+                }
             }
         }
 
+        let folder_var = crate::workspace::interpreter::workspace_folder_var(Some(m.label));
+        if is_python && (m.fs_dir.join(".venv").is_dir() || assume_bundled_python) {
+            node_bin_unix.push(format!("{}/.venv/bin", folder_var));
+            node_bin_win.push(format!("{}\\.venv\\Scripts", folder_var));
+        }
         if is_node {
-            node_bin_unix.push(format!(
-                "${{workspaceFolder}}/{}/node_modules/.bin",
-                m_path_str
-            ));
-            node_bin_win.push(format!(
-                "${{workspaceFolder}}\\{}\\node_modules\\.bin",
-                m_path_str
-            ));
+            node_bin_unix.push(format!("{}/node_modules/.bin", folder_var));
+            node_bin_win.push(format!("{}\\node_modules\\.bin", folder_var));
+            for node_dir in node_dirs {
+                if let Ok(rel) = node_dir.strip_prefix(m.fs_dir) {
+                    let rel_unix = rel.to_string_lossy().replace('\\', "/");
+                    let rel_win = rel_unix.replace('/', "\\");
+                    if !rel_unix.is_empty() && rel_unix != "." {
+                        node_bin_unix
+                            .push(format!("{}/{}/node_modules/.bin", folder_var, rel_unix));
+                        node_bin_win
+                            .push(format!("{}\\{}\\node_modules\\.bin", folder_var, rel_win));
+                    }
+                }
+                for sub_dir in
+                    crate::resolver::manifest::npm::NpmManifestScanner::discover_npm_workspace_package_dirs(
+                        &node_dir,
+                    )
+                {
+                    if let Ok(rel) = sub_dir.strip_prefix(m.fs_dir) {
+                        let rel_unix = rel.to_string_lossy().replace('\\', "/");
+                        let rel_win = rel_unix.replace('/', "\\");
+                        if !rel_unix.is_empty() && rel_unix != "." {
+                            node_bin_unix
+                                .push(format!("{}/{}/node_modules/.bin", folder_var, rel_unix));
+                            node_bin_win
+                                .push(format!("{}\\{}\\node_modules\\.bin", folder_var, rel_win));
+                        }
+                    }
+                }
+            }
         }
-
-        let label = if !m.id.is_empty() {
-            m.id.clone()
-        } else {
-            m_path_str.to_string()
-        };
 
         let mut folder_entry = serde_json::json!({
-            "name": label,
-            "path": m_path_str
+            "name": m.label,
+            "path": m.folder_path
         });
 
         if is_python {
@@ -475,57 +531,16 @@ pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), Toolch
                 "python.terminal.activateEnvironment": true
             });
 
-            let has_bundled_py = workspace_root.join(".dmz/toolchains/python").exists();
-            let member_venv = member_full_path.join(".venv");
-
-            let depth = m
-                .path
-                .components()
-                .filter(|c| matches!(c, std::path::Component::Normal(_)))
-                .count();
-            let rel_prefix = if depth == 0 {
-                ".".to_string()
-            } else {
-                vec![".."; depth].join("/")
-            };
-
-            let py_bin_exists = member_venv.join("bin/python").exists()
-                || member_venv.join("bin/python3").exists()
-                || member_venv.join("Scripts/python.exe").exists()
-                || member_venv.join("Scripts/python.bat").exists()
-                || member_venv.join("Scripts/python.cmd").exists()
-                || member_venv.join("pyvenv.cfg").exists();
-
-            if member_venv.exists() && py_bin_exists {
-                let py_bin = if cfg!(windows) {
-                    "${workspaceFolder}/.venv/Scripts/python.exe"
-                } else {
-                    "${workspaceFolder}/.venv/bin/python"
-                };
-                if let Some(obj) = py_settings.as_object_mut() {
-                    obj.insert(
-                        "python.defaultInterpreterPath".to_string(),
-                        serde_json::Value::String(py_bin.to_string()),
-                    );
-                }
-            } else if has_bundled_py {
-                let py_bin = if rel_prefix == "." {
-                    if cfg!(windows) {
-                        "${workspaceFolder}/.dmz/toolchains/python/python.exe".to_string()
-                    } else {
-                        "${workspaceFolder}/.dmz/toolchains/python/bin/python3".to_string()
-                    }
-                } else if cfg!(windows) {
-                    format!(
-                        "${{workspaceFolder}}/{}/.dmz/toolchains/python/python.exe",
-                        rel_prefix
-                    )
-                } else {
-                    format!(
-                        "${{workspaceFolder}}/{}/.dmz/toolchains/python/bin/python3",
-                        rel_prefix
-                    )
-                };
+            // Scope `.code-workspace` paths via `${workspaceFolder:<label>}` so VS Code's Python
+            // extension never hits multi-root `${workspaceFolder}` ambiguity, and only emit a path
+            // when a real interpreter exists (or is guaranteed to be bundled with `--with-toolchain`).
+            if let Some(py_bin) = crate::workspace::interpreter::resolve_ide_interpreter_setting(
+                m.fs_dir,
+                m.rel_path,
+                workspace_root,
+                Some(m.label),
+                assume_bundled_python,
+            ) {
                 if let Some(obj) = py_settings.as_object_mut() {
                     obj.insert(
                         "python.defaultInterpreterPath".to_string(),
@@ -542,33 +557,27 @@ pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), Toolch
         folders.push(folder_entry);
     }
 
-    if workspace_root.join("documentation").is_dir() {
+    if include_documentation && workspace_root.join("documentation").is_dir() {
         folders.push(serde_json::json!({
             "name": "Documentation",
             "path": "documentation"
         }));
     }
 
-    let project_name = if !ws_project.name.is_empty() {
-        &ws_project.name
-    } else {
-        "workspace"
-    };
-
     let unix_node_prefix = if !node_bin_unix.is_empty() {
         format!("{}:", node_bin_unix.join(":"))
     } else {
         String::new()
     };
-
     let win_node_prefix = if !node_bin_win.is_empty() {
         format!("{};", node_bin_win.join(";"))
     } else {
         String::new()
     };
 
+    let root_var = toolchain_root_var(members.first());
     let toolchains_dir = workspace_root.join(".dmz/toolchains");
-    let mut bin_subpaths: Vec<String> = Vec::new();
+    let mut bin_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     if let Ok(entries) = fs::read_dir(&toolchains_dir) {
         for entry in entries.flatten() {
             let name_os = entry.file_name();
@@ -577,50 +586,142 @@ pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), Toolch
             {
                 continue;
             }
-            let bin = entry.path().join("bin");
-            if bin.exists() {
-                let name = name_os.to_string_lossy().to_string();
-                bin_subpaths.push(format!("${{workspaceFolder}}/.dmz/toolchains/{}/bin", name));
+            if entry.path().join("bin").exists() {
+                bin_names.insert(name_os.to_string_lossy().to_string());
             }
         }
     }
 
-    let unix_path = if bin_subpaths.is_empty() {
-        format!("{}${{workspaceFolder}}/.dmz/toolchains/node/bin:${{workspaceFolder}}/.dmz/toolchains/rust/bin:${{workspaceFolder}}/.dmz/toolchains/python/bin:${{env:PATH}}", unix_node_prefix)
-    } else {
-        format!(
-            "{}{}:${{env:PATH}}",
-            unix_node_prefix,
-            bin_subpaths.join(":")
-        )
-    };
+    let bin_subpaths: Vec<String> = bin_names
+        .into_iter()
+        .map(|name| format!("{}/.dmz/toolchains/{}/bin", root_var, name))
+        .collect();
 
-    let win_path = if bin_subpaths.is_empty() {
-        format!("{}${{workspaceFolder}}\\.dmz\\toolchains\\node\\bin;${{workspaceFolder}}\\.dmz\\toolchains\\rust\\bin;${{workspaceFolder}}\\.dmz\\toolchains\\python;${{env:PATH}}", win_node_prefix)
+    let (unix_path, win_path) = if bin_subpaths.is_empty() {
+        let win_root = root_var.replace('/', "\\");
+        (
+            format!(
+                "{}{}/.dmz/toolchains/node/bin:{}/.dmz/toolchains/rust/bin:{}/.dmz/toolchains/python/bin:${{env:PATH}}",
+                unix_node_prefix, root_var, root_var, root_var
+            ),
+            format!(
+                "{}{}\\.dmz\\toolchains\\node\\bin;{}\\.dmz\\toolchains\\rust\\bin;{}\\.dmz\\toolchains\\python;${{env:PATH}}",
+                win_node_prefix, win_root, win_root, win_root
+            ),
+        )
     } else {
         let win_subpaths: Vec<String> = bin_subpaths.iter().map(|p| p.replace('/', "\\")).collect();
-        format!(
-            "{}{};${{env:PATH}}",
-            win_node_prefix,
-            win_subpaths.join(";")
+        (
+            format!(
+                "{}{}:${{env:PATH}}",
+                unix_node_prefix,
+                bin_subpaths.join(":")
+            ),
+            format!(
+                "{}{};${{env:PATH}}",
+                win_node_prefix,
+                win_subpaths.join(";")
+            ),
         )
     };
 
-    let code_workspace_obj = serde_json::json!({
-        "folders": folders,
-        "settings": {
-            "rust-analyzer.linkedProjects": linked_rust_projects,
-            "terminal.integrated.env.osx": {
-                "PATH": unix_path
-            },
-            "terminal.integrated.env.linux": {
-                "PATH": unix_path
-            },
-            "terminal.integrated.env.windows": {
-                "PATH": win_path
-            }
+    let has_cmake = workspace_root.join("CMakeLists.txt").exists()
+        || members.iter().any(|m| {
+            m.fs_dir.join("CMakeLists.txt").exists()
+                || is_ecosystem_member(m.ecosystem, &["cmake", "juce"])
+        })
+        || crate::toolchain::ToolchainEnv::find_binary(&toolchains_dir.join("cmake"), "bin/cmake")
+            .is_some();
+
+    let mut workspace_settings = serde_json::json!({
+        "rust-analyzer.linkedProjects": linked_rust_projects,
+        "terminal.integrated.env.osx": {
+            "PATH": unix_path
+        },
+        "terminal.integrated.env.linux": {
+            "PATH": unix_path
+        },
+        "terminal.integrated.env.windows": {
+            "PATH": win_path
         }
     });
+
+    if !has_cmake {
+        if let Some(obj) = workspace_settings.as_object_mut() {
+            obj.insert(
+                "cmake.configureOnOpen".to_string(),
+                serde_json::Value::Bool(false),
+            );
+            obj.insert(
+                "cmake.autoSelectActiveFolder".to_string(),
+                serde_json::Value::Bool(false),
+            );
+            obj.insert(
+                "cmake.enableAutomaticKitScan".to_string(),
+                serde_json::Value::Bool(false),
+            );
+        }
+    }
+
+    serde_json::json!({
+        "folders": folders,
+        "settings": workspace_settings
+    })
+}
+
+/// Generates or updates `<project>.code-workspace` for multi-root projects
+pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), ToolchainError> {
+    let manifest_path = workspace_root.join("dmz-workspace.toml");
+    if !manifest_path.exists() {
+        return Ok(());
+    }
+
+    let ws_project = match crate::workspace::WorkspaceProjectConfig::load_from_file(&manifest_path)
+    {
+        Ok(p) => p,
+        Err(_) => return Ok(()),
+    };
+
+    let member_storage: Vec<(String, String, &Path, std::path::PathBuf, Option<&str>)> = ws_project
+        .members
+        .iter()
+        .map(|m| {
+            let folder_path = m.path.to_string_lossy().replace('\\', "/");
+            let label = if !m.id.is_empty() {
+                m.id.clone()
+            } else {
+                folder_path.clone()
+            };
+            (
+                label,
+                folder_path,
+                m.path.as_path(),
+                workspace_root.join(&m.path),
+                m.ecosystem.as_deref(),
+            )
+        })
+        .collect();
+
+    let inputs: Vec<WorkspaceFolderInput<'_>> = member_storage
+        .iter()
+        .map(
+            |(label, folder_path, rel_path, fs_dir, ecosystem)| WorkspaceFolderInput {
+                label: label.as_str(),
+                folder_path: folder_path.as_str(),
+                rel_path,
+                fs_dir: fs_dir.as_path(),
+                ecosystem: *ecosystem,
+            },
+        )
+        .collect();
+
+    let code_workspace_obj = build_multi_root_workspace_doc(workspace_root, &inputs, false, true);
+
+    let project_name = if !ws_project.name.is_empty() {
+        &ws_project.name
+    } else {
+        "workspace"
+    };
 
     let cw_path = workspace_root.join(format!("{}.code-workspace", project_name));
     let content = serde_json::to_string_pretty(&code_workspace_obj).map_err(|e| {
@@ -630,4 +731,114 @@ pub fn generate_multi_root_workspace(workspace_root: &Path) -> Result<(), Toolch
         .map_err(|e| ToolchainError::Io(format!("Failed to write {}: {}", cw_path.display(), e)))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_generate_multi_root_workspace_uses_folder_label_scoping() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+
+        fs::create_dir_all(root.join("workspaces/py-api")).unwrap();
+        fs::create_dir_all(root.join("workspaces/tauri-ui")).unwrap();
+        fs::write(
+            root.join("workspaces/py-api/requirements.txt"),
+            "fastapi==0.111.0\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("workspaces/tauri-ui/package.json"),
+            r#"{"name": "tauri-ui", "devDependencies": {"@tauri-apps/cli": "^2.0.0"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("dmz-workspace.toml"),
+            r#"
+name = "dual-suite"
+
+[[members]]
+id = "py-api"
+path = "workspaces/py-api"
+role = "primary"
+ecosystem = "python"
+
+[[members]]
+id = "tauri-ui"
+path = "workspaces/tauri-ui"
+role = "sidecar"
+ecosystem = "node"
+"#,
+        )
+        .unwrap();
+
+        generate_multi_root_workspace(root).unwrap();
+        let cw_text = fs::read_to_string(root.join("dual-suite.code-workspace")).unwrap();
+        let cw: serde_json::Value = serde_json::from_str(&cw_text).unwrap();
+
+        let osx_path = cw["settings"]["terminal.integrated.env.osx"]["PATH"]
+            .as_str()
+            .unwrap();
+        assert!(
+            osx_path.contains("${workspaceFolder:tauri-ui}/node_modules/.bin"),
+            "Expected labeled node_modules/.bin in PATH, got: {}",
+            osx_path
+        );
+        assert!(
+            osx_path.contains("${workspaceFolder:py-api}/../../.dmz/toolchains/"),
+            "Expected labeled relative toolchains in PATH, got: {}",
+            osx_path
+        );
+        assert!(
+            !osx_path.contains("${workspaceFolder}/"),
+            "Ambiguous unlabeled ${{workspaceFolder}} should not appear in multi-root PATH: {}",
+            osx_path
+        );
+        assert_eq!(cw["settings"]["cmake.configureOnOpen"], false);
+        assert_eq!(cw["settings"]["cmake.autoSelectActiveFolder"], false);
+        assert_eq!(cw["settings"]["cmake.enableAutomaticKitScan"], false);
+    }
+
+    #[test]
+    fn test_generate_multi_root_workspace_preserves_cmake_when_member_uses_cmake() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+
+        fs::create_dir_all(root.join("workspaces/native-lib")).unwrap();
+        fs::create_dir_all(root.join("workspaces/ui")).unwrap();
+        fs::write(
+            root.join("workspaces/native-lib/CMakeLists.txt"),
+            "cmake_minimum_required(VERSION 3.20)\nproject(native_lib)\n",
+        )
+        .unwrap();
+        fs::write(root.join("workspaces/ui/package.json"), r#"{"name":"ui"}"#).unwrap();
+        fs::write(
+            root.join("dmz-workspace.toml"),
+            r#"
+name = "native-suite"
+
+[[members]]
+id = "native-lib"
+path = "workspaces/native-lib"
+role = "primary"
+
+[[members]]
+id = "ui"
+path = "workspaces/ui"
+role = "sidecar"
+"#,
+        )
+        .unwrap();
+
+        generate_multi_root_workspace(root).unwrap();
+        let cw_text = fs::read_to_string(root.join("native-suite.code-workspace")).unwrap();
+        let cw: serde_json::Value = serde_json::from_str(&cw_text).unwrap();
+
+        assert!(cw["settings"].get("cmake.configureOnOpen").is_none());
+        assert!(cw["settings"].get("cmake.autoSelectActiveFolder").is_none());
+        assert!(cw["settings"].get("cmake.enableAutomaticKitScan").is_none());
+    }
 }

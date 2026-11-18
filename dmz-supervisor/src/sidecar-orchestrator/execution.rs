@@ -1,5 +1,9 @@
 use dmz_core::workspace::{MemberRole, WorkspaceMember, WorkspaceProjectConfig};
-use std::path::Path;
+use dmz_sandbox::platform::{
+    prepare_agent_command, SandboxConfig, SandboxIsolationMode, SandboxPolicyOptions,
+};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -8,19 +12,93 @@ use tracing::info;
 use super::child::ManagedChild;
 use super::types::{SidecarOrchestratorError, SidecarPairConfig};
 
-/// Automatically infers execution command and arguments for a workspace member based on project manifests
+/// Builds a member `tokio::process::Command`, applying OS sandbox confinement unless `config.no_sandbox` is set.
+#[allow(clippy::too_many_arguments)]
+fn build_member_command(
+    workspace_root: &Path,
+    member_dir: &Path,
+    effective_cwd: &Path,
+    sock_path: &Path,
+    program: &str,
+    args: &[String],
+    base_envs: &HashMap<String, String>,
+    config: &SidecarPairConfig,
+) -> Result<Command, SidecarOrchestratorError> {
+    let mut env_map = base_envs.clone();
+    env_map.remove("PYTHONHOME");
+
+    if config.no_sandbox {
+        env_map.insert("DMZ_SANDBOX".to_string(), "0".to_string());
+        let mut cmd = Command::new(program);
+        if !args.is_empty() {
+            cmd.args(args);
+        }
+        #[cfg(unix)]
+        cmd.process_group(0);
+        cmd.current_dir(effective_cwd).envs(env_map);
+        return Ok(cmd);
+    }
+
+    env_map.insert("DMZ_SANDBOX".to_string(), "1".to_string());
+    let private_tmp = workspace_root.join(".dmz").join("tmp");
+    let tmp_str = private_tmp.to_string_lossy().into_owned();
+    env_map
+        .entry("TMPDIR".to_string())
+        .or_insert_with(|| tmp_str.clone());
+    env_map
+        .entry("TEMP".to_string())
+        .or_insert_with(|| tmp_str.clone());
+    env_map.entry("TMP".to_string()).or_insert(tmp_str);
+
+    let closure_path = workspace_root.join(".dmz").join("store");
+    let mut writable_paths: Vec<PathBuf> = Vec::new();
+    for candidate in [member_dir, effective_cwd] {
+        let owned = candidate.to_path_buf();
+        if owned != workspace_root && !writable_paths.contains(&owned) {
+            writable_paths.push(owned);
+        }
+    }
+
+    let sandbox_cfg = SandboxConfig {
+        workspace_path: workspace_root.to_path_buf(),
+        closure_path,
+        command: program.to_string(),
+        args: args.to_vec(),
+        envs: env_map.into_iter().collect(),
+        allow_network: config.allow_network,
+        ipc_socket_path: (!sock_path.as_os_str().is_empty()).then(|| sock_path.to_path_buf()),
+    };
+    let policy_opts = SandboxPolicyOptions {
+        isolation_mode: SandboxIsolationMode::BestEffort,
+        metadata_mode: config.metadata_mode,
+        proxy_addr: None,
+        writable_paths,
+    };
+
+    let (std_cmd, posture) = prepare_agent_command(&sandbox_cfg, &policy_opts)?;
+    info!(
+        program = %program,
+        posture = %posture,
+        "Prepared sandboxed workspace member command"
+    );
+
+    let mut cmd = Command::from(std_cmd);
+    cmd.current_dir(effective_cwd);
+    Ok(cmd)
+}
+
+/// Resolves the execution command and arguments for a workspace member (explicit `exec_command`
+/// first, then manifest-based inference). Propagates the actionable core error unchanged.
 pub fn infer_member_execution_in(
     workspace_root: &Path,
     member_dir: &Path,
     member: &WorkspaceMember,
 ) -> Result<(String, Vec<String>), SidecarOrchestratorError> {
-    if let Ok(resolved) = member.resolve_command(member_dir, workspace_root) {
-        return Ok(resolved);
-    }
-
-    Err(SidecarOrchestratorError::ExecutionInferenceFailed {
-        path: member_dir.display().to_string(),
-    })
+    member
+        .resolve_command(member_dir, workspace_root)
+        .map_err(|e| SidecarOrchestratorError::ExecutionInferenceFailed {
+            detail: e.to_string(),
+        })
 }
 
 /// Automatically infers execution command and arguments for a workspace member based on project manifests.
@@ -79,19 +157,21 @@ pub async fn spawn_member_process(
                 build_command = %trimmed_build,
                 "Executing member pre-launch build_command"
             );
-            let mut build_proc = if cfg!(windows) {
-                let mut c = Command::new("cmd.exe");
-                c.args(["/C", trimmed_build]);
-                c
+            let (build_prog, build_args) = if cfg!(windows) {
+                ("cmd.exe", vec!["/C".to_string(), trimmed_build.to_string()])
             } else {
-                let mut c = Command::new("/bin/sh");
-                c.args(["-c", trimmed_build]);
-                c
+                ("/bin/sh", vec!["-c".to_string(), trimmed_build.to_string()])
             };
-            build_proc
-                .current_dir(&member_dir)
-                .envs(&envs)
-                .env_remove("PYTHONHOME");
+            let mut build_proc = build_member_command(
+                workspace_root,
+                &member_dir,
+                &member_dir,
+                sock_path,
+                build_prog,
+                &build_args,
+                &envs,
+                config,
+            )?;
             let build_out = build_proc.output().await.map_err(|e| {
                 SidecarOrchestratorError::Generic(format!(
                     "Failed to execute build_command '{}' for '{}': {}",
@@ -110,9 +190,22 @@ pub async fn spawn_member_process(
         }
     }
 
-    let (raw_exec_cmd, default_args) = member
-        .resolve_command(&member_dir, workspace_root)
-        .or_else(|_| infer_member_execution(&member_dir, member))?;
+    // Manifest inspection performs blocking filesystem I/O; keep it off the async reactor.
+    let (raw_exec_cmd, default_args) = {
+        let (root, dir, member) = (
+            workspace_root.to_path_buf(),
+            member_dir.clone(),
+            member.clone(),
+        );
+        tokio::task::spawn_blocking(move || infer_member_execution_in(&root, &dir, &member))
+            .await
+            .map_err(|e| {
+                SidecarOrchestratorError::Generic(format!(
+                    "Execution inference task failed to complete: {}",
+                    e
+                ))
+            })??
+    };
 
     let effective_cwd = if (raw_exec_cmd == "cargo" || raw_exec_cmd.ends_with("/cargo"))
         && !member_dir.join("Cargo.toml").is_file()
@@ -126,18 +219,26 @@ pub async fn spawn_member_process(
     let resolved_exec_cmd =
         WorkspaceProjectConfig::resolve_executable_in_env(&raw_exec_cmd, &path_env, &effective_cwd);
 
-    let mut cmd = Command::new(&resolved_exec_cmd);
-    if !default_args.is_empty() {
-        cmd.args(&default_args);
+    if dmz_core::toolchain::is_uninstalled_macos_clt_shim(
+        Path::new(&resolved_exec_cmd),
+        workspace_root,
+    ) {
+        return Err(SidecarOrchestratorError::Generic(format!(
+            "Command '{}' for workspace member '{}' resolves to macOS Apple CLT stub '{}' while Command Line Tools / standalone runtime are unavailable. Bundle the toolchain with `dmz bundle` or install a standalone runtime instead.",
+            raw_exec_cmd, member.id, resolved_exec_cmd
+        )));
     }
 
-    // Put process in its own process group on Unix so children don't become zombies
-    #[cfg(unix)]
-    cmd.process_group(0);
-
-    cmd.current_dir(&effective_cwd);
-    cmd.envs(envs);
-    cmd.env_remove("PYTHONHOME");
+    let mut cmd = build_member_command(
+        workspace_root,
+        &member_dir,
+        &effective_cwd,
+        sock_path,
+        &resolved_exec_cmd,
+        &default_args,
+        &envs,
+        config,
+    )?;
 
     // Pipe stdout and stderr for multiplexed logging
     cmd.stdout(std::process::Stdio::piped());

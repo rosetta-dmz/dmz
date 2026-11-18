@@ -40,6 +40,17 @@ pub fn hydrate_offline_dependencies(
     store_dir: &Path,
     workspace_project: Option<&WorkspaceProjectConfig>,
 ) {
+    hydrate_offline_dependencies_with_options(workspace_root, store_dir, workspace_project, true);
+}
+
+/// Option-aware variant of [`hydrate_offline_dependencies`] propagating the resolved
+/// `include_dev` policy to Node/pnpm metadata hydration and sanitizing stale IDE interpreter hints.
+pub fn hydrate_offline_dependencies_with_options(
+    workspace_root: &Path,
+    store_dir: &Path,
+    workspace_project: Option<&WorkspaceProjectConfig>,
+    include_dev: bool,
+) {
     // Collect target directories (either umbrella member folders or workspace root)
     let mut target_dirs: Vec<(PathBuf, MemberRole)> = Vec::new();
     if let Some(wp) = workspace_project {
@@ -137,52 +148,47 @@ pub fn hydrate_offline_dependencies(
             }
         }
 
-        // 1. Cargo vendoring configuration: .cargo/config.toml
-        // Per Cargo's config-relative-paths specification, `directory` in `.cargo/config.toml`
-        // is resolved relative to the parent directory of `.cargo`.
-        let cargo_toml = dir.join("Cargo.toml");
-        let tauri_cargo_toml = dir.join("src-tauri/Cargo.toml");
-        let member_vendor = dir.join(".cargo/vendor");
-        let root_vendor = workspace_root.join(".cargo/vendor");
-
-        let (vendor_dir_root, vendor_dir_tauri, force_overwrite) = if member_vendor.is_dir() {
-            (
-                ".cargo/vendor".to_string(),
-                "../.cargo/vendor".to_string(),
-                true,
-            )
-        } else if root_vendor.is_dir() {
-            (
-                relative_path_between(dir, &root_vendor),
-                relative_path_between(&dir.join("src-tauri"), &root_vendor),
-                true,
-            )
-        } else {
-            (
-                relative_path_between(dir, &effective_target_store),
-                relative_path_between(&dir.join("src-tauri"), &effective_target_store),
-                false,
-            )
+        let excluded_for = |dir: &Path| -> Vec<PathBuf> {
+            let canon = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+            target_dirs
+                .iter()
+                .filter_map(|(other, _)| {
+                    let other_canon =
+                        fs::canonicalize(other).unwrap_or_else(|_| other.to_path_buf());
+                    (other_canon != canon).then_some(other_canon)
+                })
+                .collect()
         };
 
-        let cargo_targets = [
-            (cargo_toml.is_file(), dir.join(".cargo"), vendor_dir_root),
-            (
-                tauri_cargo_toml.is_file(),
-                dir.join("src-tauri/.cargo"),
-                vendor_dir_tauri,
-            ),
-        ];
+        // 1. Cargo vendoring configuration: .cargo/config.toml (root, src-tauri, and nested Tauri subprojects)
+        // Per Cargo's config-relative-paths specification, `directory` in `.cargo/config.toml`
+        // is resolved relative to the parent directory of `.cargo`.
+        let excluded_dirs = excluded_for(dir);
+        let member_vendor = dir.join(".cargo/vendor");
+        let root_vendor = workspace_root.join(".cargo/vendor");
+        let (vendor_abs_opt, force_overwrite) = if member_vendor.is_dir() {
+            (Some(&member_vendor), true)
+        } else if root_vendor.is_dir() {
+            (Some(&root_vendor), true)
+        } else {
+            (None, false)
+        };
+        let vendor_target = vendor_abs_opt.unwrap_or(&effective_target_store);
 
-        for (exists, cargo_dir, rel_vendor) in cargo_targets {
-            if exists && fs::create_dir_all(&cargo_dir).is_ok() {
+        for cargo_manifest_dir in
+            crate::workspace::discover_tauri_cargo_dirs_excluding(dir, &excluded_dirs)
+        {
+            let cargo_dir = cargo_manifest_dir.join(".cargo");
+            let rel_vendor = relative_path_between(&cargo_manifest_dir, vendor_target);
+            if fs::create_dir_all(&cargo_dir).is_ok() {
                 let config_path = cargo_dir.join("config.toml");
-                if force_overwrite || !config_path.exists() {
-                    let cargo_config_content = format!(
-                        "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"{}\"\n",
-                        rel_vendor
-                    );
-                    let _ = fs::write(&config_path, cargo_config_content);
+                if (force_overwrite || !config_path.exists())
+                    && crate::install::mappers::CargoMapper::ensure_vendored_cargo_config(
+                        &config_path,
+                        &rel_vendor,
+                    )
+                    .is_ok()
+                {
                     info!(
                         config = ?config_path,
                         vendor = %rel_vendor,
@@ -192,21 +198,45 @@ pub fn hydrate_offline_dependencies(
             }
         }
 
-        // 2. Generic Node / NPM CLI shim hydration: node_modules/.bin/*
-        let package_json = dir.join("package.json");
-        if package_json.is_file() {
-            crate::install::mappers::NpmMapper::hydrate_workspace_bin_shims(dir);
+        // 2. Generic Node / NPM CLI shim hydration: node_modules/.bin/* and pnpm .modules.yaml
+        for node_root in
+            crate::workspace::discover_node_project_roots_excluding(dir, &excluded_dirs)
+        {
+            if node_root.join("package.json").is_file() || node_root.join("node_modules").is_dir() {
+                crate::install::mappers::NpmMapper::hydrate_workspace_bin_shims_with_options(
+                    &node_root,
+                    include_dev,
+                );
+                crate::install::mappers::NpmMapper::hydrate_npm_workspace_members(
+                    &node_root,
+                    include_dev,
+                );
+                crate::install::mappers::PnpmMapper::ensure_modules_yaml_with_options(
+                    &node_root,
+                    include_dev,
+                );
+            }
         }
 
         // 3. Python folder-scoped configuration
-        let has_python =
-            dir.join("requirements.txt").is_file() || dir.join("pyproject.toml").is_file();
+        let has_python = dir.join("requirements.txt").is_file()
+            || dir.join("pyproject.toml").is_file()
+            || dir.join("setup.py").is_file()
+            || dir.join("Pipfile").is_file();
+        let member_venv = dir.join(".venv");
+        let venv_has_clt_stub = ["bin/python", "bin/python3"].iter().any(|rel| {
+            crate::toolchain::is_uninstalled_macos_clt_shim(&member_venv.join(rel), dir)
+        });
         let is_umbrella =
             workspace_project.is_some() || workspace_root.join("dmz-workspace.toml").exists();
-        if has_python {
-            let member_venv = dir.join(".venv");
-            if member_venv.is_dir() {
-                let py_ver = crate::install::mappers::PyPiMapper::detect_python_version(dir);
+        if has_python || venv_has_clt_stub {
+            if member_venv.is_dir()
+                || crate::install::mappers::PyPiMapper::has_available_base_python(dir)
+            {
+                let py_ver = crate::install::mappers::PyPiMapper::detect_python_version_with_root(
+                    dir,
+                    Some(workspace_root),
+                );
                 if let Err(e) = crate::install::mappers::PyPiMapper::hydrate_venv_environment(
                     dir,
                     &member_venv,
@@ -230,36 +260,12 @@ pub fn hydrate_offline_dependencies(
                     serde_json::Map::new()
                 };
 
-                let bundled_py = workspace_root.join(".dmz/toolchains/python");
-                let py_bin_exists = member_venv.join("bin/python").exists()
-                    || member_venv.join("bin/python3").exists()
-                    || member_venv.join("Scripts/python.exe").exists()
-                    || member_venv.join("Scripts/python.bat").exists()
-                    || member_venv.join("Scripts/python.cmd").exists()
-                    || member_venv.join("pyvenv.cfg").exists();
-
-                if member_venv.exists() && py_bin_exists {
-                    let py_bin = if cfg!(windows) {
-                        "${workspaceFolder}/.venv/Scripts/python.exe"
-                    } else {
-                        "${workspaceFolder}/.venv/bin/python"
-                    };
-                    settings_map.insert(
-                        "python.defaultInterpreterPath".into(),
-                        serde_json::Value::String(py_bin.into()),
-                    );
-                } else if bundled_py.exists() {
-                    let rel_py = relative_path_between(dir, &bundled_py);
-                    let py_bin = if cfg!(windows) {
-                        format!("${{workspaceFolder}}/{}/python.exe", rel_py)
-                    } else {
-                        format!("${{workspaceFolder}}/{}/bin/python3", rel_py)
-                    };
-                    settings_map.insert(
-                        "python.defaultInterpreterPath".into(),
-                        serde_json::Value::String(py_bin),
-                    );
-                }
+                // Multi-root `.code-workspace` configures each folder's interpreter via
+                // `${workspaceFolder:<label>}/.venv/...`. Keep folder-level `.vscode/settings.json`
+                // free of unlabeled `${workspaceFolder}/...` interpreter paths to avoid VS Code
+                // multi-root resolution ambiguity errors.
+                settings_map.remove("python.defaultInterpreterPath");
+                settings_map.remove("python.pythonPath");
                 settings_map.insert(
                     "python.terminal.activateEnvironment".into(),
                     serde_json::Value::Bool(true),
@@ -275,5 +281,15 @@ pub fn hydrate_offline_dependencies(
                 }
             }
         }
+
+        // Always strip/redirect dangling interpreter hints in .vscode/settings.json carried in by the bundle
+        crate::workspace::interpreter::sanitize_vscode_settings_interpreters(dir, workspace_root);
+    }
+
+    if !target_dirs.iter().any(|(d, _)| d == workspace_root) {
+        crate::workspace::interpreter::sanitize_vscode_settings_interpreters(
+            workspace_root,
+            workspace_root,
+        );
     }
 }

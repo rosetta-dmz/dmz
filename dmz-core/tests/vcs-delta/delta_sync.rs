@@ -32,6 +32,7 @@ fn test_delta_bundle_export_and_import() {
         target_store_dir: target_store.clone(),
         target_workspace_dir: target_ws.clone(),
         verify_closure_hash: true,
+        ..Default::default()
     };
     AirGapImporter::import(&import_base_cfg).expect("Base import failed");
 
@@ -71,6 +72,7 @@ fn test_delta_bundle_export_and_import() {
         target_store_dir: target_store.clone(),
         target_workspace_dir: target_ws.clone(),
         verify_closure_hash: true,
+        ..Default::default()
     };
     let delta_result = AirGapImporter::import(&import_delta_cfg).expect("Delta import failed");
     assert!(delta_result.is_delta);
@@ -115,6 +117,7 @@ fn test_delta_base_mismatch_fails_fast() {
         target_store_dir: tmp.path().join("bad_store"),
         target_workspace_dir: incompatible_ws,
         verify_closure_hash: true,
+        ..Default::default()
     };
 
     let result = AirGapImporter::import(&bad_import_cfg);
@@ -147,6 +150,7 @@ fn test_export_with_git_history() {
         target_store_dir: tmp.path().join("git_store"),
         target_workspace_dir: target_ws.clone(),
         verify_closure_hash: true,
+        ..Default::default()
     };
 
     let res = AirGapImporter::import(&import_cfg).expect("Import failed");

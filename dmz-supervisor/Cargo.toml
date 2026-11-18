@@ -2,6 +2,8 @@
 name = "dmz-supervisor"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+publish = false
 
 [dependencies]
 dmz-core.workspace = true
@@ -20,3 +22,6 @@ windows-sys.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

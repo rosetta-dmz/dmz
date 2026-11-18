@@ -23,13 +23,8 @@ pub(super) enum ResolverTaskOutcome {
 }
 
 pub(super) struct ResolverState {
-    pub(super) target_platform: String,
     pub(super) store_dir: String,
     pub(super) discovered_stacks: Vec<String>,
-    pub(super) is_dual_repo: bool,
-    pub(super) sidecar_path: String,
-    pub(super) sidecar_id: String,
-    pub(super) sidecar_role: String,
     pub(super) discovered_sidecar_stacks: Vec<String>,
     pub(super) abi_warnings: Vec<String>,
     pub(super) active_task: Option<(String, Receiver<ResolverTaskOutcome>)>,
@@ -38,13 +33,8 @@ pub(super) struct ResolverState {
 impl Default for ResolverState {
     fn default() -> Self {
         Self {
-            target_platform: String::new(),
             store_dir: String::from(".dmz/store"),
             discovered_stacks: Vec::new(),
-            is_dual_repo: false,
-            sidecar_path: String::new(),
-            sidecar_id: String::from("sidecar"),
-            sidecar_role: String::from("sidecar"),
             discovered_sidecar_stacks: Vec::new(),
             abi_warnings: Vec::new(),
             active_task: None,
@@ -60,6 +50,7 @@ impl ResolverState {
 
 pub(super) fn show(
     state: &mut ResolverState,
+    session: &mut super::WorkspaceSessionState,
     ui: &mut egui::Ui,
     workspace_path: &mut String,
     lockfile_path: &mut String,
@@ -111,16 +102,16 @@ pub(super) fn show(
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Workspace Mode:").strong());
             if ui
-                .selectable_label(!state.is_dual_repo, "Single Workspace")
+                .selectable_label(!session.is_dual_repo, "Single")
                 .clicked()
             {
-                state.is_dual_repo = false;
+                session.is_dual_repo = false;
             }
             if ui
-                .selectable_label(state.is_dual_repo, "Multi-Repo / Companion")
+                .selectable_label(session.is_dual_repo, "Multi-Repo")
                 .clicked()
             {
-                state.is_dual_repo = true;
+                session.is_dual_repo = true;
             }
         });
         ui.add_space(8.0);
@@ -130,8 +121,8 @@ pub(super) fn show(
             .spacing([16.0, 8.0])
             .min_col_width(120.0)
             .show(ui, |ui| {
-                ui.label(if state.is_dual_repo {
-                    "Workspace 1"
+                ui.label(if session.is_dual_repo {
+                    "Repo 1"
                 } else {
                     "Workspace Directory"
                 });
@@ -142,18 +133,18 @@ pub(super) fn show(
                 }
                 ui.end_row();
 
-                if state.is_dual_repo {
-                    ui.label("Workspace 2");
-                    if components::path_browse_row(ui, &mut state.sidecar_path, None) {
+                if session.is_dual_repo {
+                    ui.label("Repo 2");
+                    if components::path_browse_row(ui, &mut session.sidecar_path, None) {
                         let mut dialog = rfd::FileDialog::new();
                         let ws_path = PathBuf::from(&*workspace_path);
                         if ws_path.exists() {
                             dialog = dialog.set_directory(&ws_path);
                         }
                         if let Some(path) = dialog.pick_folder() {
-                            state.sidecar_path = path.display().to_string();
+                            session.sidecar_path = path.display().to_string();
                             if let Some(folder_name) = path.file_name().and_then(|n| n.to_str()) {
-                                state.sidecar_id = folder_name.to_string();
+                                session.sidecar_id = folder_name.to_string();
                             }
                         }
                     }
@@ -162,7 +153,7 @@ pub(super) fn show(
                     ui.label("Member ID");
                     ui.add_sized(
                         egui::vec2(ui.available_width(), 32.0),
-                        egui::TextEdit::singleline(&mut state.sidecar_id)
+                        egui::TextEdit::singleline(&mut session.sidecar_id)
                             .align(egui::Align2::LEFT_CENTER)
                             .margin(egui::Margin::symmetric(8, 0)),
                     );
@@ -171,7 +162,7 @@ pub(super) fn show(
                     ui.label("Member Role / Tag");
                     ui.add_sized(
                         egui::vec2(ui.available_width(), 32.0),
-                        egui::TextEdit::singleline(&mut state.sidecar_role)
+                        egui::TextEdit::singleline(&mut session.sidecar_role)
                             .align(egui::Align2::LEFT_CENTER)
                             .margin(egui::Margin::symmetric(8, 0))
                             .hint_text("member, sidecar, or service"),
@@ -204,13 +195,16 @@ pub(super) fn show(
                 ui.label("Target Platform");
                 ui.add_sized(
                     egui::vec2(ui.available_width(), 32.0),
-                    egui::TextEdit::singleline(&mut state.target_platform)
+                    egui::TextEdit::singleline(&mut session.target_platform)
                         .align(egui::Align2::LEFT_CENTER)
                         .margin(egui::Margin::symmetric(8, 0))
                         .hint_text("Optional (e.g. macos-arm64, linux-x86_64, host default)"),
                 );
                 ui.end_row();
             });
+
+        ui.add_space(6.0);
+        ui.checkbox(&mut session.include_dev, "Include dev dependencies");
 
         // Display custom registry mirrors if configured via DMZ_REGISTRY_* environment variables
         let mut custom_mirrors = Vec::new();
@@ -234,11 +228,11 @@ pub(super) fn show(
             }
         }
 
-        if state.is_dual_repo {
+        if session.is_dual_repo {
             ui.add_space(8.0);
             if components::action_button(ui, "Save as dmz-workspace.toml", false).clicked() {
                 let ws_path = PathBuf::from(&*workspace_path);
-                let sc_path = PathBuf::from(&state.sidecar_path);
+                let sc_path = PathBuf::from(&session.sidecar_path);
                 if !ws_path.exists() {
                     *status_message = String::from("Primary workspace directory does not exist.");
                 } else if !sc_path.exists() {
@@ -246,39 +240,13 @@ pub(super) fn show(
                 } else {
                     let ws_canon =
                         std::fs::canonicalize(&ws_path).unwrap_or_else(|_| ws_path.clone());
-                    let sc_canon =
-                        std::fs::canonicalize(&sc_path).unwrap_or_else(|_| sc_path.clone());
-                    let primary_name = ws_canon
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or("primary");
-                    let mut primary_m = dmz_core::workspace::WorkspaceMember::new(
-                        primary_name,
-                        Path::new("."),
-                        dmz_core::workspace::MemberRole::Primary,
+                    let proj_cfg = super::build_dual_repo_project_config(
+                        &ws_canon,
+                        &session.sidecar_path,
+                        &session.sidecar_id,
+                        &session.sidecar_role,
                     );
-                    primary_m.populate_detected_defaults(&ws_canon, &ws_canon);
-
-                    let sc_role = if state.sidecar_role.trim().eq_ignore_ascii_case("service") {
-                        dmz_core::workspace::MemberRole::Service
-                    } else if state.sidecar_role.trim().eq_ignore_ascii_case("sidecar") {
-                        dmz_core::workspace::MemberRole::Sidecar
-                    } else {
-                        dmz_core::workspace::MemberRole::Member
-                    };
-                    let mut sidecar_m = dmz_core::workspace::WorkspaceMember::new(
-                        &state.sidecar_id,
-                        &sc_path,
-                        sc_role,
-                    );
-                    sidecar_m.populate_detected_defaults(&sc_canon, &ws_canon);
-
-                    let proj_cfg = dmz_core::workspace::WorkspaceProjectConfig::new(
-                        primary_name,
-                        vec![primary_m, sidecar_m],
-                    );
-                    let manifest_file = ws_path.join("dmz-workspace.toml");
+                    let manifest_file = ws_canon.join("dmz-workspace.toml");
                     match proj_cfg.save_to_file(&manifest_file) {
                         Ok(()) => {
                             *status_message = format!(
@@ -305,10 +273,10 @@ pub(super) fn show(
                     let workspace = PathBuf::from(&*workspace_path);
                     let ws_canon =
                         std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
-                    let target_opt = if state.target_platform.trim().is_empty() {
+                    let target_opt = if session.target_platform.trim().is_empty() {
                         None
                     } else {
-                        Some(state.target_platform.trim().to_string())
+                        Some(session.target_platform.trim().to_string())
                     };
 
                     let out = if Path::new(&*lockfile_path).is_relative() {
@@ -317,16 +285,21 @@ pub(super) fn show(
                         PathBuf::from(&*lockfile_path)
                     };
 
-                    let is_dual_repo = state.is_dual_repo;
-                    let sidecar_path = state.sidecar_path.clone();
-                    let sidecar_role = state.sidecar_role.clone();
-                    let sidecar_id = state.sidecar_id.clone();
+                    let is_dual_repo = session.is_dual_repo;
+                    let include_dev = session.include_dev;
+                    let sidecar_path = session.sidecar_path.clone();
+                    let sidecar_role = session.sidecar_role.clone();
+                    let sidecar_id = session.sidecar_id.clone();
                     let (tx, rx) = channel();
                     let ctx = ui.ctx().clone();
                     state.active_task =
                         Some(("Scanning and resolving dependencies...".to_string(), rx));
 
                     thread::spawn(move || {
+                        let resolve_options = dmz_core::resolver::ResolveOptions {
+                            target_platform: target_opt,
+                            include_dev,
+                        };
                         if is_dual_repo && !sidecar_path.trim().is_empty() {
                             let sc_path = PathBuf::from(&sidecar_path);
                             let sc_canon =
@@ -335,41 +308,18 @@ pub(super) fn show(
                             // Analyze ABI diagnostics
                             let abi = dmz_core::workspace::analyze_sidecar_abi(&sc_canon);
 
-                            let primary_name = ws_canon
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .filter(|s| !s.is_empty())
-                                .unwrap_or("primary");
-                            let mut primary_m = dmz_core::workspace::WorkspaceMember::new(
-                                primary_name,
-                                Path::new("."),
-                                dmz_core::workspace::MemberRole::Primary,
-                            );
-                            primary_m.populate_detected_defaults(&ws_canon, &ws_canon);
-
-                            let sc_role = if sidecar_role.trim().eq_ignore_ascii_case("service") {
-                                dmz_core::workspace::MemberRole::Service
-                            } else if sidecar_role.trim().eq_ignore_ascii_case("sidecar") {
-                                dmz_core::workspace::MemberRole::Sidecar
-                            } else {
-                                dmz_core::workspace::MemberRole::Member
-                            };
-                            let normalized_sc_path =
-                                dmz_core::workspace::normalize_member_path(&ws_canon, &sc_canon);
-                            let mut sidecar_m = dmz_core::workspace::WorkspaceMember::new(
+                            let proj_cfg = super::build_dual_repo_project_config(
+                                &ws_canon,
+                                &sidecar_path,
                                 &sidecar_id,
-                                normalized_sc_path,
-                                sc_role,
-                            );
-                            sidecar_m.populate_detected_defaults(&sc_canon, &ws_canon);
-
-                            let proj_cfg = dmz_core::workspace::WorkspaceProjectConfig::new(
-                                primary_name,
-                                vec![primary_m, sidecar_m],
+                                &sidecar_role,
                             );
 
-                            let outcome = match ResolverEngine::resolve_multi_workspace(
-                                &ws_canon, &proj_cfg, None, target_opt,
+                            let outcome = match ResolverEngine::resolve_multi_workspace_with_options(
+                                &ws_canon,
+                                &proj_cfg,
+                                None,
+                                &resolve_options,
                             ) {
                                 Ok(unified) => {
                                     let manifest_target = ws_canon.join("dmz-workspace.toml");
@@ -409,8 +359,9 @@ pub(super) fn show(
                             };
                             let _ = tx.send(outcome);
                         } else {
-                            let outcome = match ResolverEngine::resolve_workspace_with_target(
-                                &ws_canon, target_opt,
+                            let outcome = match ResolverEngine::resolve_workspace_with_options(
+                                &ws_canon,
+                                resolve_options,
                             ) {
                                 Ok(lockfile) => {
                                     if let Err(error) = lockfile.save(&out) {
@@ -535,8 +486,8 @@ pub(super) fn show(
             ui.add_enabled_ui(!is_busy, |ui| {
                 if components::action_button(ui, "Discover Active Stacks", false).clicked() {
                     let workspace = PathBuf::from(&*workspace_path);
-                    let is_dual_repo = state.is_dual_repo;
-                    let sidecar_path = state.sidecar_path.clone();
+                    let is_dual_repo = session.is_dual_repo;
+                    let sidecar_path = session.sidecar_path.clone();
                     let (tx, rx) = channel();
                     let ctx = ui.ctx().clone();
                     state.active_task = Some(("Discovering ecosystem stacks...".to_string(), rx));
@@ -583,6 +534,13 @@ pub(super) fn show(
                     state.active_task = Some(("Verifying ecosystem toolchains...".to_string(), rx));
 
                     thread::spawn(move || {
+                        if !dmz_core::toolchain::has_usable_apple_sdk_or_clt(&workspace) {
+                            if let Err(e) = dmz_core::toolchain::verify_apple_prereq_for_workspace(
+                                &workspace, None,
+                            ) {
+                                tracing::warn!(warning = %e, "Apple host prerequisite advisory");
+                            }
+                        }
                         let registry = EcosystemRegistry::new();
                         let active_pairs = registry.discover_active_with_roots(&workspace);
                         let mut passed = 0;
@@ -599,6 +557,21 @@ pub(super) fn show(
                                     &member_root,
                                     &mut member_envs,
                                 );
+                                if let Some(stub_path) =
+                                    dmz_core::toolchain::should_skip_uninstalled_macos_clt_command(
+                                        &cmd.program,
+                                        &member_envs,
+                                        &member_root,
+                                    )
+                                {
+                                    tracing::warn!(
+                                        ecosystem = %eco.name(),
+                                        stub = ?stub_path,
+                                        "Skipping verification for '{}' because it resolves to macOS Apple CLT stub without Command Line Tools installed",
+                                        eco.name()
+                                    );
+                                    continue;
+                                }
                                 match std::process::Command::new(&cmd.program)
                                     .args(&cmd.args)
                                     .current_dir(&member_root)
@@ -633,7 +606,7 @@ pub(super) fn show(
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(if state.is_dual_repo {
+                    egui::RichText::new(if session.is_dual_repo {
                         "Primary Detected:"
                     } else {
                         "Detected:"
@@ -646,7 +619,7 @@ pub(super) fn show(
             });
         }
 
-        if state.is_dual_repo && !state.discovered_sidecar_stacks.is_empty() {
+        if session.is_dual_repo && !state.discovered_sidecar_stacks.is_empty() {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Sidecar Detected:").strong());

@@ -60,6 +60,7 @@ mini-util = "0.1.0"
         "cmake_minimum_required(VERSION 3.10)\nproject(hermetic_native C CXX)\n",
     )
     .unwrap();
+    fs::write(src_ws.join("build.ninja"), "rule nop\n  command = true\n").unwrap();
 
     // Build real SHA-256 verified store artifacts for Cargo (`mini-util`) and npm (`js-util`)
     let store_dir = src_ws.join(".dmz/store");
@@ -260,6 +261,7 @@ mini-util = "0.1.0"
             "go.mod",
             "main.go",
             "CMakeLists.txt",
+            "build.ninja",
         ] {
             tar.append_path_with_name(src_ws.join(f), f).unwrap();
         }
@@ -305,6 +307,7 @@ mini-util = "0.1.0"
         target_store_dir: target_store.clone(),
         target_workspace_dir: target_ws.clone(),
         verify_closure_hash: true,
+        ..Default::default()
     })
     .expect("Complete bundle import must succeed");
     assert!(import_res.has_toolchains);

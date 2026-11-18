@@ -113,6 +113,7 @@ fn test_e2e_unified_airgap_export_and_import() {
         target_store_dir: target_store.clone(),
         target_workspace_dir: target_workspace.clone(),
         verify_closure_hash: true,
+        ..Default::default()
     };
 
     let import_result = AirGapImporter::import(&import_config).expect("Air-gap import failed");
@@ -215,6 +216,7 @@ fn test_multiecosystem_airgap_roundtrip() -> anyhow::Result<()> {
         target_store_dir: store_path,
         target_workspace_dir: import_target.clone(),
         verify_closure_hash: true,
+        ..Default::default()
     };
 
     AirGapImporter::import(&import_config)?;
@@ -274,6 +276,7 @@ fn test_relative_paths_anchor_to_selected_workspace() -> anyhow::Result<()> {
         target_workspace_dir: dest_workspace.clone(),
         target_store_dir: PathBuf::from(".dmz/store"),
         verify_closure_hash: true,
+        ..Default::default()
     };
 
     AirGapImporter::import(&import_config)?;

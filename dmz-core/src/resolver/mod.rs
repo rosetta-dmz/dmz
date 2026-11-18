@@ -3,6 +3,7 @@ pub mod lockfile;
 pub mod manifest;
 
 use crate::resolver::manifest::Ecosystem;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use tracing::info;
 
@@ -38,12 +39,28 @@ impl From<ResolverError> for String {
     }
 }
 
+/// Configuration options controlling dependency resolution scope and filtering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveOptions {
+    pub target_platform: Option<String>,
+    pub include_dev: bool,
+}
+
+impl Default for ResolveOptions {
+    fn default() -> Self {
+        Self {
+            target_platform: None,
+            include_dev: true,
+        }
+    }
+}
+
 pub struct ResolverEngine;
 
 impl ResolverEngine {
     /// Scans project workspace, auto-resolves dependencies across ecosystems, and produces a cryptographic lockfile
     pub fn resolve_workspace(workspace_dir: &Path) -> Result<DmzLockfile, ResolverError> {
-        Self::resolve_workspace_with_target(workspace_dir, None)
+        Self::resolve_workspace_with_options(workspace_dir, ResolveOptions::default())
     }
 
     /// Scans project workspace, auto-resolves dependencies, and tags the target platform
@@ -51,22 +68,37 @@ impl ResolverEngine {
         workspace_dir: &Path,
         target_platform: Option<String>,
     ) -> Result<DmzLockfile, ResolverError> {
+        Self::resolve_workspace_with_options(
+            workspace_dir,
+            ResolveOptions {
+                target_platform,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Scans project workspace with full control over target platform and dev-dependency inclusion.
+    pub fn resolve_workspace_with_options(
+        workspace_dir: &Path,
+        options: ResolveOptions,
+    ) -> Result<DmzLockfile, ResolverError> {
         let manifest_path = workspace_dir.join("dmz-workspace.toml");
         if manifest_path.is_file() {
             if let Ok(manifest) =
                 crate::workspace::WorkspaceProjectConfig::load_from_file(&manifest_path)
             {
                 if !manifest.members.is_empty() {
-                    return Self::resolve_multi_workspace_with_target(
+                    return Self::resolve_multi_workspace_with_options(
                         workspace_dir,
                         &manifest,
-                        target_platform,
+                        None,
+                        &options,
                     );
                 }
             }
         }
 
-        Self::resolve_single_workspace_with_target(workspace_dir, target_platform)
+        Self::resolve_single_workspace_with_options(workspace_dir, &options)
     }
 
     /// Resolves dependencies across all members of a multi-repository `WorkspaceProjectConfig`,
@@ -77,14 +109,29 @@ impl ResolverEngine {
         manifest_path: Option<&Path>,
         target_platform: Option<String>,
     ) -> Result<DmzLockfile, ResolverError> {
+        let options = ResolveOptions {
+            target_platform,
+            ..Default::default()
+        };
+        Self::resolve_multi_workspace_with_options(workspace_dir, project, manifest_path, &options)
+    }
+
+    /// Resolves dependencies across all members of a multi-repository workspace with explicit options.
+    pub fn resolve_multi_workspace_with_options(
+        workspace_dir: &Path,
+        project: &crate::workspace::WorkspaceProjectConfig,
+        manifest_path: Option<&Path>,
+        options: &ResolveOptions,
+    ) -> Result<DmzLockfile, ResolverError> {
         let layouts = project.resolve_member_layouts(workspace_dir, manifest_path);
         if layouts.is_empty() {
-            return Self::resolve_single_workspace_with_target(workspace_dir, target_platform);
+            return Self::resolve_single_workspace_with_options(workspace_dir, options);
         }
 
         info!(
             project = %project.name,
             members = layouts.len(),
+            include_dev = options.include_dev,
             "Resolving multi-workspace dependencies across all declared members"
         );
 
@@ -99,10 +146,22 @@ impl ResolverEngine {
                 )));
             }
 
+            let layout_canon = std::fs::canonicalize(&layout.host_path)
+                .unwrap_or_else(|_| layout.host_path.clone());
+            let excluded_siblings: Vec<std::path::PathBuf> = layouts
+                .iter()
+                .filter_map(|other| {
+                    let other_canon = std::fs::canonicalize(&other.host_path)
+                        .unwrap_or_else(|_| other.host_path.clone());
+                    (other.id != layout.id && other_canon != layout_canon).then_some(other_canon)
+                })
+                .collect();
+
             let member_cfg = project.find_member(&layout.id);
-            match Self::resolve_single_workspace_with_target(
+            match Self::resolve_single_workspace_excluding(
                 &layout.host_path,
-                target_platform.clone(),
+                options,
+                &excluded_siblings,
             ) {
                 Ok(member_lock) => {
                     let member_sig = member_lock.closure_signature.clone();
@@ -145,7 +204,9 @@ impl ResolverEngine {
             }
         }
 
-        let mut unified_lock = DmzLockfile::with_platform(merged_packages, target_platform);
+        let mut unified_lock =
+            DmzLockfile::with_platform(merged_packages, options.target_platform.clone());
+        Self::stamp_lockfile_metadata(&mut unified_lock, workspace_dir, options, Some(project));
         for meta in workspaces_meta {
             unified_lock.add_workspace(meta);
         }
@@ -178,124 +239,120 @@ impl ResolverEngine {
         workspace_dir: &Path,
         target_platform: Option<String>,
     ) -> Result<DmzLockfile, ResolverError> {
-        info!(path = ?workspace_dir, "Scanning workspace and auto-resolving dependencies across ecosystems...");
+        Self::resolve_single_workspace_with_options(
+            workspace_dir,
+            &ResolveOptions {
+                target_platform,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Scans a single workspace directory with full resolution options.
+    pub fn resolve_single_workspace_with_options(
+        workspace_dir: &Path,
+        options: &ResolveOptions,
+    ) -> Result<DmzLockfile, ResolverError> {
+        let mut lockfile = Self::resolve_single_workspace_excluding(workspace_dir, options, &[])?;
+        Self::stamp_lockfile_metadata(&mut lockfile, workspace_dir, options, None);
+        Ok(lockfile)
+    }
+
+    fn stamp_lockfile_metadata(
+        lockfile: &mut DmzLockfile,
+        workspace_dir: &Path,
+        options: &ResolveOptions,
+        multi_workspace: Option<&crate::workspace::WorkspaceProjectConfig>,
+    ) {
+        lockfile.include_dev = Some(options.include_dev);
+        if lockfile
+            .packages
+            .values()
+            .any(|p| p.ecosystem == crate::resolver::manifest::Ecosystem::PyPI)
+        {
+            let member_roots = crate::toolchain::ToolchainDetector::collect_workspace_member_dirs(
+                workspace_dir,
+                multi_workspace,
+            );
+            lockfile.python_abi =
+                crate::toolchain::discovery::python::resolve_effective_python_abi(
+                    Some(workspace_dir),
+                    &member_roots,
+                    options.target_platform.as_deref(),
+                )
+                .map(crate::toolchain::PythonTargetAbi::cp_tag);
+        }
+        lockfile.inputs_digest = Some(DmzLockfile::compute_workspace_inputs_digest(
+            workspace_dir,
+            options.target_platform.as_deref(),
+            options.include_dev,
+            multi_workspace,
+        ));
+    }
+
+    fn resolve_single_workspace_excluding(
+        workspace_dir: &Path,
+        options: &ResolveOptions,
+        excluded_dirs: &[std::path::PathBuf],
+    ) -> Result<DmzLockfile, ResolverError> {
+        info!(
+            path = ?workspace_dir,
+            include_dev = options.include_dev,
+            target_platform = ?options.target_platform,
+            "Scanning workspace and auto-resolving dependencies across ecosystems..."
+        );
 
         let mut locked_packages = Vec::new();
 
-        // Native Cargo Auto-Resolution (Root Cargo.toml or nested src-tauri/Cargo.toml)
-        let cargo_toml_path = workspace_dir.join("Cargo.toml");
-        let tauri_cargo_path = workspace_dir.join("src-tauri/Cargo.toml");
-        let effective_cargo_dir = if cargo_toml_path.exists() {
-            Some(workspace_dir.to_path_buf())
-        } else if tauri_cargo_path.exists() {
-            Some(workspace_dir.join("src-tauri"))
-        } else {
-            None
-        };
-
-        if let Some(ref cargo_dir) = effective_cargo_dir {
-            info!(
-                cargo_dir = ?cargo_dir,
-                "Cargo.toml detected; invoking `cargo metadata` for full graph auto-resolution..."
-            );
-            let output = std::process::Command::new("cargo")
-                .arg("metadata")
-                .arg("--format-version")
-                .arg("1")
-                .current_dir(cargo_dir)
-                .output()
-                .map_err(|e| {
-                    ResolverError::Command(format!("Failed to execute `cargo metadata`: {}", e))
-                })?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(ResolverError::Command(format!(
-                    "Cargo metadata resolution failed:\n{}",
-                    stderr
-                )));
-            }
-
-            let json_meta: serde_json::Value =
-                serde_json::from_slice(&output.stdout).map_err(|e| {
-                    ResolverError::Parse(format!("Failed to parse cargo metadata JSON: {}", e))
-                })?;
-
-            // Collect workspace member IDs for accurate local path identification
-            let workspace_member_ids: Vec<String> = json_meta
-                .get("workspace_members")
-                .and_then(|m| m.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            if let Some(packages) = json_meta.get("packages").and_then(|p| p.as_array()) {
-                for pkg in packages {
-                    let id = pkg.get("id").and_then(|i| i.as_str()).unwrap_or_default();
-                    let name = pkg
-                        .get("name")
-                        .and_then(|n| n.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    let version = pkg
-                        .get("version")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    let manifest_path = pkg
-                        .get("manifest_path")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or_default();
-
-                    // Check if this package is a workspace member
-                    let is_workspace_member = workspace_member_ids.iter().any(|m_id| m_id == id);
-
-                    let version_req = if is_workspace_member {
-                        format!("path:{}", manifest_path)
-                    } else {
-                        version
-                    };
-
-                    let dummy_hash = DmzLockfile::hash_bytes(
-                        format!("{}:{}:{:?}", name, version_req, Ecosystem::Cargo).as_bytes(),
-                    );
-
-                    if !locked_packages
-                        .iter()
-                        .any(|p: &LockedPackage| p.name == name && p.version == version_req)
-                    {
-                        locked_packages.push(LockedPackage {
-                            name,
-                            version: version_req,
-                            ecosystem: Ecosystem::Cargo,
-                            sha256: dummy_hash,
-                            source_url: None,
-                            dependencies: Vec::new(),
-                            member_id: None,
-                        });
-                    }
+        // Native Cargo Auto-Resolution (Root Cargo.toml, src-tauri/Cargo.toml, and nested Cargo/Tauri subprojects)
+        let cargo_dirs =
+            crate::workspace::discover_tauri_cargo_dirs_excluding(workspace_dir, excluded_dirs);
+        let has_cargo_graph = !cargo_dirs.is_empty();
+        for cargo_dir in &cargo_dirs {
+            for pkg in Self::resolve_cargo_graph(cargo_dir, options)? {
+                if !locked_packages.iter().any(|p: &LockedPackage| {
+                    p.name == pkg.name && p.version == pkg.version && p.ecosystem == pkg.ecosystem
+                }) {
+                    locked_packages.push(pkg);
                 }
             }
         }
 
-        // Scan remaining non-Cargo ecosystems using the standard ManifestScanner
-        let manifests = crate::resolver::manifest::ManifestScanner::scan_dir(workspace_dir)?;
+        // Scan remaining non-Cargo ecosystems using options-aware ManifestScanner
+        let manifests =
+            crate::resolver::manifest::ManifestScanner::scan_dir_with_options_excluding(
+                workspace_dir,
+                options.target_platform.as_deref(),
+                options.include_dev,
+                excluded_dirs,
+            )?;
 
         for manifest in manifests {
+            // When `cargo metadata` already resolved the Cargo graph, do not re-inject
+            // unpinned workspace/Cargo.toml ranges (which cause duplicate serde:1.0 entries)
+            // or dev-dependencies excluded from the graph.
+            if manifest.ecosystem == Ecosystem::Cargo && has_cargo_graph {
+                continue;
+            }
             info!(ecosystem = ?manifest.ecosystem, path = ?manifest.path, "Processing manifest");
 
             for dep in manifest.dependencies {
+                if dep.is_dev && !options.include_dev {
+                    continue;
+                }
                 let dummy_hash = DmzLockfile::hash_bytes(
                     format!("{}:{}:{:?}", dep.name, dep.version_req, dep.ecosystem).as_bytes(),
                 );
 
                 if !locked_packages.iter().any(|p: &LockedPackage| {
-                    p.name == dep.name
+                    p.ecosystem == dep.ecosystem
                         && p.version == dep.version_req
-                        && p.ecosystem == dep.ecosystem
+                        && if dep.ecosystem == Ecosystem::PyPI {
+                            ManifestScanner::normalize_pypi_name(&p.name)
+                                == ManifestScanner::normalize_pypi_name(&dep.name)
+                        } else {
+                            p.name == dep.name
+                        }
                 }) {
                     locked_packages.push(LockedPackage {
                         name: dep.name,
@@ -314,38 +371,295 @@ impl ResolverEngine {
             return Err(ResolverError::EmptyResolution);
         }
 
-        // Auto-resolve companion native binary package for @tauri-apps/cli
-        let mut companion_pkgs = Vec::new();
-        for pkg in &locked_packages {
-            if pkg.name == "@tauri-apps/cli" {
-                let platform_suffix = match (std::env::consts::OS, std::env::consts::ARCH) {
-                    ("macos", "aarch64") => "darwin-arm64".to_string(),
-                    ("macos", "x86_64") => "darwin-x64".to_string(),
-                    ("linux", "x86_64") => "linux-x64-gnu".to_string(),
-                    ("linux", "aarch64") => "linux-arm64-gnu".to_string(),
-                    ("windows", "x86_64") => "win32-x64-msvc".to_string(),
-                    ("windows", "aarch64") => "win32-arm64-msvc".to_string(),
-                    (other_os, other_arch) => {
-                        let os_str = if other_os == "macos" {
-                            "darwin"
-                        } else {
-                            other_os
-                        };
-                        let arch_str = if other_arch == "aarch64" {
-                            "arm64"
-                        } else if other_arch == "x86_64" {
-                            "x64"
-                        } else {
-                            other_arch
-                        };
-                        format!("{}-{}", os_str, arch_str)
+        Self::append_tauri_cli_companion(&mut locked_packages, options.target_platform.as_deref());
+
+        let mut lockfile =
+            DmzLockfile::with_platform(locked_packages, options.target_platform.clone());
+        lockfile.include_dev = Some(options.include_dev);
+        if let Ok(Some(prov)) = crate::vcs::GitProvider::get_provenance(workspace_dir) {
+            info!(
+                commit = %prov.commit,
+                branch = ?prov.branch,
+                dirty = prov.dirty,
+                "Attached VCS provenance to dmz.lock"
+            );
+            lockfile.vcs = Some(prov);
+        }
+        info!(closure_sig = %lockfile.closure_signature, count = lockfile.packages.len(), "Generated deterministic agnostic DMZ closure signature");
+
+        Ok(lockfile)
+    }
+
+    fn resolve_cargo_graph(
+        cargo_dir: &Path,
+        options: &ResolveOptions,
+    ) -> Result<Vec<LockedPackage>, ResolverError> {
+        let target_triple = options
+            .target_platform
+            .as_deref()
+            .and_then(|tp| crate::workspace::resolve_rust_target_triple(Some(tp)));
+        info!(
+            cargo_dir = ?cargo_dir,
+            target_triple = ?target_triple,
+            include_dev = options.include_dev,
+            "Cargo.toml detected; invoking `cargo metadata` for graph resolution..."
+        );
+
+        let mut cmd = std::process::Command::new("cargo");
+        cmd.arg("metadata").arg("--format-version").arg("1");
+        if let Some(ref triple) = target_triple {
+            cmd.arg("--filter-platform").arg(triple);
+        }
+        let output = cmd.current_dir(cargo_dir).output().map_err(|e| {
+            ResolverError::Command(format!("Failed to execute `cargo metadata`: {}", e))
+        })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let local_cargo_cfg = cargo_dir.join(".cargo/config.toml");
+            let vendor_hint = if local_cargo_cfg.is_file()
+                && std::fs::read_to_string(&local_cargo_cfg)
+                    .map(|c| c.contains("vendored-sources"))
+                    .unwrap_or(false)
+            {
+                format!(
+                    "\nHint: {} configures offline `[source.vendored-sources]` replacement. If new crates were added to Cargo.toml, update Cargo.lock online (or temporarily remove vendored source replacement) before re-bundling.",
+                    local_cargo_cfg.display()
+                )
+            } else {
+                String::new()
+            };
+            return Err(ResolverError::Command(format!(
+                "Cargo metadata resolution failed at {:?}:{}\n{}",
+                cargo_dir, vendor_hint, stderr
+            )));
+        }
+
+        let json_meta: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|e| {
+            ResolverError::Parse(format!("Failed to parse cargo metadata JSON: {}", e))
+        })?;
+
+        let workspace_member_ids: HashSet<String> = json_meta
+            .get("workspace_members")
+            .and_then(|m| m.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let reachable_ids = Self::collect_reachable_cargo_packages(
+            &json_meta,
+            &workspace_member_ids,
+            options.include_dev,
+        );
+
+        let mut locked = Vec::new();
+        if let Some(packages) = json_meta.get("packages").and_then(|p| p.as_array()) {
+            for pkg in packages {
+                let id = pkg.get("id").and_then(|i| i.as_str()).unwrap_or_default();
+                if let Some(ref reachable) = reachable_ids {
+                    if !reachable.contains(id) {
+                        continue;
                     }
+                }
+                let name = pkg
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let version = pkg
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let manifest_path = pkg
+                    .get("manifest_path")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or_default();
+
+                let is_local_crate = workspace_member_ids.contains(id)
+                    || pkg.get("source").is_none_or(|s| s.is_null());
+                let version_req = if is_local_crate {
+                    format!("path:{}", manifest_path)
+                } else {
+                    version
                 };
+
+                let dummy_hash = DmzLockfile::hash_bytes(
+                    format!("{}:{}:{:?}", name, version_req, Ecosystem::Cargo).as_bytes(),
+                );
+
+                if !locked
+                    .iter()
+                    .any(|p: &LockedPackage| p.name == name && p.version == version_req)
+                {
+                    locked.push(LockedPackage {
+                        name,
+                        version: version_req,
+                        ecosystem: Ecosystem::Cargo,
+                        sha256: dummy_hash,
+                        source_url: None,
+                        dependencies: Vec::new(),
+                        member_id: None,
+                    });
+                }
+            }
+        }
+
+        // Reconcile full Cargo.lock closure when platform filtering is not restricted
+        // (matching Nix `vendorCargoDeps` / Bazel `crate_universe` guarantees).
+        if target_triple.is_none() && options.include_dev {
+            for entry in crate::resolver::manifest::cargo::CargoManifestScanner::collect_lockfile_registry_packages(cargo_dir) {
+                if !locked
+                    .iter()
+                    .any(|p: &LockedPackage| p.name == entry.name && p.version == entry.version)
+                {
+                    let fallback_hash = DmzLockfile::hash_bytes(
+                        format!("{}:{}:{:?}", entry.name, entry.version, Ecosystem::Cargo)
+                            .as_bytes(),
+                    );
+                    locked.push(LockedPackage {
+                        name: entry.name,
+                        version: entry.version,
+                        ecosystem: Ecosystem::Cargo,
+                        sha256: entry.checksum.unwrap_or(fallback_hash),
+                        source_url: None,
+                        dependencies: Vec::new(),
+                        member_id: None,
+                    });
+                }
+            }
+
+            for direct in
+                crate::resolver::manifest::cargo::CargoManifestScanner::collect_direct_crate_names(
+                    cargo_dir, true,
+                )
+            {
+                if !locked.iter().any(|p| p.name == direct) {
+                    return Err(ResolverError::Command(format!(
+                        "Cargo resolution at {:?} omitted direct dependency '{}' declared in Cargo.toml",
+                        cargo_dir, direct
+                    )));
+                }
+            }
+        }
+        Ok(locked)
+    }
+
+    fn collect_reachable_cargo_packages(
+        json_meta: &serde_json::Value,
+        workspace_member_ids: &HashSet<String>,
+        include_dev: bool,
+    ) -> Option<HashSet<String>> {
+        let nodes = json_meta
+            .get("resolve")
+            .and_then(|r| r.get("nodes"))
+            .and_then(|n| n.as_array())?;
+
+        let mut node_map: HashMap<&str, &serde_json::Value> = HashMap::new();
+        for node in nodes {
+            if let Some(id) = node.get("id").and_then(|i| i.as_str()) {
+                node_map.insert(id, node);
+            }
+        }
+
+        let mut reachable = HashSet::new();
+        let mut queue = VecDeque::new();
+        for member_id in workspace_member_ids {
+            if reachable.insert(member_id.clone()) {
+                queue.push_back(member_id.clone());
+            }
+        }
+        if queue.is_empty() {
+            if let Some(root_id) = json_meta
+                .get("resolve")
+                .and_then(|r| r.get("root"))
+                .and_then(|r| r.as_str())
+            {
+                if reachable.insert(root_id.to_string()) {
+                    queue.push_back(root_id.to_string());
+                }
+            }
+        }
+
+        while let Some(curr_id) = queue.pop_front() {
+            let Some(node) = node_map.get(curr_id.as_str()) else {
+                continue;
+            };
+            let Some(deps) = node.get("deps").and_then(|d| d.as_array()) else {
+                continue;
+            };
+            for dep in deps {
+                let keep_edge = include_dev
+                    || dep
+                        .get("dep_kinds")
+                        .and_then(|k| k.as_array())
+                        .map(|kinds| {
+                            kinds.is_empty()
+                                || kinds
+                                    .iter()
+                                    .any(|k| k.get("kind").and_then(|v| v.as_str()) != Some("dev"))
+                        })
+                        .unwrap_or(true);
+                if !keep_edge {
+                    continue;
+                }
+                if let Some(dep_pkg) = dep.get("pkg").and_then(|p| p.as_str()) {
+                    if reachable.insert(dep_pkg.to_string()) {
+                        queue.push_back(dep_pkg.to_string());
+                    }
+                }
+            }
+        }
+
+        Some(reachable)
+    }
+
+    fn append_tauri_cli_companion(
+        locked_packages: &mut Vec<LockedPackage>,
+        target_platform: Option<&str>,
+    ) {
+        let (target_os, target_arch) = crate::workspace::resolve_target_os_arch(target_platform);
+        let platform_suffix = match (target_os, target_arch) {
+            ("macos", "aarch64") => "darwin-arm64".to_string(),
+            ("macos", "x86_64") => "darwin-x64".to_string(),
+            ("linux", "x86_64") => "linux-x64-gnu".to_string(),
+            ("linux", "aarch64") => "linux-arm64-gnu".to_string(),
+            ("windows", "x86_64") => "win32-x64-msvc".to_string(),
+            ("windows", "aarch64") => "win32-arm64-msvc".to_string(),
+            (other_os, other_arch) => {
+                let os_str = if other_os == "macos" {
+                    "darwin"
+                } else {
+                    other_os
+                };
+                let arch_str = if other_arch == "aarch64" {
+                    "arm64"
+                } else if other_arch == "x86_64" {
+                    "x64"
+                } else {
+                    other_arch
+                };
+                format!("{}-{}", os_str, arch_str)
+            }
+        };
+
+        let mut companion_pkgs = Vec::new();
+        for pkg in locked_packages.iter() {
+            if pkg.name == "@tauri-apps/cli" {
                 let companion_name = format!("@tauri-apps/cli-{}", platform_suffix);
                 let dummy_hash = DmzLockfile::hash_bytes(
                     format!("{}:{}:{:?}", companion_name, pkg.version, Ecosystem::Npm).as_bytes(),
                 );
-                if !locked_packages.iter().any(|p| p.name == companion_name) {
+                if !locked_packages
+                    .iter()
+                    .any(|p| p.name == companion_name && p.member_id == pkg.member_id)
+                    && !companion_pkgs.iter().any(|p: &LockedPackage| {
+                        p.name == companion_name && p.member_id == pkg.member_id
+                    })
+                {
                     companion_pkgs.push(LockedPackage {
                         name: companion_name,
                         version: pkg.version.clone(),
@@ -359,20 +673,6 @@ impl ResolverEngine {
             }
         }
         locked_packages.extend(companion_pkgs);
-
-        let mut lockfile = DmzLockfile::with_platform(locked_packages, target_platform);
-        if let Ok(Some(prov)) = crate::vcs::GitProvider::get_provenance(workspace_dir) {
-            info!(
-                commit = %prov.commit,
-                branch = ?prov.branch,
-                dirty = prov.dirty,
-                "Attached VCS provenance to dmz.lock"
-            );
-            lockfile.vcs = Some(prov);
-        }
-        info!(closure_sig = %lockfile.closure_signature, count = lockfile.packages.len(), "Generated deterministic agnostic DMZ closure signature");
-
-        Ok(lockfile)
     }
 
     /// Fetches locked dependencies from dmz.lock, downloads real package artifacts, verifies hashes, and populates the local store cache
@@ -389,5 +689,160 @@ impl ResolverEngine {
         target_platform: Option<&str>,
     ) -> Option<String> {
         fetch::DependencyFetcher::select_pypi_artifact(urls, target_platform)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_collect_reachable_cargo_packages_prunes_dev_closure() {
+        let meta = serde_json::json!({
+            "resolve": {
+                "root": "app 0.1.0",
+                "nodes": [
+                    {
+                        "id": "app 0.1.0",
+                        "deps": [
+                            { "pkg": "runtime-lib 1.0.0", "dep_kinds": [{ "kind": null }] },
+                            { "pkg": "shared-lib 1.0.0", "dep_kinds": [{ "kind": null }, { "kind": "dev" }] },
+                            { "pkg": "test-harness 1.0.0", "dep_kinds": [{ "kind": "dev" }] }
+                        ]
+                    },
+                    {
+                        "id": "runtime-lib 1.0.0",
+                        "deps": []
+                    },
+                    {
+                        "id": "shared-lib 1.0.0",
+                        "deps": []
+                    },
+                    {
+                        "id": "test-harness 1.0.0",
+                        "deps": [
+                            { "pkg": "dev-transitive 1.0.0", "dep_kinds": [{ "kind": null }] }
+                        ]
+                    },
+                    {
+                        "id": "dev-transitive 1.0.0",
+                        "deps": []
+                    }
+                ]
+            }
+        });
+        let members: HashSet<String> = ["app 0.1.0".to_string()].into_iter().collect();
+
+        let prod = ResolverEngine::collect_reachable_cargo_packages(&meta, &members, false);
+        assert!(prod.is_some());
+        if let Some(prod_set) = prod {
+            assert!(prod_set.contains("runtime-lib 1.0.0"));
+            assert!(prod_set.contains("shared-lib 1.0.0"));
+            assert!(!prod_set.contains("test-harness 1.0.0"));
+            assert!(!prod_set.contains("dev-transitive 1.0.0"));
+        }
+
+        let with_dev = ResolverEngine::collect_reachable_cargo_packages(&meta, &members, true);
+        assert!(with_dev.is_some());
+        if let Some(dev_set) = with_dev {
+            assert!(dev_set.contains("runtime-lib 1.0.0"));
+            assert!(dev_set.contains("shared-lib 1.0.0"));
+            assert!(dev_set.contains("test-harness 1.0.0"));
+            assert!(dev_set.contains("dev-transitive 1.0.0"));
+        }
+    }
+
+    #[test]
+    fn test_cargo_filter_platform_and_dev_dependencies() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = tempdir()?;
+        let root = tmp.path();
+
+        for crate_name in ["linux-only", "win-only", "dev-only"] {
+            let dir = root.join(crate_name);
+            fs::create_dir_all(dir.join("src"))?;
+            fs::write(
+                dir.join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+                    crate_name
+                ),
+            )?;
+            fs::write(dir.join("src/lib.rs"), "")?;
+        }
+
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"
+[package]
+name = "platform-app"
+version = "0.1.0"
+edition = "2021"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+linux-only = { path = "linux-only" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+win-only = { path = "win-only" }
+
+[dev-dependencies]
+dev-only = { path = "dev-only" }
+"#,
+        )?;
+        fs::write(root.join("src/lib.rs"), "")?;
+
+        let linux_prod = ResolverEngine::resolve_single_workspace_with_options(
+            root,
+            &ResolveOptions {
+                target_platform: Some("linux-x64".to_string()),
+                include_dev: false,
+            },
+        )?;
+        let linux_names: Vec<&str> = linux_prod
+            .packages
+            .values()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert!(linux_names.contains(&"linux-only"));
+        assert!(!linux_names.contains(&"win-only"));
+        assert!(!linux_names.contains(&"dev-only"));
+
+        let win_with_dev = ResolverEngine::resolve_single_workspace_with_options(
+            root,
+            &ResolveOptions {
+                target_platform: Some("windows-x64".to_string()),
+                include_dev: true,
+            },
+        )?;
+        let win_names: Vec<&str> = win_with_dev
+            .packages
+            .values()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert!(win_names.contains(&"win-only"));
+        assert!(!win_names.contains(&"linux-only"));
+        assert!(win_names.contains(&"dev-only"));
+
+        // Target-unfiltered resolution (target_platform = None) retains ALL target-gated crates
+        // matching Nix `vendorCargoDeps` / Bazel `crate_universe`.
+        let all_targets = ResolverEngine::resolve_single_workspace_with_options(
+            root,
+            &ResolveOptions {
+                target_platform: None,
+                include_dev: true,
+            },
+        )?;
+        let all_names: Vec<&str> = all_targets
+            .packages
+            .values()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert!(all_names.contains(&"linux-only"));
+        assert!(all_names.contains(&"win-only"));
+        assert!(all_names.contains(&"dev-only"));
+
+        Ok(())
     }
 }

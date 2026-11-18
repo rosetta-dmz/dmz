@@ -49,7 +49,10 @@ impl eframe::App for DmzGuiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let visuals = match self.pages.apply_appearance(&ctx) {
-            Ok(visuals) => visuals,
+            Ok(visuals) => {
+                ui.reset_style();
+                visuals
+            }
             Err(error) => {
                 self.status_message = format!("Could not apply appearance settings: {error}");
                 let mut visuals = egui::Visuals::dark();
@@ -58,6 +61,7 @@ impl eframe::App for DmzGuiApp {
                 visuals.widgets.open.expansion = 0.0;
                 visuals.widgets.inactive.bg_stroke.width = visuals.widgets.hovered.bg_stroke.width;
                 ctx.set_visuals(visuals.clone());
+                ui.reset_style();
                 visuals
             }
         };
@@ -68,6 +72,23 @@ impl eframe::App for DmzGuiApp {
                     .inner_margin(egui::Margin::ZERO),
             )
             .show(ui, |ui| {
+                #[cfg(target_os = "macos")]
+                {
+                    let prev_item_spacing_y = ui.spacing().item_spacing.y;
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    let (_titlebar_rect, titlebar_response) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 28.0),
+                        egui::Sense::click_and_drag(),
+                    );
+                    if titlebar_response.drag_started_by(egui::PointerButton::Primary) {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+                    if titlebar_response.double_clicked() {
+                        let is_maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
+                    }
+                    ui.spacing_mut().item_spacing.y = prev_item_spacing_y;
+                }
                 let viewport_size = ui.available_size_before_wrap();
                 ui.allocate_ui_with_layout(
                     viewport_size,

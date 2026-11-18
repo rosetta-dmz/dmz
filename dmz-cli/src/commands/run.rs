@@ -2,8 +2,39 @@ use crate::cli::RunArgs;
 use std::path::Path;
 use tracing::{error, info, warn};
 
+/// Returns an actionable error message if `dmz run` is invoked inside an active DMZ sandbox.
+pub fn nested_sandbox_error(
+    dmz_sandbox: Option<&str>,
+    dmz_workspace: Option<&str>,
+    target_workspace: &Path,
+) -> Option<String> {
+    if dmz_sandbox != Some("1") {
+        return None;
+    }
+    let scope_note = dmz_workspace
+        .filter(|w| !w.trim().is_empty())
+        .map(|w| format!(" (DMZ_WORKSPACE={})", w))
+        .unwrap_or_default();
+    Some(format!(
+        "`dmz run` cannot be nested inside an active DMZ sandbox{}. `dmz run` orchestrates per-member processes and IPC sockets from the host; run `exit` to leave `dmz shell` / `dmz sandbox`, then run `dmz run --workspace {}` from your host shell.",
+        scope_note,
+        super::quote_shell_arg(&target_workspace.display().to_string())
+    ))
+}
+
 /// Launch workspace members under coordinated supervisor execution
 pub fn run_run(args: RunArgs) -> anyhow::Result<i32> {
+    let dmz_sandbox = std::env::var("DMZ_SANDBOX").ok();
+    let dmz_workspace = std::env::var("DMZ_WORKSPACE").ok();
+    if let Some(err_msg) = nested_sandbox_error(
+        dmz_sandbox.as_deref(),
+        dmz_workspace.as_deref(),
+        &args.workspace,
+    ) {
+        error!("{}", err_msg);
+        return Ok(1);
+    }
+
     info!(
         workspace = ?args.workspace,
         "Initializing workspace execution under supervisor orchestration"
@@ -63,7 +94,17 @@ pub fn run_run(args: RunArgs) -> anyhow::Result<i32> {
                 (cfg, ws_canon)
             }
             Err(e) => {
+                let diag = dmz_core::diagnostics::DiagnosticError::classify(&e);
                 error!("Failed to load workspace manifest: {}", e);
+                if diag.category == dmz_core::diagnostics::ErrorCategory::PermissionDenied {
+                    error!("Remediation: {}", diag.remediation);
+                    if dmz_core::diagnostics::DiagnosticError::is_in_dmz_sandbox() {
+                        error!(
+                            "CLI action: run `exit` to return to your host shell, then run `dmz run --workspace {}`.",
+                            super::quote_shell_arg(&args.workspace.display().to_string())
+                        );
+                    }
+                }
                 return Ok(1);
             }
         };
@@ -103,11 +144,26 @@ pub fn run_run(args: RunArgs) -> anyhow::Result<i32> {
         }
     }
 
+    if !dmz_core::toolchain::has_usable_apple_sdk_or_clt(&effective_workspace_root) {
+        if let Err(e) =
+            dmz_core::toolchain::verify_apple_prereq_for_workspace(&effective_workspace_root, None)
+        {
+            warn!("{}", e);
+        }
+    }
+
     let orchestrator = dmz_supervisor::SidecarOrchestrator::new();
+    let metadata_mode = if args.strict_metadata {
+        dmz_sandbox::platform::MetadataReadMode::StrictAncestors
+    } else {
+        dmz_sandbox::platform::MetadataReadMode::Global
+    };
     let pair_config = dmz_supervisor::SidecarPairConfig {
         workspace_root: effective_workspace_root,
         project: project_config,
         allow_network: args.allow_network,
+        no_sandbox: args.no_sandbox,
+        metadata_mode,
     };
 
     let rt = match tokio::runtime::Builder::new_multi_thread()

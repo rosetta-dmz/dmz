@@ -91,6 +91,7 @@ fn test_dual_repo_airgap_export_and_import_roundtrip() {
         since: None,
         with_toolchain: false,
         multi_workspace: Some(manifest),
+        ..Default::default()
     };
 
     let manifest_result = AirGapExporter::export(&export_config).expect("Export failed");
@@ -164,6 +165,7 @@ fn test_dual_repo_airgap_export_and_import_roundtrip() {
         target_store_dir: target_dir.join(".dmz/store"),
         target_workspace_dir: target_dir.clone(),
         verify_closure_hash: true,
+        ..Default::default()
     };
 
     let import_res = AirGapImporter::import(&import_config).expect("Import failed");

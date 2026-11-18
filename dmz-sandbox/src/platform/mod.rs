@@ -1,17 +1,55 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
+use std::process::{Command, ExitStatus};
 
 #[cfg(target_os = "linux")]
-mod linux;
+pub mod linux;
 #[cfg(target_os = "macos")]
-mod macos;
+pub mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::generate_seatbelt_profile;
+pub use macos::{generate_seatbelt_profile, generate_seatbelt_profile_with_options};
 #[cfg(target_os = "windows")]
-mod windows;
+pub mod windows;
+
+/// Controls how strictly kernel network isolation is enforced on hosts with limited primitives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SandboxIsolationMode {
+    /// Enforces all available OS isolation primitives and falls back to cooperative proxy/env
+    /// isolation with explicit warning when the OS kernel cannot isolate sockets unprivileged.
+    #[default]
+    BestEffort,
+    /// Requires kernel-enforced network isolation; fails closed at initialization if unsupported.
+    StrictKernel,
+}
+
+/// Controls how macOS Seatbelt permits filesystem metadata (`stat`/`lstat`/`readlink`) reads
+/// for `getcwd()` and runtime path canonicalization (ignored on Linux/Windows).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MetadataReadMode {
+    /// Bazel pattern: allows `file-read-metadata` globally so `getcwd()`, symlink resolution,
+    /// and Python/Node/Rust runtime canonicalization work reliably (no file content or listing access).
+    #[default]
+    Global,
+    /// Restricts `file-read-metadata` strictly to `(literal "...")` ancestor components of the
+    /// workspace, closure store, IPC socket, and canonical `/tmp`/`/var` paths. Note: on macOS APFS
+    /// firmlinks (`/Users` -> `/System/Volumes/Data/Users`), `getcwd()` (`/bin/pwd`) may still be
+    /// denied even when ancestors are listed.
+    StrictAncestors,
+}
+
+/// Extended policy options for sandboxed workspace and agent execution.
+#[derive(Clone, Debug, Default)]
+pub struct SandboxPolicyOptions {
+    pub isolation_mode: SandboxIsolationMode,
+    pub metadata_mode: MetadataReadMode,
+    pub proxy_addr: Option<SocketAddr>,
+    pub writable_paths: Vec<PathBuf>,
+}
 
 #[derive(Clone, Debug)]
 pub struct SandboxConfig {
@@ -54,6 +92,21 @@ pub enum PlatformError {
     WindowsError(String),
     PlatformFault(String),
     UnsupportedPlatform(String),
+    /// Wraps an underlying `std::io::Error` while preserving its causal `Error::source()`.
+    Io {
+        context: String,
+        source: std::io::Error,
+    },
+}
+
+impl PlatformError {
+    /// Constructs a [`PlatformError::Io`] preserving the original `std::io::Error`.
+    pub fn io(context: impl Into<String>, source: std::io::Error) -> Self {
+        Self::Io {
+            context: context.into(),
+            source,
+        }
+    }
 }
 
 impl fmt::Display for PlatformError {
@@ -64,11 +117,19 @@ impl fmt::Display for PlatformError {
             PlatformError::WindowsError(msg) => write!(f, "Windows error: {}", msg),
             PlatformError::PlatformFault(msg) => write!(f, "Platform fault: {}", msg),
             PlatformError::UnsupportedPlatform(msg) => write!(f, "Unsupported platform: {}", msg),
+            PlatformError::Io { context, source } => write!(f, "{}: {}", context, source),
         }
     }
 }
 
-impl Error for PlatformError {}
+impl Error for PlatformError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            PlatformError::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 /// Unified interface for OS-native containerless sandbox runners
 pub trait SandboxRunner {
@@ -86,6 +147,79 @@ impl SandboxRunner for NativeSandboxRunner {
 
 /// Primary public entry point for executing a command in the DMZ containerless sandbox
 pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError> {
+    run_sandboxed_with_options(config, &SandboxPolicyOptions::default())
+}
+
+/// Executes a command in the DMZ containerless sandbox with explicit isolation policy options.
+pub fn run_sandboxed_with_options(
+    config: &SandboxConfig,
+    options: &SandboxPolicyOptions,
+) -> Result<ExitStatus, PlatformError> {
+    let resolved_config = prepare_resolved_sandbox_config(config)?;
+    dispatch_platform_sandbox(&resolved_config, options)
+}
+
+/// Prepares a confined `std::process::Command` for supervisor-managed agents along with the active
+/// isolation posture identifier (e.g., `"kernel-seatbelt"`, `"kernel-netns"`, `"job-object-best-effort"`).
+pub fn prepare_agent_command(
+    config: &SandboxConfig,
+    options: &SandboxPolicyOptions,
+) -> Result<(Command, &'static str), PlatformError> {
+    if !config.workspace_path.exists() {
+        return Err(PlatformError::PlatformFault(format!(
+            "Workspace path does not exist: {:?}",
+            config.workspace_path
+        )));
+    }
+    let mut resolved = config.clone();
+    resolved.command = resolve_command(&config.command);
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = macos::build_command(&resolved, options)?;
+        cmd.env_clear();
+        cmd.envs(resolved.envs.iter().map(|(k, v)| (k, v)));
+        let posture = if resolved.allow_network {
+            "kernel-seatbelt-network-allowed"
+        } else if options.proxy_addr.is_some() {
+            "kernel-seatbelt-loopback-proxy"
+        } else {
+            "kernel-seatbelt-no-network"
+        };
+        Ok((cmd, posture))
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let (mut cmd, posture) = linux::build_command(&resolved, options)?;
+        cmd.env_clear();
+        cmd.envs(resolved.envs.iter().map(|(k, v)| (k, v)));
+        Ok((cmd, posture))
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut cmd = windows::build_command(&resolved, options)?;
+        cmd.env_clear();
+        cmd.envs(resolved.envs.iter().map(|(k, v)| (k, v)));
+        let posture = if resolved.allow_network {
+            "job-object-network-allowed"
+        } else {
+            "job-object-best-effort"
+        };
+        Ok((cmd, posture))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = (resolved, options);
+        Err(PlatformError::UnsupportedPlatform(
+            "Current operating system is not supported by DMZ sandbox".into(),
+        ))
+    }
+}
+
+fn prepare_resolved_sandbox_config(config: &SandboxConfig) -> Result<SandboxConfig, PlatformError> {
     if !config.workspace_path.exists() {
         return Err(PlatformError::PlatformFault(format!(
             "Workspace path does not exist: {:?}",
@@ -99,8 +233,7 @@ pub fn run_sandboxed(config: &SandboxConfig) -> Result<ExitStatus, PlatformError
     let mut resolved_config = config.clone();
     resolved_config.command = absolute_command;
     resolved_config.envs = build_sandbox_environment(&resolved_config, &cache_dir, &tmp_dir);
-
-    dispatch_platform_sandbox(&resolved_config)
+    Ok(resolved_config)
 }
 
 fn resolve_command(command: &str) -> String {
@@ -307,18 +440,24 @@ fn inject_offline_hints(env_map: &mut HashMap<String, String>) {
     env_map.insert("no_proxy".into(), "localhost,127.0.0.1".into());
 }
 
-fn dispatch_platform_sandbox(config: &SandboxConfig) -> Result<ExitStatus, PlatformError> {
+fn dispatch_platform_sandbox(
+    config: &SandboxConfig,
+    options: &SandboxPolicyOptions,
+) -> Result<ExitStatus, PlatformError> {
     #[cfg(target_os = "macos")]
-    return macos::run_sandboxed(config);
+    return macos::run_sandboxed_with_options(config, options);
 
     #[cfg(target_os = "linux")]
-    return linux::run_sandboxed(config);
+    return linux::run_sandboxed_with_options(config, options);
 
     #[cfg(target_os = "windows")]
-    return windows::run_sandboxed(config);
+    return windows::run_sandboxed_with_options(config, options);
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    Err(PlatformError::UnsupportedPlatform(
-        "Current operating system is not supported by DMZ sandbox".into(),
-    ))
+    {
+        let _ = (config, options);
+        Err(PlatformError::UnsupportedPlatform(
+            "Current operating system is not supported by DMZ sandbox".into(),
+        ))
+    }
 }

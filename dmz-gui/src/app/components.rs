@@ -193,10 +193,12 @@ pub(super) const BROWSE_BUTTON_WIDTH: f32 = 88.0;
 pub(super) fn field_button(ui: &mut egui::Ui, label: &str, width: Option<f32>) -> egui::Response {
     let btn_width = width.unwrap_or(BROWSE_BUTTON_WIDTH);
     ui.scope(|ui| {
-        ui.spacing_mut().button_padding += BUTTON_PADDING_EXTRA;
+        // Keep vertical button padding at 0 (matching TextEdit's symmetric(8, 0) margin)
+        // so the button never exceeds FIELD_BUTTON_HEIGHT and stays vertically aligned.
+        ui.spacing_mut().button_padding.y = 0.0;
         ui.add_sized(
             egui::vec2(btn_width, FIELD_BUTTON_HEIGHT),
-            egui::Button::new(label),
+            egui::Button::new(label).min_size(egui::vec2(btn_width, FIELD_BUTTON_HEIGHT)),
         )
     })
     .inner
@@ -436,9 +438,26 @@ pub(super) fn status_bar(ui: &mut egui::Ui, status_message: &str, is_busy: bool)
     ui.painter().galley(text_position, galley, text);
 }
 
+fn round_clamped_u8(v: f32) -> u8 {
+    let clamped = v.clamp(0.0, 255.0);
+    let mut lo = 0u8;
+    let mut hi = 255u8;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if f32::from(mid) + 0.5 < clamped {
+            lo = mid.saturating_add(1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
 fn lerp_color(a: egui::Color32, b: egui::Color32, amount: f32) -> egui::Color32 {
     let amount = amount.clamp(0.0, 1.0);
-    let mix = |from: u8, to: u8| (from as f32 + (to as f32 - from as f32) * amount).round() as u8;
+    let mix = |from: u8, to: u8| {
+        round_clamped_u8(f32::from(from) + (f32::from(to) - f32::from(from)) * amount)
+    };
     egui::Color32::from_rgba_unmultiplied(
         mix(a.r(), b.r()),
         mix(a.g(), b.g()),

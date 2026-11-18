@@ -20,6 +20,71 @@ pub fn host_target_triple() -> &'static str {
     }
 }
 
+/// Normalizes a DMZ target platform tag (e.g. `macos-arm64`, `linux-x86_64`) or Rust target triple
+/// into canonical `(os, arch)` constants matching `std::env::consts`.
+pub fn resolve_target_os_arch(target_platform: Option<&str>) -> (&'static str, &'static str) {
+    let Some(raw) = target_platform
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("all"))
+    else {
+        return (std::env::consts::OS, std::env::consts::ARCH);
+    };
+
+    let lower = raw.to_ascii_lowercase();
+    let os = if lower.contains("darwin") || lower.contains("macos") {
+        "macos"
+    } else if lower.contains("windows") || lower.contains("win32") {
+        "windows"
+    } else if lower.contains("linux") {
+        "linux"
+    } else {
+        std::env::consts::OS
+    };
+
+    let arch = if lower.contains("aarch64") || lower.contains("arm64") {
+        "aarch64"
+    } else if lower.contains("x86_64") || lower.contains("amd64") || lower.contains("x64") {
+        "x86_64"
+    } else {
+        std::env::consts::ARCH
+    };
+
+    (os, arch)
+}
+
+/// Resolves an optional DMZ target platform string into a Rust target triple for `cargo metadata --filter-platform`.
+/// Returns `None` only when `target_platform` explicitly requests `"all"` or host triple cannot be inferred.
+pub fn resolve_rust_target_triple(target_platform: Option<&str>) -> Option<String> {
+    let Some(raw) = target_platform.map(str::trim).filter(|s| !s.is_empty()) else {
+        let host = host_target_triple();
+        return (host != "unknown-target").then(|| host.to_string());
+    };
+
+    if raw.eq_ignore_ascii_case("all") {
+        return None;
+    }
+
+    // Pass through explicit 3/4-part Rust triples directly (e.g., x86_64-unknown-linux-musl)
+    if raw.matches('-').count() >= 2
+        && (raw.contains("apple-darwin")
+            || raw.contains("unknown-linux")
+            || raw.contains("pc-windows"))
+    {
+        return Some(raw.to_string());
+    }
+
+    let (os, arch) = resolve_target_os_arch(Some(raw));
+    match (os, arch) {
+        ("macos", "aarch64") => Some("aarch64-apple-darwin".to_string()),
+        ("macos", "x86_64") => Some("x86_64-apple-darwin".to_string()),
+        ("linux", "x86_64") => Some("x86_64-unknown-linux-gnu".to_string()),
+        ("linux", "aarch64") => Some("aarch64-unknown-linux-gnu".to_string()),
+        ("windows", "x86_64") => Some("x86_64-pc-windows-msvc".to_string()),
+        ("windows", "aarch64") => Some("aarch64-pc-windows-msvc".to_string()),
+        _ => None,
+    }
+}
+
 /// Resolves an executable command name against the provided `PATH` string and working directory.
 pub fn resolve_executable_in_env(cmd_name: &str, path_env: &str, cwd: &Path) -> String {
     let cmd_path = Path::new(cmd_name);
@@ -212,18 +277,48 @@ pub fn inject_python_env(
             }
         }
         if let Some(sp) = site_packages {
-            let sp_str = sp.to_string_lossy().to_string();
+            let mut sp_entries = vec![sp.to_string_lossy().to_string()];
+            // When `.venv` is selected, also expose the single-copy `.dmz/venv` site-packages dir
+            // so `PYTHONPATH`-only invocations find wheels without duplicating `.venv` files.
+            if venv.file_name().and_then(|n| n.to_str()) == Some(".venv") {
+                if let Some(base_dir) = venv.parent() {
+                    let dmz_venv = base_dir.join(".dmz/venv");
+                    if let Some(dmz_sp) = find_venv_site_packages(&dmz_venv) {
+                        let dmz_sp_str = dmz_sp.to_string_lossy().to_string();
+                        if !sp_entries.contains(&dmz_sp_str) {
+                            sp_entries.push(dmz_sp_str);
+                        }
+                    }
+                }
+            }
+            let joined = sp_entries.join(separator);
             let existing_py = env_map.get("PYTHONPATH").cloned().unwrap_or_default();
             env_map.insert(
                 "PYTHONPATH".to_string(),
                 if existing_py.is_empty() {
-                    sp_str
+                    joined
                 } else {
-                    format!("{}{}{}", sp_str, separator, existing_py)
+                    format!("{}{}{}", joined, separator, existing_py)
                 },
             );
         }
     }
+}
+
+fn find_venv_site_packages(venv: &Path) -> Option<std::path::PathBuf> {
+    let lib_dir = venv.join("lib");
+    if lib_dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&lib_dir) {
+            for entry in entries.flatten() {
+                let sp = entry.path().join("site-packages");
+                if sp.is_dir() {
+                    return Some(sp);
+                }
+            }
+        }
+    }
+    let win_sp = venv.join("Lib/site-packages");
+    win_sp.is_dir().then_some(win_sp)
 }
 
 pub fn inject_offline_env(env_map: &mut HashMap<String, String>) {

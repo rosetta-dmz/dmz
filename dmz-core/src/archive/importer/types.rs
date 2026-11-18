@@ -8,6 +8,8 @@ pub struct ImportConfig {
     pub target_store_dir: PathBuf,
     pub target_workspace_dir: PathBuf, // Destination for workspace source code & metadata
     pub verify_closure_hash: bool,
+    pub include_dev: bool,
+    pub install_dependencies: bool,
 }
 
 impl Default for ImportConfig {
@@ -17,6 +19,8 @@ impl Default for ImportConfig {
             target_store_dir: PathBuf::from(".dmz/store"),
             target_workspace_dir: PathBuf::from("workspace"), // Sub-folder default
             verify_closure_hash: true,
+            include_dev: true,
+            install_dependencies: true,
         }
     }
 }
@@ -24,6 +28,10 @@ impl Default for ImportConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportResult {
     pub imported_packages: usize,
+    #[serde(default)]
+    pub installed_packages: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_warning: Option<String>,
     pub closure_signature: String,
     pub store_path: PathBuf,
     #[serde(default)]

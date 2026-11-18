@@ -285,7 +285,7 @@ impl ToolchainEnv {
                 );
             }
 
-            // Export SDKROOT when .sdk directory is located
+            // Export SDKROOT when legacy bundled .sdk directory is located
             if let Some(sdk_path) = Self::find_apple_sdk_root(&apple_dir) {
                 env_map.insert("SDKROOT".into(), sdk_path.to_string_lossy().to_string());
                 if is_genuine && !env_map.contains_key("DEVELOPER_DIR") {
@@ -294,6 +294,13 @@ impl ToolchainEnv {
                         apple_dir.to_string_lossy().to_string(),
                     );
                 }
+            }
+        } else if cfg!(target_os = "macos")
+            && env_map.get("SDKROOT").is_none_or(|v| v.is_empty())
+            && (toolchains_dir.join("cc").exists() || toolchains_dir.join("cmake").exists())
+        {
+            if let Some(host_sdk) = super::preflight::resolve_host_macos_sdk_path() {
+                env_map.insert("SDKROOT".into(), host_sdk.to_string_lossy().to_string());
             }
         }
 

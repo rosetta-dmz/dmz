@@ -34,22 +34,22 @@ cmake_minimum_required(VERSION 3.10)
 
 set(DMZ_TOOLCHAINS_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
-# Darwin / Apple Platform Sysroot Detection (evaluated prior to compiler probing)
-if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin" OR EXISTS "${DMZ_TOOLCHAINS_DIR}/applesdk" OR DEFINED ENV{SDKROOT})
+# Darwin / Apple Platform Sysroot Detection (resolved from SDKROOT or host CLT/Xcode prerequisite)
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin" OR DEFINED ENV{SDKROOT})
     set(CMAKE_SYSTEM_NAME "Darwin" CACHE STRING "Target System" FORCE)
 
     if(NOT DEFINED CMAKE_OSX_SYSROOT OR CMAKE_OSX_SYSROOT STREQUAL "")
         if(DEFINED ENV{SDKROOT} AND EXISTS "$ENV{SDKROOT}")
             set(CMAKE_OSX_SYSROOT "$ENV{SDKROOT}" CACHE PATH "Apple SDK Root" FORCE)
-        else()
-            file(GLOB _DMZ_APPLE_SDKS
-                "${DMZ_TOOLCHAINS_DIR}/applesdk/SDKs/MacOSX*.sdk"
-                "${DMZ_TOOLCHAINS_DIR}/applesdk/Platforms/MacOSX.platform/Developer/SDKs/MacOSX*.sdk"
+        elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin" AND EXISTS "/usr/bin/xcrun" AND (EXISTS "/Library/Developer/CommandLineTools/SDKs" OR EXISTS "/var/db/xcode_select_link" OR DEFINED ENV{DEVELOPER_DIR}))
+            execute_process(
+                COMMAND /usr/bin/xcrun --sdk macosx --show-sdk-path
+                OUTPUT_VARIABLE _DMZ_HOST_SDKROOT
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET
             )
-            list(LENGTH _DMZ_APPLE_SDKS _DMZ_NUM_SDKS)
-            if(_DMZ_NUM_SDKS GREATER 0)
-                list(GET _DMZ_APPLE_SDKS 0 _DMZ_FIRST_SDK)
-                set(CMAKE_OSX_SYSROOT "${_DMZ_FIRST_SDK}" CACHE PATH "Apple SDK Root" FORCE)
+            if(_DMZ_HOST_SDKROOT AND EXISTS "${_DMZ_HOST_SDKROOT}")
+                set(CMAKE_OSX_SYSROOT "${_DMZ_HOST_SDKROOT}" CACHE PATH "Apple SDK Root" FORCE)
             endif()
         endif()
     endif()

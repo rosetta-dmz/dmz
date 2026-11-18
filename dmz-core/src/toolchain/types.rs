@@ -87,6 +87,12 @@ impl ToolchainEcosystem {
         )
     }
 
+    /// Return true if this ecosystem is satisfied as a host OS baseline prerequisite
+    /// rather than bundled inside DMZ archives (e.g., macOS Apple CLT / Xcode SDK).
+    pub fn is_host_prerequisite(&self) -> bool {
+        matches!(self, Self::AppleSdk)
+    }
+
     /// Parse an ecosystem identifier or stack name into a ToolchainEcosystem.
     pub fn from_str_name(name: &str) -> Option<Self> {
         match name.to_ascii_lowercase().as_str() {
@@ -149,6 +155,54 @@ pub struct DiscoveredToolchain {
     pub bin_files: Vec<(PathBuf, String)>,
     /// Host path and relative target path within the toolchain archive directory.
     pub lib_files: Vec<(PathBuf, String)>,
+}
+
+/// Controls whether toolchain discovery captures only runtime/build essentials (`Minimal`)
+/// or includes first-party IDE/linter/doc tooling, headers, stdlib extras, and extra targets (`Full`).
+///
+/// Neither profile ever captures ambient host-global package caches (`site-packages`,
+/// `dist-packages`, unreferenced global `node_modules`, Ruby `gems`/`site_ruby`, or PHP PEAR
+/// packages); third-party project/dev dependencies must flow exclusively through `dmz.lock`
+/// (`--include-dev`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolchainProfile {
+    #[default]
+    Minimal,
+    Full,
+}
+
+impl ToolchainProfile {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Full => "full",
+        }
+    }
+
+    pub fn from_str_name(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "minimal" | "min" | "slim" => Some(Self::Minimal),
+            "full" | "all" | "complete" => Some(Self::Full),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ToolchainProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Workspace- and target-scoped hints passed to toolchain discoverers.
+#[derive(Debug, Clone, Default)]
+pub struct ToolchainDiscoveryContext {
+    pub profile: ToolchainProfile,
+    pub target_platform: Option<String>,
+    pub workspace_root: Option<PathBuf>,
+    pub member_roots: Vec<PathBuf>,
+    pub ecosystems: std::collections::HashSet<ToolchainEcosystem>,
 }
 
 #[cfg(test)]

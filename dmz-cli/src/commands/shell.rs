@@ -1,5 +1,7 @@
 use crate::cli::{DEFAULT_LOCKFILE_PATH, DEFAULT_STORE_PATH};
-use dmz_sandbox::platform::{run_sandboxed, SandboxConfig};
+use dmz_sandbox::platform::{
+    run_sandboxed_with_options, MetadataReadMode, SandboxConfig, SandboxPolicyOptions,
+};
 use std::path::{Path, PathBuf};
 use tracing::{error, info};
 
@@ -11,6 +13,7 @@ pub fn run_shell(
     closure: PathBuf,
     allow_network: bool,
     no_sandbox: bool,
+    strict_metadata: bool,
     shell: Option<String>,
     command: Option<String>,
     args: Vec<String>,
@@ -44,6 +47,10 @@ pub fn run_shell(
             DEFAULT_LOCKFILE_PATH,
             abs_workspace
         );
+    }
+
+    if let Err(e) = dmz_core::toolchain::verify_apple_prereq_for_workspace(&abs_workspace, None) {
+        eprintln!("\x1b[33m[DMZ PREREQUISITE WARNING]\x1b[0m {}", e);
     }
 
     // Resolve shell binary: user option -> $SHELL -> platform default
@@ -183,7 +190,15 @@ pub fn run_shell(
             allow_network,
             ipc_socket_path,
         };
-        match run_sandboxed(&config) {
+        let options = SandboxPolicyOptions {
+            metadata_mode: if strict_metadata {
+                MetadataReadMode::StrictAncestors
+            } else {
+                MetadataReadMode::Global
+            },
+            ..SandboxPolicyOptions::default()
+        };
+        match run_sandboxed_with_options(&config, &options) {
             Ok(status) => {
                 if let Some(code) = status.code() {
                     return Ok(code);

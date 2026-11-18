@@ -65,6 +65,9 @@ fn test_dual_repo_sidecar_member_dependency_isolation() {
     let lockfile = DmzLockfile {
         version: 1,
         target_platform: None,
+        include_dev: None,
+        python_abi: None,
+        inputs_digest: None,
         vcs: None,
         workspaces: BTreeMap::new(),
         closure_signature: DmzLockfile::compute_closure_hash(&packages),

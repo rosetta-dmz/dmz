@@ -3,20 +3,27 @@
 // process environments, manifest discovery, and socket lifecycle helpers.
 
 pub use super::discovery::{
-    discover_or_from_lockfile, discover_workspace_manifest, discover_workspace_manifest_checked,
+    discover_node_project_roots, discover_node_project_roots_excluding, discover_or_from_lockfile,
+    discover_or_from_lockfile_scoped, discover_tauri_cargo_dirs,
+    discover_tauri_cargo_dirs_excluding, discover_workspace_manifest,
+    discover_workspace_manifest_checked, discover_workspace_manifest_scoped,
+    discover_workspace_manifest_scoped_checked, has_node_project_manifest,
 };
 pub use super::env::{
     build_member_env, host_target_triple, inject_node_env, inject_offline_env, inject_python_env,
-    resolve_executable_in_env,
+    resolve_executable_in_env, resolve_rust_target_triple, resolve_target_os_arch,
 };
 pub use super::inference::{
     detect_default_command, detect_go_command, detect_node_command, detect_python_command,
     detect_rust_command, populate_detected_defaults, resolve_command,
 };
-pub use super::layout::{canonical_virtual_path, resolve_member_layouts, sanitize_folder_name};
+pub use super::layout::{
+    canonical_virtual_path, is_ignored_workspace_rel_path, resolve_member_layouts,
+    sanitize_folder_name, should_skip_workspace_artifact_dir,
+};
 pub use super::schema::{
-    normalize_member_path, IpcBridgeConfig, MemberRole, ResolvedMemberLayout, WorkspaceMember,
-    WorkspaceProjectConfig,
+    normalize_member_path, IpcBridgeConfig, MemberRole, ResolvedMemberLayout,
+    WorkspaceManifestError, WorkspaceMember, WorkspaceProjectConfig,
 };
 pub use super::socket::{cleanup_stale_socket, safe_socket_path};
 

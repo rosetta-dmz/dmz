@@ -44,39 +44,109 @@ impl CargoMapper {
         Ok(())
     }
 
-    fn ensure_vendored_cargo_config(
+    /// Reads the configured `[source.vendored-sources].directory` value from a `.cargo/config.toml` file.
+    pub(crate) fn read_vendored_source_directory(config_path: &Path) -> Option<String> {
+        let existing = fs::read_to_string(config_path).ok()?;
+        let table = existing.parse::<toml::Table>().ok()?;
+        table
+            .get("source")
+            .and_then(|s| s.get("vendored-sources"))
+            .and_then(|v| v.get("directory"))
+            .and_then(|d| d.as_str())
+            .map(ToOwned::to_owned)
+    }
+
+    /// Ensures `config_path` replaces `crates-io` with `[source.vendored-sources]` pointing
+    /// cleanly at `vendor_rel_dir`, preserving any unrelated user TOML configuration tables.
+    pub(crate) fn ensure_vendored_cargo_config(
         config_path: &Path,
         vendor_rel_dir: &str,
     ) -> Result<(), InstallError> {
-        let block = format!(
-            "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"{}\"\n",
-            vendor_rel_dir
-        );
-        if !config_path.exists() {
-            return fs::write(config_path, block).map_err(|e| {
-                InstallError::IoError(format!("Failed to write {:?}: {}", config_path, e))
-            });
-        }
-        let existing = fs::read_to_string(config_path).map_err(|e| {
-            InstallError::IoError(format!("Failed to read {:?}: {}", config_path, e))
-        })?;
-        if !existing.contains("[source.vendored-sources]") {
-            let merged = if existing.trim().is_empty() {
-                block
-            } else {
-                format!("{}\n\n{}", existing.trim_end(), block)
-            };
-            fs::write(config_path, merged).map_err(|e| {
-                InstallError::IoError(format!("Failed to update {:?}: {}", config_path, e))
+        let mut root_table = if config_path.exists() {
+            let existing = fs::read_to_string(config_path).map_err(|e| {
+                InstallError::IoError(format!("Failed to read {:?}: {}", config_path, e))
             })?;
+            existing
+                .parse::<toml::Table>()
+                .unwrap_or_else(|_| toml::Table::new())
+        } else {
+            toml::Table::new()
+        };
+
+        let existing_dir = root_table
+            .get("source")
+            .and_then(|s| s.get("vendored-sources"))
+            .and_then(|v| v.get("directory"))
+            .and_then(|d| d.as_str())
+            .map(ToOwned::to_owned);
+        let existing_replace = root_table
+            .get("source")
+            .and_then(|s| s.get("crates-io"))
+            .and_then(|c| c.get("replace-with"))
+            .and_then(|r| r.as_str())
+            .map(ToOwned::to_owned);
+
+        if config_path.exists()
+            && existing_replace.as_deref() == Some("vendored-sources")
+            && existing_dir.as_deref() == Some(vendor_rel_dir)
+        {
+            return Ok(());
         }
-        Ok(())
+
+        let source_val = root_table
+            .entry("source")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if !source_val.is_table() {
+            *source_val = toml::Value::Table(toml::Table::new());
+        }
+        if let Some(source_tbl) = source_val.as_table_mut() {
+            let crates_io_val = source_tbl
+                .entry("crates-io")
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            if !crates_io_val.is_table() {
+                *crates_io_val = toml::Value::Table(toml::Table::new());
+            }
+            if let Some(crates_tbl) = crates_io_val.as_table_mut() {
+                crates_tbl.insert(
+                    "replace-with".to_string(),
+                    toml::Value::String("vendored-sources".to_string()),
+                );
+            }
+
+            let vendored_val = source_tbl
+                .entry("vendored-sources")
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            if !vendored_val.is_table() {
+                *vendored_val = toml::Value::Table(toml::Table::new());
+            }
+            if let Some(vendored_tbl) = vendored_val.as_table_mut() {
+                vendored_tbl.insert(
+                    "directory".to_string(),
+                    toml::Value::String(vendor_rel_dir.to_string()),
+                );
+            }
+        }
+
+        let rendered = toml::to_string_pretty(&root_table).map_err(|e| {
+            InstallError::MapperError(format!("Failed to serialize {:?}: {}", config_path, e))
+        })?;
+        crate::workspace::atomic_write_file(config_path, rendered.as_bytes())
+            .map_err(|e| InstallError::IoError(format!("Failed to write {:?}: {}", config_path, e)))
     }
 
     pub fn map_package(
         workspace_path: &Path,
         pkg: &LockedPackage,
         archive_path: &Path,
+    ) -> Result<(), InstallError> {
+        Self::map_package_excluding(workspace_path, pkg, archive_path, &[])
+    }
+
+    pub fn map_package_excluding(
+        workspace_path: &Path,
+        pkg: &LockedPackage,
+        archive_path: &Path,
+        excluded_dirs: &[std::path::PathBuf],
     ) -> Result<(), InstallError> {
         let cargo_dir = workspace_path.join(".cargo");
         let vendor_dir = cargo_dir
@@ -159,14 +229,15 @@ impl CargoMapper {
             warn!(dir = ?temp_extract_dir, error = %e, "Failed to clean temporary cargo extract dir");
         }
 
-        // Attempt to extract the official crates.io checksum from native Cargo.lock (or src-tauri/Cargo.lock) for absolute parity
+        // Attempt to extract the official crates.io checksum from any discovered native Cargo.lock
+        let discovered_cargo_dirs =
+            crate::workspace::discover_tauri_cargo_dirs_excluding(workspace_path, excluded_dirs);
         let mut crate_checksum = pkg.sha256.clone();
-        let native_lock_path = if workspace_path.join("Cargo.lock").exists() {
-            workspace_path.join("Cargo.lock")
-        } else {
-            workspace_path.join("src-tauri/Cargo.lock")
-        };
-        if native_lock_path.exists() {
+        'lock_search: for cargo_root in &discovered_cargo_dirs {
+            let native_lock_path = cargo_root.join("Cargo.lock");
+            if !native_lock_path.is_file() {
+                continue;
+            }
             if let Ok(lock_content) = fs::read_to_string(&native_lock_path) {
                 if let Ok(lock_toml) = lock_content.parse::<toml::Table>() {
                     if let Some(packages) = lock_toml.get("package").and_then(|p| p.as_array()) {
@@ -176,7 +247,7 @@ impl CargoMapper {
                             {
                                 if let Some(cs) = p.get("checksum").and_then(|c| c.as_str()) {
                                     crate_checksum = cs.to_string();
-                                    break;
+                                    break 'lock_search;
                                 }
                             }
                         }
@@ -200,24 +271,26 @@ impl CargoMapper {
             InstallError::IoError(format!("Failed to write .cargo-checksum.json: {}", e))
         })?;
 
-        // Ensure .cargo/config.toml points to the correct .cargo/vendor path without clobbering user config
+        // Configure vendoring for root, src-tauri, and any nested Tauri subprojects (excluding sibling members).
+        let vendor_root = cargo_dir.join("vendor");
         Self::ensure_vendored_cargo_config(&cargo_dir.join("config.toml"), ".cargo/vendor")?;
 
-        // If this workspace is a Tauri project (with src-tauri/Cargo.toml), also configure
-        // src-tauri/.cargo/config.toml with config-relative path `../.cargo/vendor`.
-        if workspace_path.join("src-tauri/Cargo.toml").is_file() {
-            let tauri_cargo_dir = workspace_path.join("src-tauri/.cargo");
+        for tauri_dir in discovered_cargo_dirs {
+            if tauri_dir == workspace_path {
+                continue;
+            }
+            let tauri_cargo_dir = tauri_dir.join(".cargo");
             fs::create_dir_all(&tauri_cargo_dir).map_err(|e| {
-                InstallError::IoError(format!("Failed to create src-tauri/.cargo: {}", e))
+                InstallError::IoError(format!("Failed to create {:?}: {}", tauri_cargo_dir, e))
             })?;
-            Self::ensure_vendored_cargo_config(
-                &tauri_cargo_dir.join("config.toml"),
-                "../.cargo/vendor",
-            )?;
+            let rel_vendor = crate::archive::importer::hydration::relative_path_between(
+                &tauri_dir,
+                &vendor_root,
+            );
+            Self::ensure_vendored_cargo_config(&tauri_cargo_dir.join("config.toml"), &rel_vendor)?;
         }
 
         // Also ensure .cargo/vendor/config.json exists
-        let vendor_root = cargo_dir.join("vendor");
         let vendor_config_json = vendor_root.join("config.json");
         if !vendor_config_json.exists() {
             fs::write(&vendor_config_json, r#"{"packages":{}}"#).map_err(|e| {

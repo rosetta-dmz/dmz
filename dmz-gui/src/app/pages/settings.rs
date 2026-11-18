@@ -191,7 +191,18 @@ impl AppearanceState {
                             if super::super::components::action_button(ui, "Import JSON...", false)
                                 .clicked()
                             {
-                                self.import_theme(status_message);
+                                self.import_theme(ctx, status_message);
+                            }
+                            if self.preferences.theme_name != "System"
+                                && super::super::components::action_button(
+                                    ui,
+                                    "Match System",
+                                    false,
+                                )
+                                .clicked()
+                            {
+                                self.preferences.theme_name = String::from("System");
+                                ctx.request_discard("theme changed");
                             }
                         });
                     });
@@ -208,6 +219,7 @@ impl AppearanceState {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
+                                    let prev_widget_size = self.preferences.widget_size;
                                     egui::ComboBox::from_id_salt("widget_size_combo")
                                         .selected_text(self.preferences.widget_size.label())
                                         .width(140.0)
@@ -228,6 +240,9 @@ impl AppearanceState {
                                                 "Large",
                                             );
                                         });
+                                    if self.preferences.widget_size != prev_widget_size {
+                                        ctx.request_discard("widget size changed");
+                                    }
                                 },
                             );
                         },
@@ -272,7 +287,17 @@ impl AppearanceState {
     }
 
     fn show_gallery(&mut self, ctx: &egui::Context) {
-        let themes = ThemeFile::builtins()
+        let builtins = ThemeFile::builtins();
+        let system_preview = match ctx.system_theme().unwrap_or(egui::Theme::Dark) {
+            egui::Theme::Dark => "Dark",
+            egui::Theme::Light => "Light",
+        };
+        let system_preview = builtins
+            .iter()
+            .find(|theme| theme.name == system_preview)
+            .ok_or_else(|| format!("Built-in theme {system_preview:?} is unavailable"))
+            .and_then(ThemeFile::palette_preview);
+        let themes = builtins
             .into_iter()
             .chain(self.imported_themes.iter().cloned())
             .collect::<Vec<_>>();
@@ -286,76 +311,37 @@ impl AppearanceState {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        render_gallery_card(
+                            ui,
+                            "System",
+                            Some("Matches OS appearance"),
+                            self.preferences.theme_name == "System",
+                            system_preview,
+                            &mut selected,
+                        );
+                        ui.add_space(8.0);
+
                         for theme in &themes {
-                            let is_selected = self.preferences.theme_name == theme.name;
-                            super::super::components::card(ui, is_selected, |ui| {
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(
-                                        ui.available_width(),
-                                        super::super::components::FIELD_BUTTON_HEIGHT,
-                                    ),
-                                    egui::Layout::left_to_right(egui::Align::Center),
-                                    |ui| {
-                                        ui.label(
-                                            egui::RichText::new(theme.name.as_str())
-                                                .strong()
-                                                .size(15.0),
-                                        );
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if is_selected {
-                                                    ui.label(
-                                                        egui::RichText::new("Selected")
-                                                            .color(
-                                                                ui.visuals().selection.stroke.color,
-                                                            )
-                                                            .strong(),
-                                                    );
-                                                } else if super::super::components::action_button(
-                                                    ui,
-                                                    "Use Theme",
-                                                    true,
-                                                )
-                                                .clicked()
-                                                {
-                                                    selected = Some(theme.name.clone());
-                                                }
-                                            },
-                                        );
-                                    },
-                                );
-                                ui.add_space(4.0);
-                                match theme.palette_preview() {
-                                    Ok(colors) => {
-                                        ui.horizontal(|ui| {
-                                            for color in colors {
-                                                super::super::components::swatch(ui, color);
-                                            }
-                                        });
-                                    }
-                                    Err(error) => {
-                                        ui.colored_label(
-                                            ui.visuals().error_fg_color,
-                                            format!("Invalid theme palette: {error}"),
-                                        );
-                                    }
-                                }
-                            });
+                            render_gallery_card(
+                                ui,
+                                theme.name.as_str(),
+                                None,
+                                self.preferences.theme_name == theme.name,
+                                theme.palette_preview(),
+                                &mut selected,
+                            );
                             ui.add_space(8.0);
-                        }
-                        if themes.is_empty() {
-                            ui.label("No themes are available.");
                         }
                     });
             });
 
         if let Some(name) = selected {
             self.preferences.theme_name = name;
+            ctx.request_discard("theme changed");
         }
     }
 
-    fn import_theme(&mut self, status_message: &mut String) {
+    fn import_theme(&mut self, ctx: &egui::Context, status_message: &mut String) {
         let Some(source) = rfd::FileDialog::new()
             .add_filter("DMZ theme JSON", &["json"])
             .pick_file()
@@ -367,6 +353,7 @@ impl AppearanceState {
             Ok(theme) => {
                 self.preferences.theme_name = theme.name.clone();
                 *status_message = format!("Imported and applied theme '{}'.", theme.name);
+                ctx.request_discard("imported theme applied");
             }
             Err(error) => {
                 *status_message = format!("Theme import failed: {error}");
@@ -423,6 +410,61 @@ impl AppearanceState {
         self.imported_themes.push(theme.clone());
         Ok(theme)
     }
+}
+
+fn render_gallery_card(
+    ui: &mut egui::Ui,
+    title: &str,
+    subtitle: Option<&str>,
+    is_selected: bool,
+    preview: Result<[egui::Color32; 6], String>,
+    selected: &mut Option<String>,
+) {
+    let muted = ui.visuals().widgets.noninteractive.fg_stroke.color;
+    super::super::components::card(ui, is_selected, |ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(
+                ui.available_width(),
+                super::super::components::FIELD_BUTTON_HEIGHT,
+            ),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.label(egui::RichText::new(title).strong().size(15.0));
+                if let Some(subtitle) = subtitle {
+                    ui.label(egui::RichText::new(subtitle).color(muted).size(12.0));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if is_selected {
+                        ui.label(
+                            egui::RichText::new("Selected")
+                                .color(ui.visuals().selection.stroke.color)
+                                .strong(),
+                        );
+                    } else if super::super::components::action_button(ui, "Use Theme", true)
+                        .clicked()
+                    {
+                        *selected = Some(title.to_owned());
+                    }
+                });
+            },
+        );
+        ui.add_space(4.0);
+        match preview {
+            Ok(colors) => {
+                ui.horizontal(|ui| {
+                    for color in colors {
+                        super::super::components::swatch(ui, color);
+                    }
+                });
+            }
+            Err(error) => {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("Invalid theme palette: {error}"),
+                );
+            }
+        }
+    });
 }
 
 pub(super) fn load_themes(directory: &Path) -> Result<Vec<ThemeFile>, String> {

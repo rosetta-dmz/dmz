@@ -66,6 +66,12 @@ pub fn copy_dir_contents(src: &Path, dst: &Path, skip_ignored: bool) -> Result<(
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
 
+        if let Ok(sym_meta) = fs::symlink_metadata(&path) {
+            if sym_meta.file_type().is_symlink() {
+                continue;
+            }
+        }
+
         if skip_ignored
             && (name_str == ".dmz"
                 || name_str == "target"
@@ -81,7 +87,7 @@ pub fn copy_dir_contents(src: &Path, dst: &Path, skip_ignored: bool) -> Result<(
         let target = dst.join(&name);
         if path.is_dir() {
             fs::create_dir_all(&target).map_err(|e| ImportError::IoError(e.to_string()))?;
-            copy_dir_contents(&path, &target, false)?;
+            copy_dir_contents(&path, &target, skip_ignored)?;
         } else if path.is_file() {
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent).map_err(|e| ImportError::IoError(e.to_string()))?;

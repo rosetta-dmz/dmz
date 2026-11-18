@@ -64,6 +64,9 @@ fn test_airgap_offline_install_workflow() -> Result<(), Box<dyn std::error::Erro
     let lockfile = DmzLockfile {
         version: 1,
         target_platform: None,
+        include_dev: None,
+        python_abi: None,
+        inputs_digest: None,
         vcs: None,
         workspaces: BTreeMap::new(),
         closure_signature: closure_sig,
@@ -153,6 +156,9 @@ fn test_airgap_offline_install_nested_npm_package_flattening(
     let lockfile = DmzLockfile {
         version: 1,
         target_platform: None,
+        include_dev: None,
+        python_abi: None,
+        inputs_digest: None,
         vcs: None,
         workspaces: BTreeMap::new(),
         closure_signature: closure_sig,
@@ -258,6 +264,9 @@ fn test_airgap_offline_install_npm_bin_links() -> Result<(), Box<dyn std::error:
     let lockfile = DmzLockfile {
         version: 1,
         target_platform: None,
+        include_dev: None,
+        python_abi: None,
+        inputs_digest: None,
         vcs: None,
         workspaces: BTreeMap::new(),
         closure_signature: closure_sig,

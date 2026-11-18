@@ -50,6 +50,19 @@ pub enum Commands {
         /// Target platform specification (e.g., macos-arm64, linux-x86_64)
         #[arg(short, long)]
         target: Option<String>,
+
+        /// Include development dependencies (devDependencies, dev-dependencies, test/lint extras)
+        #[arg(long, default_value_t = true, overrides_with = "prod_only")]
+        include_dev: bool,
+
+        /// Exclude development dependencies (production/runtime-only closure)
+        #[arg(
+            long,
+            default_value_t = false,
+            overrides_with = "include_dev",
+            alias = "no-dev"
+        )]
+        prod_only: bool,
     },
 
     /// Fetch and cache locked dependencies into the secure store
@@ -123,6 +136,14 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         allow_network: bool,
 
+        /// Require kernel-enforced isolation (fail closed if strict isolation is unsupported)
+        #[arg(long, default_value_t = false)]
+        strict_kernel: bool,
+
+        /// Restrict macOS Seatbelt metadata (stat/lstat) reads strictly to workspace and store ancestor paths
+        #[arg(long, default_value_t = false)]
+        strict_metadata: bool,
+
         /// Enable automated diagnostic error categorization
         #[arg(long, default_value_t = false)]
         diagnose: bool,
@@ -177,6 +198,10 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         no_sandbox: bool,
 
+        /// Restrict macOS Seatbelt metadata (stat/lstat) reads strictly to workspace and store ancestor paths
+        #[arg(long, default_value_t = false)]
+        strict_metadata: bool,
+
         /// Shell binary or command to execute (defaults to $SHELL or /bin/sh)
         #[arg(short, long)]
         shell: Option<String>,
@@ -195,6 +220,19 @@ pub enum Commands {
         /// Target platform specification (e.g., macos-arm64, linux-x86_64)
         #[arg(short, long)]
         target: Option<String>,
+
+        /// Include development dependencies (devDependencies, dev-dependencies, test/lint extras)
+        #[arg(long, default_value_t = true, overrides_with = "prod_only")]
+        include_dev: bool,
+
+        /// Exclude development dependencies (production/runtime-only closure)
+        #[arg(
+            long,
+            default_value_t = false,
+            overrides_with = "include_dev",
+            alias = "no-dev"
+        )]
+        prod_only: bool,
     },
 
     /// Inspect and manage multi-ecosystem workspace stacks (Rust, Node, Go, Python, etc.)
@@ -261,12 +299,38 @@ pub struct BundleArgs {
     /// Omit packaging compiler toolchains into the bundle
     #[arg(long, default_value_t = false, overrides_with = "with_toolchain")]
     pub no_toolchain: bool,
+
+    /// Include development dependencies during resolution and toolchain detection
+    #[arg(long, default_value_t = true, overrides_with = "prod_only")]
+    pub include_dev: bool,
+
+    /// Exclude development dependencies (production/runtime-only closure)
+    #[arg(
+        long,
+        default_value_t = false,
+        overrides_with = "include_dev",
+        alias = "no-dev"
+    )]
+    pub prod_only: bool,
+
+    /// Compiler toolchain packaging profile: minimal (core runtime/build essentials) or full (adds first-party IDE/doc tools, headers, stdlib extras, and cross-targets; host-global package caches are always excluded—use --include-dev for project dev packages)
+    #[arg(long, value_enum, default_value_t = CliToolchainProfile::Minimal)]
+    pub toolchain_profile: CliToolchainProfile,
+
+    /// Allow exporting without failing if a required standalone runtime toolchain (e.g., Python) is missing on the export host
+    #[arg(long, default_value_t = false)]
+    pub allow_missing_toolchains: bool,
 }
 
 impl BundleArgs {
     /// Returns whether toolchain packaging is effectively enabled
     pub fn toolchain_enabled(&self) -> bool {
         self.with_toolchain && !self.no_toolchain
+    }
+
+    /// Returns whether development dependencies are included
+    pub fn include_dev_enabled(&self) -> bool {
+        self.include_dev && !self.prod_only
     }
 }
 
@@ -316,12 +380,38 @@ pub struct ExportArgs {
     /// Omit packaging compiler toolchains into the bundle
     #[arg(long, default_value_t = false, overrides_with = "with_toolchain")]
     pub no_toolchain: bool,
+
+    /// Include development dependencies during toolchain detection
+    #[arg(long, default_value_t = true, overrides_with = "prod_only")]
+    pub include_dev: bool,
+
+    /// Exclude development dependencies (production/runtime-only closure)
+    #[arg(
+        long,
+        default_value_t = false,
+        overrides_with = "include_dev",
+        alias = "no-dev"
+    )]
+    pub prod_only: bool,
+
+    /// Compiler toolchain packaging profile: minimal (core runtime/build essentials) or full (adds first-party IDE/doc tools, headers, stdlib extras, and cross-targets; host-global package caches are always excluded—use --include-dev for project dev packages)
+    #[arg(long, value_enum, default_value_t = CliToolchainProfile::Minimal)]
+    pub toolchain_profile: CliToolchainProfile,
+
+    /// Allow exporting without failing if a required standalone runtime toolchain (e.g., Python) is missing on the export host
+    #[arg(long, default_value_t = false)]
+    pub allow_missing_toolchains: bool,
 }
 
 impl ExportArgs {
     /// Returns whether toolchain packaging is effectively enabled
     pub fn toolchain_enabled(&self) -> bool {
         self.with_toolchain && !self.no_toolchain
+    }
+
+    /// Returns whether development dependencies are included
+    pub fn include_dev_enabled(&self) -> bool {
+        self.include_dev && !self.prod_only
     }
 }
 
@@ -360,6 +450,26 @@ pub struct ImportArgs {
     /// Run verification without sandbox isolation (NOT recommended)
     #[arg(long, default_value_t = false)]
     pub no_sandbox: bool,
+
+    /// Include development dependencies during toolchain validation
+    #[arg(long, default_value_t = true, overrides_with = "prod_only")]
+    pub include_dev: bool,
+
+    /// Exclude development dependencies (production/runtime-only closure)
+    #[arg(
+        long,
+        default_value_t = false,
+        overrides_with = "include_dev",
+        alias = "no-dev"
+    )]
+    pub prod_only: bool,
+}
+
+impl ImportArgs {
+    /// Returns whether development dependencies are included
+    pub fn include_dev_enabled(&self) -> bool {
+        self.include_dev && !self.prod_only
+    }
 }
 
 /// Shared command arguments for workspace execution under supervisor orchestration
@@ -380,6 +490,10 @@ pub struct RunArgs {
     /// Disable sandbox isolation and execute directly on host
     #[arg(long, default_value_t = false)]
     pub no_sandbox: bool,
+
+    /// Restrict macOS Seatbelt metadata (stat/lstat) reads strictly to workspace and store ancestor paths
+    #[arg(long, default_value_t = false)]
+    pub strict_metadata: bool,
 
     /// Custom primary command override (e.g., "npm run tauri dev")
     #[arg(short = 'c', long = "command")]
@@ -446,6 +560,24 @@ impl From<CliExportMode> for CoreExportMode {
             CliExportMode::Unified => CoreExportMode::Unified,
             CliExportMode::CodeOnly => CoreExportMode::CodeOnly,
             CliExportMode::DepsOnly => CoreExportMode::DepsOnly,
+        }
+    }
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CliToolchainProfile {
+    /// Minimal runtime/build toolchain closure (excludes dev tools, foreign targets, host global packages)
+    #[default]
+    Minimal,
+    /// Full discovered host toolchain distribution
+    Full,
+}
+
+impl From<CliToolchainProfile> for dmz_core::toolchain::ToolchainProfile {
+    fn from(profile: CliToolchainProfile) -> Self {
+        match profile {
+            CliToolchainProfile::Minimal => Self::Minimal,
+            CliToolchainProfile::Full => Self::Full,
         }
     }
 }

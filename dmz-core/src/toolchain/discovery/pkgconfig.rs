@@ -1,11 +1,12 @@
 use super::super::types::{DiscoveredToolchain, ToolchainEcosystem};
 use super::super::ToolchainError;
 use super::{
-    collect_files_recursive, push_system_bin_candidates, push_unique_path,
-    select_preferred_verified, ToolchainDiscoverer,
+    collect_files_recursive, is_macos_usr_bin_stub, push_system_bin_candidates, push_unique_path,
+    redact_home_prefix, resolve_prefix_root, select_strict_standalone_verified,
+    ToolchainDiscoverer,
 };
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use tracing::info;
 
 /// Discovers standalone pkg-config / pkgconf distributions.
@@ -18,49 +19,26 @@ impl ToolchainDiscoverer for PkgConfigDiscoverer {
     }
 
     fn discover(&self) -> Result<Option<DiscoveredToolchain>, ToolchainError> {
-        let mut candidates: Vec<PathBuf> = Vec::new();
-
-        if let Ok(root) = std::env::var("PKG_CONFIG_HOME") {
-            let p = PathBuf::from(root);
-            push_unique_path(&mut candidates, p.join("bin/pkg-config"));
-            push_unique_path(&mut candidates, p.join("bin/pkgconf"));
-            push_unique_path(&mut candidates, p.join("pkg-config"));
-        }
-
-        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-            let home_path = PathBuf::from(home);
-            push_unique_path(&mut candidates, home_path.join(".local/bin/pkgconf"));
-            push_unique_path(&mut candidates, home_path.join(".local/bin/pkg-config"));
-        }
-
-        push_unique_path(&mut candidates, PathBuf::from("/opt/pkgconf/bin/pkgconf"));
-        push_unique_path(
-            &mut candidates,
-            PathBuf::from("/opt/pkg-config/bin/pkg-config"),
-        );
-
-        push_system_bin_candidates(&mut candidates, "pkgconf");
-        push_system_bin_candidates(&mut candidates, "pkg-config");
-
-        candidates.retain(|c| c.exists());
+        let candidates = collect_pkgconfig_candidates();
         if candidates.is_empty() {
             return Ok(None);
         }
 
-        let Some((pkg_bin, version)) = select_preferred_verified(candidates, |candidate| {
-            let output = Command::new(candidate).arg("--version").output().ok()?;
-            if !output.status.success() {
-                return None;
-            }
-            let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            Some(format!("pkg-config {}", version_str))
-        }) else {
+        let Some((pkg_bin, version)) =
+            select_strict_standalone_verified(candidates, probe_pkgconfig_version)
+        else {
             return Ok(None);
         };
-        let root_dir = pkg_bin.parent().unwrap_or(Path::new("")).to_path_buf();
 
+        let Some(root_dir) = resolve_prefix_root(&pkg_bin) else {
+            return Ok(None);
+        };
+
+        let redacted_bin = redact_home_prefix(&pkg_bin);
+        let redacted_root = redact_home_prefix(&root_dir);
         info!(
-            pkg_config = ?pkg_bin,
+            pkg_config = %redacted_bin,
+            root = %redacted_root,
             version = %version,
             "Discovered standalone pkg-config distribution"
         );
@@ -84,6 +62,56 @@ impl ToolchainDiscoverer for PkgConfigDiscoverer {
             lib_files,
         }))
     }
+}
+
+fn collect_pkgconfig_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(root) = std::env::var_os("PKG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        let p = PathBuf::from(root);
+        push_unique_path(&mut candidates, p.join("bin/pkg-config"));
+        push_unique_path(&mut candidates, p.join("bin/pkgconf"));
+        push_unique_path(&mut candidates, p.join("pkg-config"));
+    }
+
+    if let Some(home) = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|v| !v.is_empty())
+    {
+        let home_path = PathBuf::from(home);
+        push_unique_path(&mut candidates, home_path.join(".local/bin/pkgconf"));
+        push_unique_path(&mut candidates, home_path.join(".local/bin/pkg-config"));
+    }
+
+    push_unique_path(&mut candidates, PathBuf::from("/opt/pkgconf/bin/pkgconf"));
+    push_unique_path(
+        &mut candidates,
+        PathBuf::from("/opt/pkg-config/bin/pkg-config"),
+    );
+
+    push_system_bin_candidates(&mut candidates, "pkgconf");
+    push_system_bin_candidates(&mut candidates, "pkg-config");
+
+    candidates.retain(|c| c.is_file());
+    candidates
+}
+
+fn probe_pkgconfig_version(candidate: &Path) -> Option<String> {
+    if is_macos_usr_bin_stub(candidate) || !candidate.is_file() {
+        return None;
+    }
+
+    let output = Command::new(candidate)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Some(format!("pkg-config {}", version_str))
 }
 
 #[cfg(test)]
@@ -132,5 +160,30 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_pkgconfig_prefix_resolution_and_homebrew_rejection() {
+        let brew = vec![
+            PathBuf::from("/opt/homebrew/bin/pkg-config"),
+            PathBuf::from("/usr/local/opt/pkgconf/bin/pkgconf"),
+        ];
+        assert_eq!(
+            select_strict_standalone_verified(brew, |_| Some("pkg-config 2.2.0".to_string())),
+            None
+        );
+
+        let temp = tempdir().unwrap();
+        let prefix = temp.path().join("pkgprefix");
+        let bin = prefix.join("bin");
+        let pc = prefix.join("lib/pkgconfig");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&pc).unwrap();
+        let pkg_bin = bin.join("pkg-config");
+        fs::write(&pkg_bin, "pkg").unwrap();
+
+        let resolved = resolve_prefix_root(&pkg_bin).unwrap();
+        assert_eq!(resolved, fs::canonicalize(&prefix).unwrap());
+        assert!(resolved.join("lib/pkgconfig").is_dir());
     }
 }

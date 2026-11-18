@@ -9,6 +9,7 @@ use tracing::{error, info};
 /// Bundle store items and dmz.lock into a portable air-gap archive (.tar.zst)
 pub fn run_export(args: ExportArgs) -> anyhow::Result<i32> {
     let with_toolchain = args.toolchain_enabled();
+    let include_dev = args.include_dev_enabled();
     let ws_canon =
         std::fs::canonicalize(&args.workspace).unwrap_or_else(|_| args.workspace.clone());
 
@@ -29,14 +30,15 @@ pub fn run_export(args: ExportArgs) -> anyhow::Result<i32> {
         args.output
     };
 
-    let multi_workspace = dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile(
-        &ws_canon,
-        &effective_lockfile,
-    );
+    let multi_workspace =
+        dmz_core::workspace::WorkspaceProjectConfig::discover_or_from_lockfile_scoped(
+            &ws_canon,
+            &effective_lockfile,
+        );
 
     let config = ExportConfig {
-        workspace_path: ws_canon,
-        lockfile_path: effective_lockfile,
+        workspace_path: ws_canon.clone(),
+        lockfile_path: effective_lockfile.clone(),
         store_dir: effective_store,
         output_path: effective_output,
         zstd_level: args.zstd_level,
@@ -45,7 +47,10 @@ pub fn run_export(args: ExportArgs) -> anyhow::Result<i32> {
         with_git_history: args.with_git_history,
         since: args.since,
         with_toolchain,
+        include_dev,
+        toolchain_profile: args.toolchain_profile.into(),
         multi_workspace,
+        allow_missing_toolchains: args.allow_missing_toolchains,
     };
 
     match AirGapExporter::export(&config) {
@@ -55,6 +60,11 @@ pub fn run_export(args: ExportArgs) -> anyhow::Result<i32> {
                 packages = manifest.package_count,
                 target_platform = ?manifest.target_platform,
                 "Air-gap export completed successfully"
+            );
+            super::notify_export_host_prerequisites(
+                &ws_canon,
+                &effective_lockfile,
+                manifest.target_platform.as_deref(),
             );
             Ok(0)
         }

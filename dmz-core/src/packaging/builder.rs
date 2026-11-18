@@ -318,7 +318,7 @@ impl PackageBuilder {
         lockfile: &DmzLockfile,
         workspace_root: &Path,
         epoch: u64,
-        output_dir: &Path,
+        _output_dir: &Path,
         stats: &mut PackStats,
     ) -> Result<(), BuildError> {
         info!(
@@ -339,26 +339,52 @@ impl PackageBuilder {
         stats.record_entry(closure_json.len() as u64)?;
 
         let store_root = workspace_root.join(".dmz").join("store");
+        let mut seen_store_paths = std::collections::HashSet::new();
         for (key, pkg) in &lockfile.packages {
+            if pkg.is_local_path() {
+                continue;
+            }
             info!(package = %key, sha256 = %pkg.sha256, "Archiving locked package entry");
-            let safe_pkg_name = pkg.name.replace('/', "__").replace('\\', "_");
-            let pkg_store_dir = store_root.join(&safe_pkg_name);
-            if pkg_store_dir.is_dir() {
-                Self::append_dir_filtered(
-                    tar,
-                    &pkg_store_dir,
-                    &Path::new("store").join(&safe_pkg_name),
-                    epoch,
-                    output_dir,
-                    0,
-                    stats,
-                )?;
-            } else {
-                warn!(
-                    package = %key,
-                    expected_dir = ?pkg_store_dir,
-                    "Locked package store directory not found in local workspace store"
-                );
+            match crate::install::locate_locked_store_artifact(&store_root, pkg) {
+                Ok(artifact_path) => {
+                    let safe_pkg_name = pkg.name.replace(['/', '\\'], "__");
+                    let file_name = artifact_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("package.archive");
+                    let normalized_path = format!("store/{}/{}", safe_pkg_name, file_name);
+                    if !seen_store_paths.insert(normalized_path.clone()) {
+                        continue;
+                    }
+                    let meta = fs::metadata(&artifact_path).map_err(|e| {
+                        BuildError::IoError(format!(
+                            "Failed to stat store artifact {:?}: {}",
+                            artifact_path, e
+                        ))
+                    })?;
+                    stats.record_entry(meta.len())?;
+                    let mut file = File::open(&artifact_path).map_err(|e| {
+                        BuildError::IoError(format!(
+                            "Failed to open store artifact {:?}: {}",
+                            artifact_path, e
+                        ))
+                    })?;
+                    let mut header = Self::create_normalized_header(meta.len(), 0o644, epoch)?;
+                    tar.append_data(&mut header, &normalized_path, &mut file)
+                        .map_err(|e| {
+                            BuildError::ArchiveError(format!(
+                                "Failed to pack store artifact {:?}: {}",
+                                artifact_path, e
+                            ))
+                        })?;
+                }
+                Err(e) => {
+                    warn!(
+                        package = %key,
+                        error = %e,
+                        "Locked package store artifact not found in local workspace store"
+                    );
+                }
             }
         }
 
@@ -419,14 +445,11 @@ impl PackageBuilder {
             let name_str = file_name.to_string_lossy();
 
             // Ignore VCS directories, heavy build caches, store dir, active output dir, and dist
-            if name_str == ".git"
-                || name_str == ".dmz"
-                || name_str == "node_modules"
-                || name_str == "target"
-                || name_str == ".dmz_cache"
-                || name_str == "dist"
-                || path == output_dir
-            {
+            if crate::workspace::should_skip_workspace_artifact_dir(
+                &path,
+                &name_str,
+                Some(output_dir),
+            ) {
                 continue;
             }
 

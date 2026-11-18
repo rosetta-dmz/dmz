@@ -92,6 +92,26 @@ pub struct ResolvedMemberLayout {
     pub member: WorkspaceMember,
 }
 
+/// Typed errors returned when loading or parsing `dmz-workspace.toml`.
+#[derive(Debug, thiserror::Error)]
+pub enum WorkspaceManifestError {
+    #[error(
+        "Failed to read {path}: {source}{}",
+        hint.as_ref().map(|h| format!(". Hint: {}", h)).unwrap_or_default()
+    )]
+    Read {
+        path: String,
+        #[source]
+        source: std::io::Error,
+        hint: Option<String>,
+    },
+    #[error("Invalid workspace manifest in {path}: {source}")]
+    Parse {
+        path: String,
+        #[source]
+        source: toml::de::Error,
+    },
+}
 /// Root configuration model representing `dmz-workspace.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -144,25 +164,23 @@ pub fn normalize_member_path(workspace_root: &Path, target: &Path) -> PathBuf {
         return target_canon;
     }
 
-    let mut common_len = 0;
-    while common_len < ws_components.len()
-        && common_len < target_components.len()
-        && ws_components[common_len] == target_components[common_len]
-    {
-        common_len += 1;
-    }
+    let common_len = ws_components
+        .iter()
+        .zip(target_components.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
 
     if common_len == 0 {
         return target_canon;
     }
 
     let mut rel = PathBuf::new();
-    for comp in &ws_components[common_len..] {
+    for comp in ws_components.iter().skip(common_len) {
         if matches!(comp, std::path::Component::Normal(_)) {
             rel.push("..");
         }
     }
-    for comp in &target_components[common_len..] {
+    for comp in target_components.iter().skip(common_len) {
         rel.push(comp.as_os_str());
     }
 
@@ -242,13 +260,18 @@ impl WorkspaceProjectConfig {
         toml::to_string_pretty(self)
     }
 
-    pub fn load_from_file(path: &Path) -> Result<Self, anyhow::Error> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
-        let config = Self::from_toml_str(&content).map_err(|e| {
-            anyhow::anyhow!("Invalid workspace manifest in {}: {}", path.display(), e)
+    pub fn load_from_file(path: &Path) -> Result<Self, WorkspaceManifestError> {
+        let content = fs::read_to_string(path).map_err(|e| {
+            format_manifest_read_error(
+                path,
+                e,
+                crate::diagnostics::DiagnosticError::is_in_dmz_sandbox(),
+            )
         })?;
-        Ok(config)
+        Self::from_toml_str(&content).map_err(|source| WorkspaceManifestError::Parse {
+            path: path.display().to_string(),
+            source,
+        })
     }
 
     pub fn save_to_file(&self, path: &Path) -> Result<(), anyhow::Error> {
@@ -258,6 +281,30 @@ impl WorkspaceProjectConfig {
         super::atomic::atomic_write_file(path, content)
             .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", path.display(), e))?;
         Ok(())
+    }
+}
+
+/// Constructs a typed [`WorkspaceManifestError::Read`] delegating `EPERM`/sandbox remediation to [`crate::diagnostics::DiagnosticError`].
+fn format_manifest_read_error(
+    path: &Path,
+    err: std::io::Error,
+    in_sandbox: bool,
+) -> WorkspaceManifestError {
+    #[cfg(unix)]
+    let is_eperm = err.raw_os_error() == Some(libc::EPERM);
+    #[cfg(not(unix))]
+    let is_eperm = false;
+
+    let hint = if err.kind() == std::io::ErrorKind::PermissionDenied || is_eperm {
+        Some(crate::diagnostics::DiagnosticError::eperm_remediation(in_sandbox).to_string())
+    } else {
+        None
+    };
+
+    WorkspaceManifestError::Read {
+        path: path.display().to_string(),
+        source: err,
+        hint,
     }
 }
 
@@ -375,5 +422,34 @@ name = "minimal-app"
             PathBuf::from("../sidecar")
         );
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_format_manifest_read_error_eperm_hints() {
+        let path = Path::new("./dmz-workspace.toml");
+
+        let sandbox_err =
+            format_manifest_read_error(path, std::io::Error::from_raw_os_error(libc::EPERM), true);
+        let sandbox_msg = sandbox_err.to_string();
+        assert!(sandbox_msg.contains("Failed to read ./dmz-workspace.toml"));
+        assert!(sandbox_msg.contains("DMZ_SANDBOX=1"));
+        assert!(sandbox_msg.contains("unsandboxed"));
+
+        let diag = crate::diagnostics::DiagnosticError::classify(&sandbox_err);
+        assert_eq!(
+            diag.category,
+            crate::diagnostics::ErrorCategory::PermissionDenied
+        );
+
+        let host_err =
+            format_manifest_read_error(path, std::io::Error::from_raw_os_error(libc::EPERM), false)
+                .to_string();
+        assert!(host_err.contains("Failed to read ./dmz-workspace.toml"));
+        assert!(host_err.contains("EPERM"));
+        if cfg!(target_os = "macos") {
+            assert!(host_err.contains("Privacy & Security"));
+            assert!(host_err.contains("~/workspaces/"));
+        }
     }
 }

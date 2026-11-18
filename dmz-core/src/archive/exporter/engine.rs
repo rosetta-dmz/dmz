@@ -5,7 +5,6 @@ use super::packaging::{
     resolve_deterministic_epoch,
 };
 use super::types::{AirGapManifest, DeltaBaseInfo, ExportConfig, ExportError, ExportMode};
-use crate::ecosystem::EcosystemRegistry;
 use crate::resolver::lockfile::DmzLockfile;
 use crate::vcs::{GitProvider, VcsProvenance};
 use crate::workspace::WorkspaceProjectConfig;
@@ -157,27 +156,36 @@ impl AirGapExporter {
             }
         }
 
-        // Automatically discover active workspace ecosystems & gather generalized caches
-        let registry = EcosystemRegistry::new();
-
-        let detected_stacks = registry
-            .process_workspace(&workspace_root)
-            .map_err(|e| ExportError::ArchiveError(format!("Ecosystem discovery failed: {}", e)))?;
-
-        info!(
-            stacks = ?detected_stacks,
-            "Discovered active workspace ecosystems"
-        );
-
-        let cache_paths = registry.gather_all_caches(&workspace_root);
-        info!(
-            caches = ?cache_paths,
-            "Gathered generalized ecosystem cache paths for archiving"
-        );
-
         // Verify dmz.lock integrity before exporting
         let mut lockfile = DmzLockfile::load_and_verify(&effective_lockfile)
             .map_err(|e| ExportError::LockfileError(e.to_string()))?;
+
+        // Detect Multi-Workspace Configuration early so export can verify lockfile completeness
+        // against declared Cargo manifests/Cargo.lock (matching Nix/Bazel completeness invariants).
+        let (ws_project_opt, manifest_path_opt) = match config.multi_workspace.clone() {
+            Some(cfg) => (Some(cfg), None),
+            None => WorkspaceProjectConfig::discover_workspace_manifest_scoped(&workspace_root)
+                .map(|(cfg, p)| (Some(cfg), Some(p)))
+                .unwrap_or((None, None)),
+        };
+
+        if (config.mode == ExportMode::Unified || config.mode == ExportMode::DepsOnly)
+            && config.target_platform.is_none()
+            && lockfile.target_platform.is_none()
+        {
+            let effective_include_dev = lockfile.include_dev.unwrap_or(config.include_dev);
+            if let Some(missing_msg) = lockfile.find_missing_cargo_requirement(
+                &workspace_root,
+                None,
+                effective_include_dev,
+                ws_project_opt.as_ref(),
+            ) {
+                return Err(ExportError::LockfileError(format!(
+                    "{}. Run 'dmz bundle' / 'Scan & Resolve' before exporting.",
+                    missing_msg
+                )));
+            }
+        }
 
         // Synchronize lockfile VCS provenance if not already set
         if lockfile.vcs.is_none() && vcs_provenance.is_some() {
@@ -218,7 +226,7 @@ impl AirGapExporter {
             .map_err(|e| ExportError::ArchiveError(format!("Failed to initialize zstd: {}", e)))?;
 
         let workers = std::thread::available_parallelism()
-            .map(|n| n.get() as u32)
+            .map(|n| u32::try_from(n.get()).unwrap_or(16))
             .unwrap_or(4)
             .clamp(1, 16);
         let _ = zstd_encoder.multithread(workers);
@@ -235,7 +243,9 @@ impl AirGapExporter {
 
         // Append store items (if mode is Unified or DepsOnly)
         let mut packed_count = 0;
+        let mut packed_pypi_artifacts: Vec<(String, PathBuf)> = Vec::new();
         if config.mode == ExportMode::Unified || config.mode == ExportMode::DepsOnly {
+            let mut packed_store_rel_paths: HashSet<PathBuf> = HashSet::new();
             for pkg_info in lockfile.packages.values() {
                 // Skip local path dependencies/workspace members since they are in the workspace source
                 if pkg_info.is_local_path() {
@@ -243,48 +253,76 @@ impl AirGapExporter {
                 }
 
                 let safe_pkg_name = pkg_info.name.replace('/', "__");
-
-                let pkg_store_path = effective_store.join(&safe_pkg_name);
-                if pkg_store_path.exists() {
-                    let archive_dest = Path::new("store").join(&safe_pkg_name);
-                    if pkg_store_path.is_dir() {
-                        append_dir_all(
-                            &mut tar_builder,
-                            &pkg_store_path,
-                            &archive_dest,
-                            false,
-                            deterministic_epoch,
-                        )?;
-                    } else {
-                        let normalized_dest = archive_dest.to_string_lossy().replace('\\', "/");
-                        append_file_normalized(
-                            &mut tar_builder,
-                            &pkg_store_path,
-                            &normalized_dest,
-                            deterministic_epoch,
-                        )?;
+                let resolved_artifact = match crate::install::locate_locked_store_artifact(
+                    &effective_store,
+                    pkg_info,
+                ) {
+                    Ok(path) => path,
+                    Err(crate::install::InstallError::ArtifactMissing { path, .. }) => {
+                        let flat_fallback = effective_store.join(&safe_pkg_name);
+                        if flat_fallback.is_file() {
+                            flat_fallback
+                        } else {
+                            return Err(ExportError::ArchiveError(format!(
+                                    "Missing store artifact for locked package '{}@{}' at {:?}. Run 'dmz fetch' before exporting.",
+                                    pkg_info.name, pkg_info.version, path
+                                )));
+                        }
                     }
-                    packed_count += 1;
-                } else {
-                    return Err(ExportError::ArchiveError(format!(
-                        "Missing store artifact for locked package '{}@{}' at {:?}. Run 'dmz fetch' before exporting.",
-                        pkg_info.name, pkg_info.version, pkg_store_path
-                    )));
+                    Err(e) => {
+                        return Err(ExportError::ArchiveError(e.to_string()));
+                    }
+                };
+
+                if pkg_info.sha256.len() == 64
+                    && pkg_info.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+                {
+                    let computed_sha = hash_file_sha256(&resolved_artifact)
+                        .map_err(|e| ExportError::IoError(e.to_string()))?;
+                    if computed_sha != pkg_info.sha256 {
+                        return Err(ExportError::ArchiveError(format!(
+                            "Store artifact checksum mismatch for '{}@{}': expected {}, got {}",
+                            pkg_info.name, pkg_info.version, pkg_info.sha256, computed_sha
+                        )));
+                    }
                 }
+
+                let rel_in_store = resolved_artifact
+                    .strip_prefix(&effective_store)
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|_| {
+                        let fname = resolved_artifact
+                            .file_name()
+                            .map(|f| f.to_os_string())
+                            .unwrap_or_else(|| {
+                                format!("{}-{}.archive", safe_pkg_name, pkg_info.version).into()
+                            });
+                        PathBuf::from(&safe_pkg_name).join(fname)
+                    });
+
+                if !packed_store_rel_paths.insert(rel_in_store.clone()) {
+                    continue;
+                }
+
+                let archive_dest = Path::new("store").join(&rel_in_store);
+                let normalized_dest = archive_dest.to_string_lossy().replace('\\', "/");
+                append_file_normalized(
+                    &mut tar_builder,
+                    &resolved_artifact,
+                    &normalized_dest,
+                    deterministic_epoch,
+                )?;
+                if pkg_info.ecosystem == crate::resolver::manifest::Ecosystem::PyPI {
+                    packed_pypi_artifacts.push((pkg_info.name.clone(), resolved_artifact));
+                }
+                packed_count += 1;
             }
         }
 
-        // Detect Multi-Workspace Configuration
-        let (ws_project_opt, manifest_path_opt) = match config.multi_workspace.clone() {
-            Some(cfg) => (Some(cfg), None),
-            None => WorkspaceProjectConfig::discover_workspace_manifest(&workspace_root)
-                .map(|(cfg, p)| (Some(cfg), Some(p)))
-                .unwrap_or((None, None)),
-        };
-
         let mut final_ws_project = None;
 
-        // Append workspace source code (if mode is Unified or CodeOnly)
+        // Append workspace source code (if mode is Unified or CodeOnly), or embed normalized
+        // `dmz-workspace.toml` for DepsOnly multi-workspace archives so imports retain member routing.
         if config.mode == ExportMode::Unified || config.mode == ExportMode::CodeOnly {
             if let Some(ref ws_project) = ws_project_opt {
                 // --- MULTI-WORKSPACE UMBRELLA EXPORT ---
@@ -328,6 +366,35 @@ impl AirGapExporter {
                     }
                 }
             }
+        } else if let Some(ref ws_project) = ws_project_opt {
+            let layouts =
+                ws_project.resolve_member_layouts(&workspace_root, manifest_path_opt.as_deref());
+            let mut normalized_project = ws_project.clone();
+            for (idx, m) in normalized_project.members.iter_mut().enumerate() {
+                if let Some(layout) = layouts.get(idx) {
+                    m.path = layout.archive_path.clone();
+                }
+            }
+            if let Ok(toml_str) = normalized_project.to_toml_string() {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(toml_str.len() as u64);
+                header.set_mode(0o644);
+                header.set_mtime(deterministic_epoch);
+                header.set_uid(0);
+                header.set_gid(0);
+                let _ = header.set_username("");
+                let _ = header.set_groupname("");
+                header.set_cksum();
+                tar_builder
+                    .append_data(&mut header, "dmz-workspace.toml", toml_str.as_bytes())
+                    .map_err(|e| {
+                        ExportError::ArchiveError(format!(
+                            "Failed to embed dmz-workspace.toml in DepsOnly archive: {}",
+                            e
+                        ))
+                    })?;
+            }
+            final_ws_project = Some(normalized_project);
         }
 
         // Append Git Bundle if requested (`--with-git-history`)
@@ -360,15 +427,37 @@ impl AirGapExporter {
             }
         }
 
+        let host_platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+        let target_platform = config
+            .target_platform
+            .clone()
+            .or_else(|| lockfile.target_platform.clone())
+            .or_else(|| config.with_toolchain.then_some(host_platform));
+
+        if let Some(note) = crate::toolchain::export_apple_prereq_note(
+            &workspace_root,
+            Some(&lockfile),
+            target_platform.as_deref(),
+        ) {
+            info!("{}", note);
+        }
+
         // Package active host toolchains if requested (`--with-toolchain`)
         let mut toolchain_manifest_entries = Vec::new();
         if config.with_toolchain {
             info!("Initiating host toolchain discovery and packaging");
-            match crate::toolchain::ToolchainPackager::package_toolchains_with_epoch(
+            match crate::toolchain::ToolchainPackager::package_toolchains_with_options_and_project_checked(
                 &workspace_root,
                 Some(&lockfile),
+                ws_project_opt.as_ref(),
                 &mut tar_builder,
                 deterministic_epoch,
+                crate::toolchain::ToolchainDetectOptions {
+                    include_dev: config.include_dev,
+                },
+                config.toolchain_profile,
+                target_platform.as_deref(),
+                config.allow_missing_toolchains,
             ) {
                 Ok(entries) => {
                     info!(
@@ -378,6 +467,8 @@ impl AirGapExporter {
                     toolchain_manifest_entries = entries;
                 }
                 Err(e) => {
+                    drop(tar_builder);
+                    let _ = fs::remove_file(&effective_output);
                     return Err(ExportError::ArchiveError(format!(
                         "Toolchain packaging failed: {}",
                         e
@@ -386,12 +477,17 @@ impl AirGapExporter {
             }
         }
 
-        let host_platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-        let target_platform = config
-            .target_platform
-            .clone()
-            .or_else(|| lockfile.target_platform.clone())
-            .or_else(|| config.with_toolchain.then_some(host_platform));
+        if let Err(err) = validate_exported_python_closure(
+            &workspace_root,
+            ws_project_opt.as_ref(),
+            &toolchain_manifest_entries,
+            &packed_pypi_artifacts,
+            target_platform.as_deref(),
+        ) {
+            drop(tar_builder);
+            let _ = fs::remove_file(&effective_output);
+            return Err(err);
+        }
 
         // Write air-gap manifest header
         let manifest = AirGapManifest {
@@ -497,4 +593,43 @@ impl AirGapExporter {
     pub fn calculate_file_sha256(path: &Path) -> Result<String, std::io::Error> {
         hash_file_sha256(path)
     }
+}
+
+fn validate_exported_python_closure(
+    workspace_root: &Path,
+    ws_project_opt: Option<&WorkspaceProjectConfig>,
+    toolchain_entries: &[crate::toolchain::ToolchainManifestEntry],
+    packed_pypi_artifacts: &[(String, PathBuf)],
+    target_platform: Option<&str>,
+) -> Result<(), ExportError> {
+    if packed_pypi_artifacts.is_empty() {
+        return Ok(());
+    }
+
+    let bundled_py_abi = toolchain_entries
+        .iter()
+        .find(|tc| tc.ecosystem == crate::toolchain::ToolchainEcosystem::Python)
+        .and_then(|tc| crate::toolchain::PythonTargetAbi::parse_runtime_spec(&tc.version));
+
+    let target_abi = bundled_py_abi.or_else(|| {
+        let member_roots = crate::toolchain::ToolchainDetector::collect_workspace_member_dirs(
+            workspace_root,
+            ws_project_opt,
+        );
+        crate::toolchain::discovery::python::resolve_workspace_python_minor(
+            Some(workspace_root),
+            &member_roots,
+        )
+        .map(|(maj, min)| crate::toolchain::PythonTargetAbi::new(maj, min, false))
+    });
+
+    let (target_os, _) = crate::workspace::resolve_target_os_arch(target_platform);
+    crate::toolchain::PythonTargetAbi::verify_bundle_python_closure(
+        packed_pypi_artifacts
+            .iter()
+            .map(|(name, path)| (name.as_str(), path.as_path())),
+        target_abi,
+        target_os,
+    )
+    .map_err(ExportError::ArchiveError)
 }

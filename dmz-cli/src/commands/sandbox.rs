@@ -1,5 +1,8 @@
 use crate::cli::DEFAULT_STORE_PATH;
-use dmz_sandbox::platform::{run_sandboxed, SandboxConfig};
+use dmz_sandbox::platform::{
+    run_sandboxed_with_options, MetadataReadMode, SandboxConfig, SandboxIsolationMode,
+    SandboxPolicyOptions,
+};
 use std::path::PathBuf;
 use tracing::{error, info};
 
@@ -10,6 +13,8 @@ pub fn run_sandbox(
     sidecar: Option<PathBuf>,
     closure: PathBuf,
     allow_network: bool,
+    strict_kernel: bool,
+    strict_metadata: bool,
     diagnose: bool,
     exec_command: String,
     args: Vec<String>,
@@ -53,6 +58,10 @@ pub fn run_sandbox(
         }
     }
 
+    if let Err(e) = dmz_core::toolchain::verify_apple_prereq_for_workspace(&ws_canon, None) {
+        eprintln!("\x1b[33m[DMZ PREREQUISITE WARNING]\x1b[0m {}", e);
+    }
+
     info!(
         workspace = ?ws_canon,
         closure = ?effective_closure,
@@ -80,7 +89,23 @@ pub fn run_sandbox(
         ipc_socket_path,
     };
 
-    match run_sandboxed(&config) {
+    let isolation_mode = if strict_kernel {
+        SandboxIsolationMode::StrictKernel
+    } else {
+        SandboxIsolationMode::BestEffort
+    };
+    let metadata_mode = if strict_metadata {
+        MetadataReadMode::StrictAncestors
+    } else {
+        MetadataReadMode::Global
+    };
+    let options = SandboxPolicyOptions {
+        isolation_mode,
+        metadata_mode,
+        ..SandboxPolicyOptions::default()
+    };
+
+    match run_sandboxed_with_options(&config, &options) {
         Ok(status) => {
             if let Some(code) = status.code() {
                 return Ok(code);

@@ -11,6 +11,7 @@ DMZ provides a robust, self-contained CLI for orchestrating zero-dependency sand
 | [`dmz init`](#workspace-initialization-dmz-init) | Initializes project workspace for DMZ capture and generates `dmz.lock` |
 | [`dmz bundle`](#air-gap-bundling-dmz-bundle) | One-shot resolution, dependency fetching, and export into an air-gap bundle (`.tar.zst`) |
 | [`dmz import`](#importing--verifying-an-air-gap-bundle-dmz-airgap-import) | Cryptographically verifies and unpacks an air-gap archive into target workspace & store |
+| [`dmz run`](#supervised-multi-repo-launch-dmz-run) | Launches dual-repo / companion workspace members under coordinated KEP-753 IPC supervision |
 | [`dmz shell`](#sandboxed-shell-dmz-shell) | Opens an interactive terminal inside a daemonless sandbox in the workspace |
 | [`dmz resolve`](#resolving-dependencies-dmz-resolve) | Scans workspace manifests and generates a deterministic `dmz.lock` closure |
 | [`dmz fetch`](#fetching-dependencies-dmz-fetch) | Downloads and caches locked package artifacts into the local secure store |
@@ -35,7 +36,10 @@ dmz resolve [OPTIONS]
 
 #### **Options**
 * `-w, --workspace <PATH>` — Path to project workspace root. *(Default: `.`)*
+* `--sidecar <PATH>` — Path to companion sidecar workspace root *(optional dual-repo mode)*.
 * `-o, --output <PATH>` — Destination path for generated lockfile. *(Default: `dmz.lock`)*
+* `-t, --target <TARGET>` — Target platform specification (e.g., `macos-arm64`, `linux-x86_64`). Prunes foreign platform dependencies and markers.
+* `--include-dev` — Include development dependencies (`devDependencies`, `dev-dependencies`, optional test/lint extras). By default only runtime and build dependencies are locked.
 * `-v, --verbose` — Enable verbose debug logging output.
 
 #### **Example**
@@ -86,7 +90,7 @@ dmz install [OPTIONS]
 | **Cargo (Rust)** | `.cargo/vendor/<pkg>-<version>/` | `.cargo/config.toml` (pointing to vendored source), `.cargo-checksum.json` |
 | **npm / Classic Yarn** | `node_modules/<pkg>/` | Automatically flattens nested `package/` directories to locate `package.json` |
 | **pnpm** | `node_modules/.pnpm/<pkg>@<ver>/` | Content-addressable virtual store directory and symlinked `node_modules/<pkg>` |
-| **Python (PyPI)** | `.dmz/venv/lib/python3.11/site-packages/` | Fully unpacked package files preserving `.dist-info` and metadata |
+| **Python (PyPI)** | `.dmz/venv/lib/<py_ver>/site-packages/` *(single copy)* | Unpacked once into `.dmz/venv` and exposed to `.venv/` via `dmz_store.pth` and `PYTHONPATH` shims (no duplicate site-packages copies) |
 | **Go** | `vendor/<pkg>/` | Unpacked module files and auto-maintained `vendor/modules.txt` |
 | **PHP Composer** | `vendor/<pkg>/` | Unpacked Composer vendor directory layout |
 | **Ruby Bundler** | `vendor/bundle/<pkg>/` | Unpacked gems with `.bundle/config` configuring frozen local execution |
@@ -165,7 +169,11 @@ dmz bundle [OPTIONS]
 * `-o, --output <PATH>` — Destination path for generated output archive. *(Default: `dist/workspace_closure.tar.zst`)*
 * `--mode <MODE>` — Export mode: `unified` (code + dependencies), `code-only`, or `deps-only`. *(Default: `unified`)*
 * `--zstd-level <LEVEL>` — Zstandard compression level from `1` to `22`. *(Default: `3`)*
-* `--with-toolchain` — Automatically captures host compiler runtimes (Rust `cargo`/`rustc`, Node.js, Python, Go, PHP, Ruby) directly into the bundle for true zero-dependency target execution.
+* `-t, --target <TARGET>` — Target platform specification (e.g., `macos-arm64`, `linux-x86_64`).
+* `--with-toolchain` — Automatically captures standalone provider compiler runtimes (Rust `cargo`/`rustc`, Node.js, Python, Go, PHP, Ruby) directly into the bundle for true zero-dependency target execution. Fails export if a required primary runtime (such as standalone Python via `python.org` or `uv python install`) cannot be found unless `--allow-missing-toolchains` or `--no-toolchain` is passed.
+* `--allow-missing-toolchains` — Permits `export`/`bundle` to warn and omit missing host standalone runtimes instead of failing.
+* `--toolchain-profile <minimal|full>` — First-party compiler toolchain closure profile: `minimal` (default) packages core compiler/runtime, host/target sysroots, and the lockfile's package manager while stripping IDE/dev tools (`rustdoc`, `rust-analyzer`, `cargo-clippy`), foreign cross-targets, and unused package managers; `full` adds first-party toolchain extras (`rust-analyzer`, `clippy`, `rustdoc`, `ctest`, `cpack`, headers, stdlib extras, cross-targets, and official Node package managers). Host-global package caches (`site-packages`, `dist-packages`, non-manager `node_modules`, Ruby `gems`/`site_ruby`, PEAR/PECL) are excluded in **both** profiles; third-party runtime/dev packages belong in `dmz.lock` (`--include-dev`).
+* `--include-dev` — Include project development dependencies (`devDependencies`, `dev-dependencies`, test/lint extras) from workspace manifests in `dmz.lock` and toolchain detection. *(Default: `false`)*
 * `--with-git-history` — Archives a deterministic Git bundle v2 file (`workspace.bundle`) alongside the closure.
 * `--since <REF>` — Baseline commit, ref, or previous manifest/bundle for incremental delta export.
 * `--refresh-lock` — Force re-resolving dependency manifests even if `dmz.lock` already exists.
@@ -197,7 +205,11 @@ dmz airgap export [OPTIONS]
 * `-o, --output <PATH>` — Destination path for generated `.tar.zst` archive. *(Default: `dist/airgap_bundle.tar.zst`)*
 * `--mode <MODE>` — Export mode: `unified` (code + dependencies), `code-only`, or `deps-only`. *(Default: `unified`)*
 * `--zstd-level <LEVEL>` — Zstandard compression level from `1` to `22`. *(Default: `3`)*
-* `--with-toolchain` — Package active compiler toolchains (cargo, rustc, node, go, python, php, ruby) into bundle.
+* `-t, --target <TARGET>` — Target platform specification (e.g., `macos-arm64`, `linux-x86_64`).
+* `--with-toolchain` — Package active compiler toolchains (cargo, rustc, node, go, python, php, ruby) into bundle. Fails if a required primary runtime cannot be discovered on the export host unless `--allow-missing-toolchains` is passed.
+* `--allow-missing-toolchains` — Permits exporting with a warning if a required standalone runtime toolchain is unavailable on the export host.
+* `--toolchain-profile <minimal|full>` — First-party compiler toolchain closure profile (`minimal` by default, or `full` for extra first-party IDE/doc tools, headers, stdlib extras, cross-targets, and official package managers). Host-global package caches are excluded in **both** profiles; third-party packages belong in `dmz.lock` (`--include-dev`).
+* `--include-dev` — Include development dependencies during toolchain detection (pair with a `dmz.lock` resolved with `--include-dev`). *(Default: `false`)*
 * `--with-git-history` — Archive deterministic Git bundle alongside closure.
 * `--since <REF>` — Baseline commit, ref, or previous manifest/bundle for incremental delta export.
 * `-v, --verbose` — Enable verbose debug logging output.
@@ -220,9 +232,10 @@ dmz airgap export \
 Cryptographically validates the archive SHA-256 and internal `dmz.lock` closure signature, unpacks store packages into the target store, and extracts project source code into the specified workspace destination directory.
 
 When toolchains are bundled (`--with-toolchain`):
+- Enforces **Root Manifest Dominance**: validates declared workspace ecosystems (respecting `--include-dev`) and purges any unrequested `.dmz/toolchains/<ecosystem>/` directories or unreferenced store artifacts.
 - Extracted automatically to `<workspace>/.dmz/toolchains/<ecosystem>/` with executable (`0o755`) permissions.
 - Runs `xattr -cr` across `.dmz/toolchains` on macOS to eliminate Gatekeeper / quarantine restrictions.
-- Generates `.dmz/env.sh` (Unix/macOS) and `.dmz/env.bat` (Windows) activator scripts that prepend `.dmz/toolchains/*/bin` to `$PATH` and configure `CARGO_HOME`, `RUSTUP_HOME`, `GOROOT`, and `PYTHONHOME`.
+- Generates `.dmz/env.sh` (Unix/macOS) and `.dmz/env.bat` (Windows) activator scripts that prepend `.venv/bin` (when present) and `.dmz/toolchains/*/bin` to `$PATH`, unset stale `PYTHONHOME`, expose `.venv` / `.dmz/venv` `site-packages` on `PYTHONPATH`, and configure `CARGO_HOME`, `RUSTUP_HOME`, and `GOROOT`.
 - Injected automatically into subsequent `dmz shell` and `dmz sandbox` sessions.
 
 ```bash
@@ -232,9 +245,15 @@ dmz import [OPTIONS] --archive <ARCHIVE>
 #### **Options**
 * `-a, --archive <PATH>` — Path to the `.tar.zst` air-gap bundle. **[Required]**
 * `-s, --store <PATH>` — Target directory for the offline dependency store. *(Default: `.dmz/store`)*
-* `-w, --workspace <PATH>` — Destination directory for extracted workspace source code and manifests. *(Default: `workspace`)*
+* `-t, --to, --workspace <PATH>` — Destination directory for extracted workspace source code and manifests. *(Default: `workspace`)*
+* `--include-dev` — Include development dependencies during post-import toolchain validation. *(Default: `false`)*
 * `--skip-verify` — Skips closure hash verification *(NOT recommended for production environments)*.
+* `--skip-install` — Skips automatic offline dependency installation into the workspace.
+* `--skip-ecosystem-verify` — Skips the automatic post-import sandboxed ecosystem verification check.
+* `--no-sandbox` — Runs post-import ecosystem verification unsandboxed on the host *(NOT recommended)*.
 * `-v, --verbose` — Enable verbose debug logging output.
+
+Upon completion, `dmz import` prints a **Next steps** block tailored to the imported workspace (`dmz run --workspace .` from the host shell and `code <name>.code-workspace` for dual-repo bundles, or `source .dmz/env.sh` / `dmz shell` for single-repo bundles).
 
 #### **Examples**
 
@@ -284,6 +303,8 @@ dmz sandbox [OPTIONS] -- <COMMAND> [ARGS...]
 * `-w, --workspace <PATH>` — Workspace directory context mounted R/W. *(Default: `.`)*
 * `-c, --closure <PATH>` — Dependency closure store mounted R/O. *(Default: `/nix/store`)*
 * `--allow-network` — Permits outbound network connections *(Default: `false` for complete isolation)*.
+* `--strict-kernel` — Fails closed unless OS kernel confinement enforces network policy.
+* `--strict-metadata` — Restricts macOS Seatbelt metadata (`stat`/`lstat`) reads strictly to workspace, store, and IPC ancestor `literal` paths instead of Bazel-style global metadata access.
 * `--diagnose` — Enables automated error classification to differentiate platform faults from user code faults.
 
 #### **Examples**
@@ -313,6 +334,7 @@ dmz shell [OPTIONS] [ARGS...]
 * `-c, --command <CMD>` — Execute a command string in the shell and exit.
 * `--allow-network` — Permits outbound network connections inside the sandbox *(Default: `false` for complete air-gap isolation)*.
 * `--no-sandbox` — Disables sandbox process isolation and executes directly on the host with DMZ environment variables exported.
+* `--strict-metadata` — Restricts macOS Seatbelt metadata (`stat`/`lstat`) reads strictly to workspace, store, and IPC ancestor `literal` paths instead of Bazel-style global metadata access.
 
 #### **Examples**
 
@@ -329,6 +351,26 @@ dmz shell --allow-network
 # Open unsandboxed shell on the host with DMZ environment variables loaded
 dmz shell --no-sandbox
 ```
+
+---
+
+### Supervised Multi-Repo Launch (`dmz run`)
+
+Launches primary and companion sidecar workspace members declared in `dmz-workspace.toml` (or passed via `--sidecar`) under KEP-753 lifecycle supervision with local Unix socket IPC (`DMZ_SIDECAR_SOCK`).
+
+> **Host Shell Requirement:** Always run `dmz run` from your host shell, not nested inside `dmz shell` or `dmz sandbox` (`DMZ_SANDBOX=1`).
+
+```bash
+dmz run [OPTIONS]
+```
+
+#### **Options**
+* `-w, --workspace <PATH>` — Path to project workspace root or umbrella directory. *(Default: `.`)*
+* `--sidecar <PATH>` — Optional companion workspace root override.
+* `--allow-network` — Permits outbound network connections inside member sandboxes.
+* `--no-sandbox` — Disables sandbox isolation and runs members directly on the host under supervision.
+* `--strict-metadata` — Restricts macOS Seatbelt metadata (`stat`/`lstat`) reads strictly to workspace, store, and IPC ancestor `literal` paths instead of Bazel-style global metadata access.
+* `-c, --command <CMD>` — Custom primary command override (e.g. `"npm run tauri dev"`).
 
 ---
 

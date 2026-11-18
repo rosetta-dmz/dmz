@@ -1,7 +1,7 @@
 use super::types::{DependencySpec, Ecosystem, ManifestError, ManifestInfo};
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct CargoManifestScanner;
 
@@ -165,4 +165,178 @@ impl CargoManifestScanner {
 
         dependencies
     }
+
+    /// Collects external (non-`path:`) Cargo crate names directly declared in `cargo_dir/Cargo.toml`
+    /// and any declared `[workspace].members`, across `[dependencies]`, `[build-dependencies]`,
+    /// target-specific tables, and optionally `[dev-dependencies]`.
+    pub fn collect_direct_crate_names(cargo_dir: &Path, include_dev: bool) -> Vec<String> {
+        Self::collect_direct_crate_names_with_targets(cargo_dir, include_dev, true)
+    }
+
+    /// Variant of [`Self::collect_direct_crate_names`] allowing callers with a single
+    /// `--target` lockfile to validate unconditional dependencies without false-positiving
+    /// on foreign `[target.<cfg>.dependencies]` tables.
+    pub fn collect_direct_crate_names_with_targets(
+        cargo_dir: &Path,
+        include_dev: bool,
+        include_target_tables: bool,
+    ) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut manifests = vec![cargo_dir.to_path_buf()];
+        let mut ws_members: Vec<PathBuf> =
+            crate::workspace::discovery::discover_cargo_workspace_member_dirs(cargo_dir)
+                .into_iter()
+                .collect();
+        ws_members.sort();
+        for m in ws_members {
+            if !manifests.contains(&m) {
+                manifests.push(m);
+            }
+        }
+
+        let mut workspace_deps = Self::load_workspace_dependencies(cargo_dir);
+        for manifest_dir in manifests {
+            let cargo_toml = manifest_dir.join("Cargo.toml");
+            let Ok(content) = fs::read_to_string(&cargo_toml) else {
+                continue;
+            };
+            let Ok(root_val) = toml::from_str::<toml::Value>(&content) else {
+                continue;
+            };
+            Self::merge_workspace_deps(&root_val, &mut workspace_deps);
+
+            let mut push_table = |tbl: Option<&toml::Value>| {
+                for dep in Self::extract_dependencies(tbl, &workspace_deps) {
+                    if !dep.version_req.starts_with("path:") && !names.contains(&dep.name) {
+                        names.push(dep.name);
+                    }
+                }
+            };
+
+            push_table(root_val.get("dependencies"));
+            push_table(root_val.get("build-dependencies"));
+            if include_dev {
+                push_table(root_val.get("dev-dependencies"));
+            }
+            if include_target_tables {
+                if let Some(targets) = root_val.get("target").and_then(|t| t.as_table()) {
+                    for target_tbl in targets.values() {
+                        push_table(target_tbl.get("dependencies"));
+                        push_table(target_tbl.get("build-dependencies"));
+                        if include_dev {
+                            push_table(target_tbl.get("dev-dependencies"));
+                        }
+                    }
+                }
+            }
+        }
+        names
+    }
+
+    fn merge_workspace_deps(
+        toml_val: &toml::Value,
+        workspace_deps: &mut HashMap<String, toml::Value>,
+    ) {
+        if let Some(ws_deps) = toml_val
+            .get("workspace")
+            .and_then(|w| w.get("dependencies"))
+            .and_then(|d| d.as_table())
+        {
+            for (name, val) in ws_deps {
+                workspace_deps
+                    .entry(name.clone())
+                    .or_insert_with(|| val.clone());
+            }
+        }
+    }
+
+    fn load_workspace_dependencies(cargo_dir: &Path) -> HashMap<String, toml::Value> {
+        let mut deps = HashMap::new();
+        let mut cursor = Some(cargo_dir);
+        while let Some(dir) = cursor {
+            let candidate = dir.join("Cargo.toml");
+            if candidate.is_file() {
+                if let Ok(content) = fs::read_to_string(&candidate) {
+                    if let Ok(parsed) = toml::from_str::<toml::Value>(&content) {
+                        Self::merge_workspace_deps(&parsed, &mut deps);
+                        if parsed.get("workspace").is_some() {
+                            break;
+                        }
+                    }
+                }
+            }
+            cursor = dir.parent();
+        }
+        deps
+    }
+
+    /// Reads crates.io/registry `[[package]]` entries from `cargo_dir/Cargo.lock`
+    /// (or an enclosing workspace `Cargo.lock` if present).
+    pub fn collect_lockfile_registry_packages(cargo_dir: &Path) -> Vec<CargoLockEntry> {
+        let mut lock_path = cargo_dir.join("Cargo.lock");
+        if !lock_path.is_file() {
+            let mut cursor = cargo_dir.parent();
+            while let Some(dir) = cursor {
+                let cand = dir.join("Cargo.lock");
+                if cand.is_file() && dir.join("Cargo.toml").is_file() {
+                    lock_path = cand;
+                    break;
+                }
+                cursor = dir.parent();
+            }
+        }
+        if !lock_path.is_file() {
+            return Vec::new();
+        }
+        let Ok(content) = fs::read_to_string(&lock_path) else {
+            return Vec::new();
+        };
+        let Ok(parsed) = content.parse::<toml::Table>() else {
+            return Vec::new();
+        };
+        let local_pkg_name = fs::read_to_string(cargo_dir.join("Cargo.toml"))
+            .ok()
+            .and_then(|c| c.parse::<toml::Table>().ok())
+            .and_then(|t| {
+                t.get("package")
+                    .and_then(|p| p.get("name"))
+                    .and_then(|n| n.as_str())
+                    .map(ToOwned::to_owned)
+            });
+
+        let mut entries = Vec::new();
+        if let Some(packages) = parsed.get("package").and_then(|p| p.as_array()) {
+            for p in packages {
+                let Some(name) = p.get("name").and_then(|n| n.as_str()) else {
+                    continue;
+                };
+                let Some(version) = p.get("version").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let source = p.get("source").and_then(|s| s.as_str());
+                let checksum = p.get("checksum").and_then(|c| c.as_str());
+                let is_registry = source.is_some_and(|s| s.starts_with("registry+"))
+                    || (source.is_none()
+                        && checksum.is_some()
+                        && local_pkg_name.as_deref() != Some(name));
+                if !is_registry {
+                    continue;
+                }
+                entries.push(CargoLockEntry {
+                    name: name.to_string(),
+                    version: version.to_string(),
+                    checksum: checksum.map(ToOwned::to_owned),
+                });
+            }
+        }
+        entries
+    }
+}
+
+/// Parsed registry crate entry from a project `Cargo.lock`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CargoLockEntry {
+    pub name: String,
+    pub version: String,
+    pub checksum: Option<String>,
 }

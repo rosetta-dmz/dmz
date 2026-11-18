@@ -2,20 +2,35 @@ pub mod detection;
 pub mod discovery;
 pub mod env;
 pub mod packager;
+pub mod preflight;
+pub mod python_abi;
 pub mod setup;
 pub mod types;
 
-pub use detection::ToolchainDetector;
+pub use detection::{ToolchainDetectOptions, ToolchainDetector};
 pub use discovery::{
-    emit_non_relocatable_notice, is_non_standalone_path, AndroidNdkDiscoverer, AppleSdkDiscoverer,
-    CMakeDiscoverer, CcDiscoverer, DiscoveryRegistry, GoDiscoverer, JuceDiscoverer, MakeDiscoverer,
-    NinjaDiscoverer, NodeDiscoverer, PhpDiscoverer, PkgConfigDiscoverer, PythonDiscoverer,
-    RubyDiscoverer, RustDiscoverer, ToolchainDiscoverer,
+    emit_non_relocatable_notice, is_apple_system_toolchain_path, is_non_standalone_path,
+    AndroidNdkDiscoverer, AppleSdkDiscoverer, CMakeDiscoverer, CcDiscoverer, DiscoveryRegistry,
+    GoDiscoverer, JuceDiscoverer, MakeDiscoverer, NinjaDiscoverer, NodeDiscoverer, PhpDiscoverer,
+    PkgConfigDiscoverer, PythonDiscoverer, RubyDiscoverer, RustDiscoverer, ToolchainDiscoverer,
 };
 pub use env::ToolchainEnv;
 pub use packager::ToolchainArchivePackager;
+pub use preflight::{
+    check_apple_developer_tools, discover_filesystem_developer_dir,
+    ecosystems_use_native_or_apple_tooling, export_apple_prereq_note,
+    export_apple_prereq_note_for_ecosystems, export_apple_prereq_note_from_lockfile,
+    has_usable_apple_sdk_or_clt, is_uninstalled_macos_clt_shim, resolve_non_stub_executable,
+    resolve_real_apple_developer_tool, should_skip_uninstalled_macos_clt_command,
+    verify_apple_prereq_for_ecosystems, verify_apple_prereq_for_workspace,
+    workspace_requires_apple_clt, ApplePrereqStatus,
+};
+pub use python_abi::{PythonTargetAbi, PythonVersionConstraint};
 pub use setup::ToolchainSetup;
-pub use types::{DiscoveredToolchain, ToolchainEcosystem, ToolchainManifestEntry};
+pub use types::{
+    DiscoveredToolchain, ToolchainDiscoveryContext, ToolchainEcosystem, ToolchainManifestEntry,
+    ToolchainProfile,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolchainError {
@@ -27,6 +42,8 @@ pub enum ToolchainError {
     DiscoveryFailed(String),
     #[error("Toolchain Packaging Error: {0}")]
     PackagingFailed(String),
+    #[error("Host Prerequisite Missing: {0}")]
+    HostPrerequisiteMissing(String),
 }
 
 impl From<ToolchainError> for String {
@@ -70,55 +87,193 @@ impl ToolchainProvider {
         ToolchainDetector::detect_workspace_ecosystems(workspace_root, lockfile)
     }
 
+    /// Discover active workspace ecosystems with explicit detection options.
+    #[inline]
+    pub fn detect_workspace_ecosystems_with_options(
+        workspace_root: &Path,
+        lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
+        options: ToolchainDetectOptions,
+    ) -> HashSet<ToolchainEcosystem> {
+        ToolchainDetector::detect_workspace_ecosystems_with_options(
+            workspace_root,
+            lockfile,
+            options,
+        )
+    }
+
     /// Discover standalone host toolchains scoped strictly to the target workspace's ecosystems.
     pub fn discover_for_workspace(
         workspace_root: &Path,
         lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
     ) -> Vec<DiscoveredToolchain> {
-        let ecosystems = Self::detect_workspace_ecosystems(workspace_root, lockfile);
+        Self::discover_for_workspace_with_options(
+            workspace_root,
+            lockfile,
+            ToolchainDetectOptions::default(),
+            ToolchainProfile::Minimal,
+            lockfile.and_then(|l| l.target_platform.as_deref()),
+        )
+    }
+
+    /// Discover standalone host toolchains scoped by detection options, toolchain profile, and target platform.
+    pub fn discover_for_workspace_with_options(
+        workspace_root: &Path,
+        lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
+        detect_options: ToolchainDetectOptions,
+        profile: ToolchainProfile,
+        target_platform: Option<&str>,
+    ) -> Vec<DiscoveredToolchain> {
+        Self::discover_for_workspace_with_project_and_options(
+            workspace_root,
+            lockfile,
+            None,
+            detect_options,
+            profile,
+            target_platform,
+        )
+    }
+
+    /// Discover standalone host toolchains with an optional in-memory multi-workspace config.
+    pub fn discover_for_workspace_with_project_and_options(
+        workspace_root: &Path,
+        lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
+        ws_project_opt: Option<&crate::workspace::WorkspaceProjectConfig>,
+        detect_options: ToolchainDetectOptions,
+        profile: ToolchainProfile,
+        target_platform: Option<&str>,
+    ) -> Vec<DiscoveredToolchain> {
+        Self::discover_for_workspace_with_project_and_options_checked(
+            workspace_root,
+            lockfile,
+            ws_project_opt,
+            detect_options,
+            profile,
+            target_platform,
+            true,
+        )
+        .unwrap_or_default()
+    }
+
+    /// Discover standalone host toolchains and fail fast when a strictly required toolchain
+    /// (such as standalone Python) is absent and `allow_missing_toolchains` is `false`.
+    pub fn discover_for_workspace_with_project_and_options_checked(
+        workspace_root: &Path,
+        lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
+        ws_project_opt: Option<&crate::workspace::WorkspaceProjectConfig>,
+        detect_options: ToolchainDetectOptions,
+        profile: ToolchainProfile,
+        target_platform: Option<&str>,
+        allow_missing_toolchains: bool,
+    ) -> Result<Vec<DiscoveredToolchain>, ToolchainError> {
+        let ecosystems = ToolchainDetector::detect_workspace_ecosystems_with_project_and_options(
+            workspace_root,
+            lockfile,
+            ws_project_opt,
+            detect_options,
+        );
         if ecosystems.is_empty() {
             tracing::info!(
                 workspace = ?workspace_root,
                 "No supported language ecosystems detected in workspace; skipping toolchain discovery"
             );
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         tracing::info!(
             workspace = ?workspace_root,
+            profile = %profile,
             ecosystems = ?ecosystems.iter().map(|e| e.as_str()).collect::<Vec<_>>(),
             "Discovered target workspace ecosystems for toolchain capture"
         );
 
+        let member_roots =
+            ToolchainDetector::collect_workspace_member_dirs(workspace_root, ws_project_opt);
+        let ctx = ToolchainDiscoveryContext {
+            profile,
+            target_platform: target_platform.map(str::to_string),
+            workspace_root: Some(workspace_root.to_path_buf()),
+            member_roots,
+            ecosystems: ecosystems.clone(),
+        };
         let registry = DiscoveryRegistry::with_default_discoverers();
-        let toolchains = registry.discover_for_ecosystems(&ecosystems);
+        let toolchains = match registry
+            .discover_for_ecosystems_with_context_checked(&ecosystems, &ctx)
+        {
+            Ok(tcs) => tcs,
+            Err(err) if !allow_missing_toolchains => return Err(err),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "Toolchain discovery encountered constraint/ABI failure (continuing because --allow-missing-toolchains is active)"
+                );
+                registry.discover_for_ecosystems_with_context(&ecosystems, &ctx)
+            }
+        };
 
+        let mut missing_required: Vec<ToolchainEcosystem> = Vec::new();
         for eco in &ecosystems {
+            if eco.is_host_prerequisite() {
+                tracing::info!(
+                    ecosystem = eco.as_str(),
+                    "Treating {} as a host OS baseline prerequisite (verified on target via pre-flight; not bundled in archive).",
+                    eco.as_str()
+                );
+                continue;
+            }
             if !toolchains.iter().any(|tc| tc.ecosystem == *eco) {
                 let is_strictly_required = match eco {
                     ToolchainEcosystem::Ninja => {
-                        ToolchainDetector::has_explicit_ninja_manifest(workspace_root)
+                        ToolchainDetector::has_explicit_ninja_manifest_with_options(
+                            workspace_root,
+                            detect_options.include_dev,
+                        )
                     }
                     _ => true,
                 };
 
-                if is_strictly_required {
-                    tracing::warn!(
-                        ecosystem = eco.as_str(),
-                        "Workspace requires {} toolchain, but no standalone host distribution was discovered.",
-                        eco.as_str()
-                    );
-                } else {
+                if !is_strictly_required {
                     tracing::info!(
                         ecosystem = eco.as_str(),
                         "Companion {} toolchain was not discovered on host; omitting from bundle.",
                         eco.as_str()
                     );
+                } else if *eco == ToolchainEcosystem::Make
+                    && preflight::target_is_macos(target_platform)
+                    && preflight::host_apple_clt_provides("make")
+                {
+                    tracing::info!(
+                        ecosystem = eco.as_str(),
+                        "No standalone Make distribution discovered on host; macOS Apple CLT/Xcode prerequisite provides 'make' on target."
+                    );
+                } else {
+                    tracing::warn!(
+                        ecosystem = eco.as_str(),
+                        "Workspace requires {} toolchain, but no standalone host distribution was discovered.",
+                        eco.as_str()
+                    );
+                    if eco.is_primary_runtime() {
+                        missing_required.push(*eco);
+                    }
                 }
             }
         }
 
-        toolchains
+        if !allow_missing_toolchains && !missing_required.is_empty() {
+            missing_required.sort_by_key(|e| e.as_str());
+            let missing_list: Vec<&str> = missing_required.iter().map(|e| e.as_str()).collect();
+            let remediation = if missing_required.contains(&ToolchainEcosystem::Python) {
+                "Install an official standalone Python distribution from python.org or via `uv python install` on the export host, or pass `--allow-missing-toolchains` / `--no-toolchain`."
+            } else {
+                "Install the required standalone provider toolchain on the export host, or pass `--allow-missing-toolchains` / `--no-toolchain`."
+            };
+            return Err(ToolchainError::DiscoveryFailed(format!(
+                "Missing required standalone toolchain(s) for workspace export: [{}]. {}",
+                missing_list.join(", "),
+                remediation
+            )));
+        }
+
+        Ok(toolchains)
     }
 
     /// Discover the host Rust toolchain, prioritizing official standalone Rustup distributions.
@@ -234,7 +389,88 @@ impl ToolchainPackager {
         tar_builder: &mut TarBuilder<W>,
         deterministic_epoch: u64,
     ) -> Result<Vec<ToolchainManifestEntry>, ToolchainError> {
-        let toolchains = ToolchainProvider::discover_for_workspace(workspace_root, lockfile);
+        Self::package_toolchains_with_options(
+            workspace_root,
+            lockfile,
+            tar_builder,
+            deterministic_epoch,
+            ToolchainDetectOptions::default(),
+            ToolchainProfile::Minimal,
+            lockfile.and_then(|l| l.target_platform.as_deref()),
+        )
+    }
+
+    /// Package discovered toolchains with explicit detection options, toolchain profile, and target platform.
+    pub fn package_toolchains_with_options<W: std::io::Write>(
+        workspace_root: &Path,
+        lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
+        tar_builder: &mut TarBuilder<W>,
+        deterministic_epoch: u64,
+        detect_options: ToolchainDetectOptions,
+        profile: ToolchainProfile,
+        target_platform: Option<&str>,
+    ) -> Result<Vec<ToolchainManifestEntry>, ToolchainError> {
+        Self::package_toolchains_with_options_and_project(
+            workspace_root,
+            lockfile,
+            None,
+            tar_builder,
+            deterministic_epoch,
+            detect_options,
+            profile,
+            target_platform,
+        )
+    }
+
+    /// Package discovered toolchains using an optional in-memory multi-workspace config.
+    #[allow(clippy::too_many_arguments)]
+    pub fn package_toolchains_with_options_and_project<W: std::io::Write>(
+        workspace_root: &Path,
+        lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
+        ws_project_opt: Option<&crate::workspace::WorkspaceProjectConfig>,
+        tar_builder: &mut TarBuilder<W>,
+        deterministic_epoch: u64,
+        detect_options: ToolchainDetectOptions,
+        profile: ToolchainProfile,
+        target_platform: Option<&str>,
+    ) -> Result<Vec<ToolchainManifestEntry>, ToolchainError> {
+        Self::package_toolchains_with_options_and_project_checked(
+            workspace_root,
+            lockfile,
+            ws_project_opt,
+            tar_builder,
+            deterministic_epoch,
+            detect_options,
+            profile,
+            target_platform,
+            true,
+        )
+    }
+
+    /// Package discovered toolchains with strict missing-toolchain enforcement when
+    /// `allow_missing_toolchains` is `false`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn package_toolchains_with_options_and_project_checked<W: std::io::Write>(
+        workspace_root: &Path,
+        lockfile: Option<&crate::resolver::lockfile::DmzLockfile>,
+        ws_project_opt: Option<&crate::workspace::WorkspaceProjectConfig>,
+        tar_builder: &mut TarBuilder<W>,
+        deterministic_epoch: u64,
+        detect_options: ToolchainDetectOptions,
+        profile: ToolchainProfile,
+        target_platform: Option<&str>,
+        allow_missing_toolchains: bool,
+    ) -> Result<Vec<ToolchainManifestEntry>, ToolchainError> {
+        let toolchains =
+            ToolchainProvider::discover_for_workspace_with_project_and_options_checked(
+                workspace_root,
+                lockfile,
+                ws_project_opt,
+                detect_options,
+                profile,
+                target_platform,
+                allow_missing_toolchains,
+            )?;
         ToolchainArchivePackager::package_with_epoch(tar_builder, &toolchains, deterministic_epoch)
     }
 
@@ -327,5 +563,55 @@ mod tests {
         let discovered = registry.discover_for_ecosystems(&filter);
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0].ecosystem, ToolchainEcosystem::Rust);
+    }
+
+    #[test]
+    fn test_strict_toolchain_discovery_fails_on_missing_python_unless_allowed() {
+        let temp = tempfile::tempdir().unwrap();
+        let ws = temp.path();
+        std::fs::write(ws.join("requirements.txt"), "pydantic==2.9.0\n").unwrap();
+
+        let cross_target = if cfg!(target_os = "linux") {
+            "macos-arm64"
+        } else {
+            "linux-x86_64"
+        };
+
+        let strict_res = ToolchainProvider::discover_for_workspace_with_project_and_options_checked(
+            ws,
+            None,
+            None,
+            ToolchainDetectOptions::default(),
+            ToolchainProfile::Minimal,
+            Some(cross_target),
+            false,
+        );
+        assert!(
+            strict_res.is_err(),
+            "Strict discovery must fail when Python cannot be provisioned for target"
+        );
+        let err_msg = strict_res.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            err_msg.contains("python"),
+            "Error should mention python: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("--allow-missing-toolchains"),
+            "Error should mention --allow-missing-toolchains: {}",
+            err_msg
+        );
+
+        let lenient_res =
+            ToolchainProvider::discover_for_workspace_with_project_and_options_checked(
+                ws,
+                None,
+                None,
+                ToolchainDetectOptions::default(),
+                ToolchainProfile::Minimal,
+                Some(cross_target),
+                true,
+            );
+        assert!(lenient_res.is_ok());
     }
 }

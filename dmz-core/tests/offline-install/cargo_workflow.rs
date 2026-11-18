@@ -73,6 +73,9 @@ edition = "2021"
     let lockfile = DmzLockfile {
         version: 1,
         target_platform: None,
+        include_dev: None,
+        python_abi: None,
+        inputs_digest: None,
         vcs: None,
         workspaces: BTreeMap::new(),
         closure_signature: closure_sig,

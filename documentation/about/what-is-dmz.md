@@ -87,6 +87,6 @@ dmz shell
 | **CLI Ergonomics (`init`, `bundle`, `import`, `shell`)** | **Implemented & Verified** | Stable |
 | **Daemonless Sandbox Process Isolation** | **Implemented** (macOS Seatbelt, Linux, Windows) | Refining capability fallbacks |
 | **AI Agent Supervisor & Ephemeral Scratchpads** | **Implemented** in `dmz-supervisor` | In active hardening |
-| **System Package Capture (apt, brew, dnf)** | **Planned** | Roadmap v1.1 |
+| **System Package Capture (apt, brew, dnf)** | **Planned** | Roadmap v1.5 |
 | **OCI / Docker Container Image Export** | **Planned** | Roadmap v1.2 |
 | **Automated Target VM Pre-flight Bundle Testing** | **Planned** | Roadmap v1.2 |

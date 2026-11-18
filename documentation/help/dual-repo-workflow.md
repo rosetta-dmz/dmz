@@ -72,6 +72,33 @@ drain_timeout_ms = 3000
 
 > **Dynamic Roles:** `role` defaults to `"member"`. You can also designate `"primary"`, `"sidecar"`, or `"service"`. Member IDs are semantic identifiers (e.g. `client`, `backend`, `auth-service`) that define clean multi-root folder titles and log prefixes.
 
+### Launch Command Resolution
+
+When a workspace pair launches, each primary/sidecar member's command is resolved in this order:
+
+1. **Explicit** `exec_command` / `exec_args` in `dmz-workspace.toml` (always wins).
+2. **Inferred** from the member directory, only when unambiguous:
+   - **Node:** `tauri` / `dev` / `start` / `serve` script, then `main`, then a single `bin` entry, then `index.js` / `server.js` / `main.js` / `app.js`.
+   - **Python:** `server.py` / `main.py` / `app.py` / …, `[project.scripts]`, a root `__main__.py` (`python .`), or a single package with `__main__.py` (`python -m <pkg>`; `src/` layout requires `pyproject.toml`).
+   - **Rust:** `cargo run` — but not for virtual workspaces or packages with several binaries and no `default-run`.
+   - **Go:** `go run .`, or `go run ./cmd/<name>` when there is exactly one `cmd/<name>/main.go`.
+
+DMZ never guesses between candidates. If a member can't be resolved, the launch fails (in the GUI, before spawning anything) with the member id, the reason, and a ready-to-paste snippet, for example:
+
+```text
+Unable to determine execution command for workspace member 'backend' at "/…/ai-engine".
+multiple binary targets (multi, tool) and no `default-run` in Cargo.toml.
+Specify "exec_command" and "exec_args" in dmz-workspace.toml, e.g.:
+  [[members]]
+  id = "backend"
+  exec_command = "cargo"
+  exec_args = ["run", "--bin", "<name>"]
+```
+
+### Python Interpreter in the IDE
+
+`python.defaultInterpreterPath` is only written when the interpreter exists: the member `.venv`, else the bundled `.dmz/toolchains/python`. Otherwise the setting is omitted and the Python extension auto-discovers an interpreter. Imported `.code-workspace` files are re-validated after import for the same reason.
+
 ---
 
 ## CLI Developer Workflow
@@ -146,18 +173,20 @@ The exported umbrella archive preserves original repository directory names and 
 On target air-gapped systems with zero pre-installed runtimes:
 
 ```bash
-# Unpack the umbrella bundle
-dmz import --archive dist/project_closure.tar.zst --workspace ./project
+# Unpack the umbrella bundle (on macOS, prefer a neutral folder like ~/workspaces/ over ~/Documents)
+dmz import --archive dist/project_closure.tar.zst --to ~/workspaces/project
 
 # Enter the hermetic environment
-cd project
+cd ~/workspaces/project
 
 # Open the multi-root workspace in VS Code or Cursor:
 code my-desktop-suite.code-workspace
 
-# Or run directly via the DMZ supervisor:
+# Or run directly via the DMZ supervisor (from your host shell, NOT inside `dmz shell`):
 dmz run --workspace .
 ```
+
+> **Host Shell Rule:** `dmz import` prints a **Next steps** summary upon completion. Always invoke `dmz run` from your host shell rather than nesting it inside `dmz shell` (`DMZ_SANDBOX=1`), because `dmz run` orchestrates per-member processes and IPC sockets across multiple directories.
 
 #### Automatic Dependency Hydration:
 Upon import, DMZ automatically hydrates:
@@ -192,7 +221,7 @@ For developers using the visual desktop interface (`dmz-gui`), the multi-repo wo
 1. Switch to the **Air-Gap Manager** page.
 2. In the **Bundle & Archive Paths** card:
    * **Workspace Directory:** Points to your anchor workspace.
-   * **Bundle Archive (.tar.zst):** Choose destination path (e.g., `dist/project_airgap.tar.zst`).
+   * **Bundle Archive:** Choose destination path (e.g., `dist/project_airgap.tar.zst`).
 3. Click **Bundle (Fetch)**:
    * Fetches dependencies for all members into `.dmz/store` (including `@tauri-apps/cli` companion binary packages).
    * Bundles closures, toolchains, source trees, and manifests into a self-contained archive with a `.sha256` integrity sidecar.
@@ -231,6 +260,8 @@ For developers using the visual desktop interface (`dmz-gui`), the multi-repo wo
 
 | Recommendation | Reason |
 | :--- | :--- |
+| **Run `dmz run` from the Host Shell** | `dmz run` orchestrates per-member lifecycle and IPC sockets; nesting it inside `dmz shell` (`DMZ_SANDBOX=1`) is blocked so you don't hit sandbox path restrictions. |
+| **Use Neutral Paths on macOS** | Store imported workspaces under `~/workspaces/` rather than `~/Documents`, `~/Desktop`, or `~/Downloads` to avoid macOS TCC `Operation not permitted` prompts. |
 | **Rely on `dmz run` for Unified Local Dev** | Automatically coordinates process startup order, verifies socket readiness, multiplexes logs, and guarantees zero orphaned zombie processes on exit. |
 | **Prefer Static Companion Binaries (`musl`)** | When compiling companion backends in Rust or Go, compile against `musl` (`x86_64-unknown-linux-musl`) to eliminate host dynamic library (`glibc`) mismatches on air-gapped target machines. |
 | **Never Use TCP Loopback for Local IPC** | Loopback networking (`127.0.0.1`) opens sandbox attack surfaces and risks port collisions. Always use Unix domain sockets or Windows Named Pipes. |

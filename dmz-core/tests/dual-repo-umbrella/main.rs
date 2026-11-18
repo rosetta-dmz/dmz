@@ -1,10 +1,18 @@
 // Dual-Repo Umbrella Air-Gap Integration Test Suite
 // Validates master workspace packaging, multi-member isolation,
 // offline hydration, and sibling sidecar coordination.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
+mod cargo_sidecar_vendor;
 mod generic_sibling_roundtrip;
 mod host_venv_exclusion;
 mod manifest_scanner;
+mod primary_python_sidecar_pnpm_vite_tauri;
 mod primary_python_sidecar_tauri;
 mod primary_tauri_sidecar_python;
 

@@ -45,47 +45,81 @@ impl NpmMapper {
                     ))
                 })?;
 
-                let mut bin_map = std::collections::HashMap::new();
-                if let Some(bin_obj) = json.get("bin").and_then(|b| b.as_object()) {
-                    for (k, v) in bin_obj {
-                        if let Some(path_str) = v.as_str() {
-                            bin_map.insert(k.clone(), path_str.to_string());
-                        }
-                    }
-                } else if let Some(bin_str) = json.get("bin").and_then(|b| b.as_str()) {
-                    let short_name = pkg_name.split('/').next_back().unwrap_or(pkg_name);
-                    bin_map.insert(short_name.to_string(), bin_str.to_string());
-                }
-
-                for (cmd_name, rel_target) in bin_map {
-                    let full_target =
-                        format!("{}/{}", pkg_name, rel_target.trim_start_matches("./"));
-                    let fallback = if pkg_name.contains("tauri") {
-                        Some("cargo tauri")
-                    } else {
-                        None
-                    };
-                    Self::write_cmd_shim_triplet(&bin_dir, &cmd_name, &full_target, fallback);
-                }
+                Self::write_package_bin_shims(&bin_dir, pkg_name, &json);
             }
         }
 
         Ok(())
     }
 
-    /// Hydrates cross-platform CLI binary shims in `node_modules/.bin/` for all declared
-    /// or installed executables in the workspace without hardcoded framework checks.
+    fn strip_bin_target_prefix(rel_target: &str) -> &str {
+        let mut cleaned = rel_target.trim();
+        loop {
+            if let Some(rest) = cleaned.strip_prefix("./") {
+                cleaned = rest;
+            } else if let Some(rest) = cleaned.strip_prefix('/') {
+                cleaned = rest;
+            } else {
+                break;
+            }
+        }
+        cleaned
+    }
+
+    fn parse_package_bin_map(
+        json: &serde_json::Value,
+        pkg_name: &str,
+    ) -> std::collections::HashMap<String, String> {
+        let mut bin_map = std::collections::HashMap::new();
+        if let Some(bin_obj) = json.get("bin").and_then(|b| b.as_object()) {
+            for (k, v) in bin_obj {
+                if let Some(path_str) = v.as_str() {
+                    bin_map.insert(k.clone(), path_str.to_string());
+                }
+            }
+        } else if let Some(bin_str) = json.get("bin").and_then(|b| b.as_str()) {
+            let short_name = pkg_name.split('/').next_back().unwrap_or(pkg_name);
+            bin_map.insert(short_name.to_string(), bin_str.to_string());
+        }
+        bin_map
+    }
+
+    fn write_package_bin_shims(bin_dir: &Path, pkg_name: &str, json: &serde_json::Value) {
+        let fallback = if pkg_name.contains("tauri") {
+            Some("cargo tauri")
+        } else {
+            None
+        };
+        for (cmd_name, rel_target) in Self::parse_package_bin_map(json, pkg_name) {
+            let full_target = format!(
+                "{}/{}",
+                pkg_name,
+                Self::strip_bin_target_prefix(&rel_target)
+            );
+            Self::write_cmd_shim_triplet(bin_dir, &cmd_name, &full_target, fallback);
+        }
+    }
+
+    /// Hydrates cross-platform CLI binary shims in `node_modules/.bin/` for installed
+    /// packages in the workspace without fabricating empty stub `node_modules` directories.
     pub fn hydrate_workspace_bin_shims(workspace_path: &Path) {
-        let bin_dir = workspace_path.join("node_modules/.bin");
+        Self::hydrate_workspace_bin_shims_with_options(workspace_path, true);
+    }
+
+    /// Hydrates `node_modules/.bin/*` shims and `.modules.yaml` with explicit `include_dev` state.
+    pub fn hydrate_workspace_bin_shims_with_options(workspace_path: &Path, include_dev: bool) {
+        let nm_dir = workspace_path.join("node_modules");
+        if !nm_dir.is_dir() || !super::pnpm::PnpmMapper::has_installed_packages(&nm_dir) {
+            return;
+        }
+
+        let bin_dir = nm_dir.join(".bin");
         if fs::create_dir_all(&bin_dir).is_err() {
             return;
         }
 
         // 1. Scan installed packages in node_modules/ (including @scoped packages)
-        let nm_dir = workspace_path.join("node_modules");
-        if nm_dir.is_dir() {
-            Self::scan_and_link_node_modules(&nm_dir, &bin_dir);
-        }
+        Self::scan_and_link_node_modules(&nm_dir, &bin_dir);
 
         // 2. Discover from workspace root package.json for pre-install / air-gap offline readiness
         let root_pkg_json = workspace_path.join("package.json");
@@ -93,8 +127,114 @@ impl NpmMapper {
             Self::discover_and_link_from_root_manifest(&root_pkg_json, &bin_dir);
         }
 
-        // 3. Ensure node_modules/.modules.yaml exists so pnpm recognizes packages as installed
-        super::pnpm::PnpmMapper::ensure_modules_yaml(workspace_path);
+        // 3. Ensure node_modules/.modules.yaml exists with accurate linker & devDependencies flags
+        super::pnpm::PnpmMapper::ensure_modules_yaml_with_options(workspace_path, include_dev);
+    }
+
+    /// Hydrates `<sub_dir>/node_modules`, `.bin/*` shims, and `.modules.yaml` for every
+    /// npm/pnpm workspace sub-package (e.g. `apps/desktop`) so running package scripts
+    /// inside a workspace member never fails with missing local `node_modules` or `.bin` tools.
+    pub fn hydrate_npm_workspace_members(workspace_path: &Path, include_dev: bool) {
+        let root_nm = workspace_path.join("node_modules");
+        if !root_nm.is_dir() || !super::pnpm::PnpmMapper::has_installed_packages(&root_nm) {
+            return;
+        }
+
+        let sub_dirs =
+            crate::resolver::manifest::npm::NpmManifestScanner::discover_npm_workspace_package_dirs(
+                workspace_path,
+            );
+        if sub_dirs.is_empty() {
+            return;
+        }
+
+        for sub_dir in sub_dirs {
+            if sub_dir == workspace_path || !sub_dir.is_dir() {
+                continue;
+            }
+            let sub_nm = sub_dir.join("node_modules");
+            if fs::create_dir_all(&sub_nm).is_err() {
+                continue;
+            }
+
+            Self::link_workspace_root_packages(&root_nm, &sub_nm);
+            Self::hydrate_workspace_bin_shims_with_options(&sub_dir, include_dev);
+        }
+    }
+
+    fn link_workspace_root_packages(root_nm: &Path, sub_nm: &Path) {
+        let Ok(entries) = fs::read_dir(root_nm) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with('.') {
+                continue;
+            }
+            let src = entry.path();
+            if name_str.starts_with('@') && src.is_dir() {
+                let scope_sub = sub_nm.join(&name);
+                if fs::create_dir_all(&scope_sub).is_ok() {
+                    if let Ok(scoped) = fs::read_dir(&src) {
+                        for s_entry in scoped.flatten() {
+                            let s_src = s_entry.path();
+                            if s_src.is_dir() {
+                                let s_dest = scope_sub.join(s_entry.file_name());
+                                Self::link_or_clone_dir(&s_src, &s_dest);
+                            }
+                        }
+                    }
+                }
+            } else if src.is_dir() {
+                let dest = sub_nm.join(&name);
+                Self::link_or_clone_dir(&src, &dest);
+            }
+        }
+    }
+
+    fn link_or_clone_dir(src: &Path, dest: &Path) {
+        if fs::symlink_metadata(dest).is_ok() {
+            return;
+        }
+        #[cfg(unix)]
+        {
+            let link_parent = dest.parent().unwrap_or_else(|| Path::new("."));
+            let rel_target = Self::relative_path_to(link_parent, src);
+            if std::os::unix::fs::symlink(&rel_target, dest).is_ok() {
+                return;
+            }
+        }
+        let _ = crate::install::fast_clone::FastClone::clone_dir_recursive(src, dest);
+    }
+
+    fn relative_path_to(from_dir: &Path, target: &Path) -> std::path::PathBuf {
+        use std::path::{Component, PathBuf};
+        let from_comps: Vec<Component<'_>> = from_dir.components().collect();
+        let to_comps: Vec<Component<'_>> = target.components().collect();
+        let common = from_comps
+            .iter()
+            .zip(to_comps.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let mut rel = PathBuf::new();
+        if let Some(rest_from) = from_comps.get(common..) {
+            for comp in rest_from {
+                if matches!(comp, Component::Normal(_)) {
+                    rel.push("..");
+                }
+            }
+        }
+        if let Some(rest_to) = to_comps.get(common..) {
+            for comp in rest_to {
+                rel.push(comp.as_os_str());
+            }
+        }
+        if rel.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            rel
+        }
     }
 
     /// Recursively scans `node_modules/` (up to 2 levels for scoped packages) and materializes shims
@@ -152,27 +292,7 @@ impl NpmMapper {
             Err(_) => return,
         };
 
-        let mut bin_map = std::collections::HashMap::new();
-        if let Some(bin_obj) = json.get("bin").and_then(|b| b.as_object()) {
-            for (k, v) in bin_obj {
-                if let Some(path_str) = v.as_str() {
-                    bin_map.insert(k.clone(), path_str.to_string());
-                }
-            }
-        } else if let Some(bin_str) = json.get("bin").and_then(|b| b.as_str()) {
-            let short_name = pkg_name.split('/').next_back().unwrap_or(pkg_name);
-            bin_map.insert(short_name.to_string(), bin_str.to_string());
-        }
-
-        for (cmd_name, rel_target) in bin_map {
-            let full_target = format!("{}/{}", pkg_name, rel_target.trim_start_matches("./"));
-            let fallback = if pkg_name.contains("tauri") {
-                Some("cargo tauri")
-            } else {
-                None
-            };
-            Self::write_cmd_shim_triplet(bin_dir, &cmd_name, &full_target, fallback);
-        }
+        Self::write_package_bin_shims(bin_dir, pkg_name, &json);
     }
 
     /// Discovers dependencies and scripts from root package.json to materialize offline readiness shims
@@ -187,16 +307,27 @@ impl NpmMapper {
             Err(_) => return,
         };
 
+        let nm_dir = bin_dir.parent().unwrap_or(bin_dir);
+        let is_pkg_installed = |pkg_name: &str| {
+            let mut p = nm_dir.to_path_buf();
+            for seg in pkg_name.split('/') {
+                p.push(seg);
+            }
+            p.exists()
+        };
+
         let mut declared_deps = std::collections::HashSet::new();
         for dep_key in &["dependencies", "devDependencies", "optionalDependencies"] {
             if let Some(obj) = json.get(*dep_key).and_then(|d| d.as_object()) {
                 for k in obj.keys() {
-                    declared_deps.insert(k.clone());
+                    if is_pkg_installed(k) {
+                        declared_deps.insert(k.clone());
+                    }
                 }
             }
         }
 
-        // Canonical mapping for well-known and dual-stack CLI packages
+        // Canonical mapping for well-known and dual-stack CLI packages (only when actually installed)
         for dep in &declared_deps {
             if dep == "@tauri-apps/cli" || dep == "tauri" {
                 Self::write_cmd_shim_triplet(
@@ -442,26 +573,60 @@ if (Test-Path $appTarget) {{
             InstallError::MapperError(format!("Failed to unpack package {}: {}", pkg_name, e))
         })?;
 
-        // If unpacked archive contains a top-level "package" directory (standard npm tarball structure),
-        // flatten its contents into target_dir so that package.json is directly in target_dir.
-        let package_subdir = target_dir.join("package");
-        if package_subdir.is_dir() && !target_dir.join("package.json").exists() {
-            if let Ok(entries) = fs::read_dir(&package_subdir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if let Some(file_name) = path.file_name() {
-                        let dest_path = target_dir.join(file_name);
-                        fs::rename(&path, &dest_path).map_err(|e| {
-                            InstallError::IoError(format!(
-                                "Failed to flatten npm package entry {:?} -> {:?}: {}",
-                                path, dest_path, e
-                            ))
-                        })?;
+        // Flatten a single top-level wrapper directory (commonly `package/`, or an arbitrary
+        // single directory containing `package.json`) so `package.json` lives at `target_dir`.
+        if !target_dir.join("package.json").exists() {
+            let wrapper_dir = if target_dir.join("package").is_dir() {
+                Some(target_dir.join("package"))
+            } else {
+                let mut dirs = Vec::new();
+                let mut has_other_files = false;
+                if let Ok(entries) = fs::read_dir(target_dir) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.is_dir() {
+                            dirs.push(p);
+                        } else {
+                            has_other_files = true;
+                        }
                     }
                 }
-            }
-            if let Err(e) = fs::remove_dir_all(&package_subdir) {
-                tracing::warn!(dir = ?package_subdir, error = %e, "Failed to remove temporary package subdir");
+                if !has_other_files
+                    && dirs.len() == 1
+                    && dirs
+                        .first()
+                        .is_some_and(|d| d.join("package.json").is_file())
+                {
+                    dirs.into_iter().next()
+                } else {
+                    None
+                }
+            };
+
+            if let Some(subdir) = wrapper_dir {
+                let staging_dir = target_dir.join("__dmz_flatten_tmp__");
+                let active_dir = if fs::rename(&subdir, &staging_dir).is_ok() {
+                    staging_dir
+                } else {
+                    subdir
+                };
+                if let Ok(entries) = fs::read_dir(&active_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if let Some(file_name) = path.file_name() {
+                            let dest_path = target_dir.join(file_name);
+                            fs::rename(&path, &dest_path).map_err(|e| {
+                                InstallError::IoError(format!(
+                                    "Failed to flatten npm package entry {:?} -> {:?}: {}",
+                                    path, dest_path, e
+                                ))
+                            })?;
+                        }
+                    }
+                }
+                if let Err(e) = fs::remove_dir_all(&active_dir) {
+                    tracing::warn!(dir = ?active_dir, error = %e, "Failed to remove temporary package subdir");
+                }
             }
         }
 

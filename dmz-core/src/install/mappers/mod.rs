@@ -27,9 +27,9 @@ mod tests {
         let temp = tempdir().unwrap();
         let ws = temp.path();
 
-        // Enforce creation of node_modules/.modules.yaml with isolated linker when .pnpm store directory exists
-        fs::create_dir_all(ws.join("node_modules/.pnpm")).unwrap();
-        PnpmMapper::ensure_modules_yaml(ws);
+        // Enforce creation of node_modules/.modules.yaml with isolated linker when .pnpm store directory has packages
+        fs::create_dir_all(ws.join("node_modules/.pnpm/pkg@1.0.0")).unwrap();
+        PnpmMapper::ensure_modules_yaml_with_options(ws, false);
 
         let yaml_path = ws.join("node_modules/.modules.yaml");
         assert!(yaml_path.is_file());
@@ -37,18 +37,35 @@ mod tests {
         assert!(content.contains("nodeLinker: isolated"));
         assert!(content.contains("packageManager: pnpm"));
         assert!(content.contains("virtualStoreDir: .pnpm"));
+        assert!(content.contains("devDependencies: false"));
 
-        // Enforce that NpmMapper hydration materializes both .modules.yaml and CLI shims (e.g. tauri)
+        // Enforce that NpmMapper/PnpmMapper hydration refuses to emit empty node_modules/.modules.yaml
+        // stubs when zero JS packages exist, and materializes them once node_modules/<pkg> is present.
         let temp2 = tempdir().unwrap();
         let ws2 = temp2.path();
         fs::write(
             ws2.join("package.json"),
-            r#"{"name": "test", "devDependencies": {"@tauri-apps/cli": "^2.0.0"}, "scripts": {"tauri": "tauri"}}"#,
+            r#"{"name": "test", "packageManager": "pnpm@9.15.0", "devDependencies": {"@tauri-apps/cli": "^2.0.0"}, "scripts": {"tauri": "tauri"}}"#,
         )
         .unwrap();
-        NpmMapper::hydrate_workspace_bin_shims(ws2);
-        assert!(ws2.join("node_modules/.modules.yaml").is_file());
+        NpmMapper::hydrate_workspace_bin_shims_with_options(ws2, true);
+        PnpmMapper::ensure_modules_yaml_with_options(ws2, true);
+        assert!(
+            !ws2.join("node_modules/.modules.yaml").exists(),
+            "Must not emit empty node_modules/.modules.yaml stub when zero JS packages are installed"
+        );
+        assert!(
+            !ws2.join("node_modules/.bin/tauri").exists(),
+            "Should not create dead shim for unbundled devDependency"
+        );
+
+        fs::create_dir_all(ws2.join("node_modules/@tauri-apps/cli")).unwrap();
+        NpmMapper::hydrate_workspace_bin_shims_with_options(ws2, true);
+        PnpmMapper::ensure_modules_yaml_with_options(ws2, true);
         assert!(ws2.join("node_modules/.bin/tauri").is_file());
+        let yaml2 = fs::read_to_string(ws2.join("node_modules/.modules.yaml")).unwrap();
+        assert!(yaml2.contains("devDependencies: true"));
+        assert!(yaml2.contains("packageManager: pnpm@9.15.0"));
     }
 
     #[test]
@@ -96,6 +113,22 @@ mod tests {
     fn test_pypi_hydrate_venv_environment() {
         let temp = tempdir().unwrap();
         let ws = temp.path();
+        let bundled_dir = ws.join(".dmz/toolchains/python");
+        #[cfg(unix)]
+        {
+            fs::create_dir_all(bundled_dir.join("bin")).unwrap();
+            fs::write(
+                bundled_dir.join("bin/python3"),
+                b"#!/bin/sh\necho bundled\n",
+            )
+            .unwrap();
+        }
+        #[cfg(windows)]
+        {
+            fs::create_dir_all(&bundled_dir).unwrap();
+            fs::write(bundled_dir.join("python.exe"), b"MZ").unwrap();
+        }
+
         let root_venv = ws.join(".venv");
         PyPiMapper::hydrate_venv_environment(ws, &root_venv, "python3.11").unwrap();
 
@@ -103,17 +136,34 @@ mod tests {
         assert!(cfg.is_file());
         let content = fs::read_to_string(cfg).unwrap();
         assert!(content.contains("version = 3.11.0"));
+        assert!(!content.contains("home = /usr/bin"));
 
         #[cfg(unix)]
         {
-            assert!(root_venv.join("bin/python").is_file());
-            assert!(root_venv.join("bin/python3").is_file());
+            let py = root_venv.join("bin/python");
+            let py3 = root_venv.join("bin/python3");
+            assert!(py.is_file());
+            assert!(py3.is_file());
+            assert!(fs::symlink_metadata(&py3).unwrap().file_type().is_symlink());
+            assert!(fs::symlink_metadata(&py).unwrap().file_type().is_symlink());
+            assert!(root_venv.join("bin/python3.11").is_file());
             assert!(root_venv.join("bin/activate").is_file());
         }
         #[cfg(windows)]
         {
-            assert!(root_venv.join("Scripts/python.bat").is_file());
+            assert!(root_venv.join("Scripts/python.exe").is_file());
         }
+
+        // When neither bundled nor host PATH python exists, omit creating fake/broken python launchers.
+        let temp_empty = tempdir().unwrap();
+        let empty_ws = temp_empty.path();
+        let empty_venv = empty_ws.join(".venv");
+        PyPiMapper::hydrate_venv_environment_with_path(empty_ws, &empty_venv, "python3.11", None)
+            .unwrap();
+        assert!(!empty_venv.join("bin/python").exists());
+        assert!(!empty_venv.join("bin/python3").exists());
+        assert!(!empty_venv.join("Scripts/python.exe").exists());
+        assert!(empty_venv.join("bin/activate").is_file());
     }
 
     fn create_test_tar_gz(filename: &str, content: &[u8]) -> Vec<u8> {

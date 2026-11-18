@@ -1,8 +1,11 @@
 // Toolchain environment setup and configuration
 
 pub mod activators;
+mod bin_io;
 pub mod cmake;
+pub mod elf;
 pub mod ide;
+pub mod macho;
 pub mod permissions;
 pub mod relocate;
 pub mod wrappers;
@@ -202,19 +205,14 @@ mod tests {
     #[test]
     fn test_generate_clang_wrappers_and_idempotency() {
         let temp = tempdir().unwrap();
+        // Verify standalone Clang wrapper + macOS host/SDKROOT sysroot resolution
         let ws = temp.path();
 
-        // Simulate cc toolchain with clang, clang++ binaries
+        // Simulate standalone cc toolchain with clang, clang++ binaries
         let cc_bin = ws.join(".dmz/toolchains/cc/bin");
         fs::create_dir_all(&cc_bin).unwrap();
         fs::write(cc_bin.join("clang"), "#!/bin/sh\necho real-clang").unwrap();
         fs::write(cc_bin.join("clang++"), "#!/bin/sh\necho real-clang++").unwrap();
-
-        // Simulate applesdk
-        let sdk_dir = ws.join(".dmz/toolchains/applesdk/SDKs/MacOSX.sdk/usr/include");
-        fs::create_dir_all(&sdk_dir).unwrap();
-        fs::write(sdk_dir.join("stdio.h"), "/* stdio */").unwrap();
-        fs::write(sdk_dir.join("zlib.h"), "/* zlib */").unwrap();
 
         // Setup toolchains
         ToolchainSetup::setup_imported_toolchains(ws).unwrap();
@@ -235,10 +233,11 @@ mod tests {
                 "#!/bin/sh\necho real-clang++"
             );
 
-            // Verify clang and clang++ are hermetic wrappers
+            // Verify clang and clang++ are hermetic wrappers supporting host/SDKROOT -isysroot
             let clang_wrapper = fs::read_to_string(cc_bin.join("clang")).unwrap();
             assert!(clang_wrapper.contains("DMZ Hermetic Clang Wrapper"));
             assert!(clang_wrapper.contains("-isysroot"));
+            assert!(clang_wrapper.contains("/usr/bin/xcrun --sdk macosx --show-sdk-path"));
 
             // Verify cc wrapper was generated as well
             let cc_path = cc_bin.join("cc");
@@ -267,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cmake_toolchain_with_apple_sdk_sysroot() {
+    fn test_cmake_toolchain_with_host_apple_sdk_sysroot_fallback() {
         let temp = tempdir().unwrap();
         let ws = temp.path();
 
@@ -277,26 +276,24 @@ mod tests {
         fs::create_dir_all(ws.join(".dmz/toolchains/cc/bin")).unwrap();
         fs::write(ws.join(".dmz/toolchains/cc/bin/clang"), "clang").unwrap();
 
-        let sdk_dir = ws.join(".dmz/toolchains/applesdk/SDKs/MacOSX.sdk/usr/include");
-        fs::create_dir_all(&sdk_dir).unwrap();
-        fs::write(sdk_dir.join("zlib.h"), "/* zlib */").unwrap();
-
         ToolchainSetup::setup_imported_toolchains(ws).unwrap();
 
         let cmake_tc = ws.join(".dmz/toolchains/dmz.toolchain.cmake");
         assert!(cmake_tc.exists());
         let content = fs::read_to_string(&cmake_tc).unwrap();
 
-        // Must configure Darwin and CMAKE_OSX_SYSROOT prior to compiler check
+        // Must configure Darwin and CMAKE_OSX_SYSROOT via SDKROOT or host xcrun prior to compiler check
         assert!(content.contains("CMAKE_SYSTEM_NAME \"Darwin\""));
         assert!(content.contains("CMAKE_OSX_SYSROOT"));
+        assert!(content.contains("/usr/bin/xcrun --sdk macosx --show-sdk-path"));
         assert!(content.contains("CMAKE_FIND_ROOT_PATH_MODE_INCLUDE BOTH"));
         assert!(content.contains("CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH"));
 
-        // env.sh must export SDKROOT and NOT export DEVELOPER_DIR (since no xcrun)
+        // env.sh must resolve SDKROOT cleanly from host xcrun on Darwin and NOT set DEVELOPER_DIR into .dmz
         let env_sh = fs::read_to_string(ws.join(".dmz/env.sh")).unwrap();
         assert!(env_sh.contains("export SDKROOT="));
-        assert!(env_sh.contains("[ -f \"$DMZ_WS/.dmz/toolchains/applesdk/usr/bin/xcrun\" ]"));
+        assert!(env_sh.contains("/usr/bin/xcrun --sdk macosx --show-sdk-path"));
+        assert!(!env_sh.contains(".dmz/toolchains/applesdk"));
     }
 
     #[test]
@@ -380,5 +377,72 @@ mod tests {
         ToolchainSetup::setup_imported_toolchains(ws).unwrap();
         let env_sh_3 = fs::read_to_string(ws.join(".dmz/env.sh")).unwrap();
         assert_eq!(env_sh_1, env_sh_3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_env_sh_activates_venv_unsets_pythonhome_and_exposes_dmz_site_packages() {
+        let temp = tempdir().unwrap();
+        let ws = temp.path();
+
+        let py_tc_bin = ws.join(".dmz/toolchains/python/bin");
+        let venv_bin = ws.join(".venv/bin");
+        let dmz_sp = ws.join(".dmz/venv/lib/python3.11/site-packages");
+        let venv_sp = ws.join(".venv/lib/python3.11/site-packages");
+        fs::create_dir_all(&py_tc_bin).unwrap();
+        fs::create_dir_all(ws.join(".dmz/toolchains/python/lib")).unwrap();
+        fs::create_dir_all(&venv_bin).unwrap();
+        fs::create_dir_all(&dmz_sp).unwrap();
+        fs::create_dir_all(&venv_sp).unwrap();
+        fs::write(py_tc_bin.join("python3"), "#!/bin/sh\necho toolchain\n").unwrap();
+        fs::write(venv_bin.join("python3"), "#!/bin/sh\necho venv\n").unwrap();
+
+        ToolchainSetup::setup_imported_toolchains(ws).unwrap();
+
+        let env_sh = fs::read_to_string(ws.join(".dmz/env.sh")).unwrap();
+        assert!(
+            !env_sh.contains("export PYTHONHOME="),
+            "env.sh must not export PYTHONHOME over .venv/pyvenv.cfg"
+        );
+        assert!(
+            env_sh.contains("unset PYTHONHOME"),
+            "env.sh must unset stale PYTHONHOME"
+        );
+
+        let probe_cmd = format!(
+            "export PYTHONHOME=/stale/pythonhome; . \"{}/.dmz/env.sh\" >/dev/null; printf '%s|%s|%s|%s' \"${{PYTHONHOME:-UNSET}}\" \"$VIRTUAL_ENV\" \"$PATH\" \"$PYTHONPATH\"",
+            ws.to_string_lossy()
+        );
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&probe_cmd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "Sourcing env.sh failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let parts: Vec<&str> = stdout.split('|').collect();
+        assert_eq!(parts.len(), 4, "Unexpected probe output: {}", stdout);
+        assert_eq!(parts[0], "UNSET", "PYTHONHOME must be unset");
+        assert!(
+            parts[1].ends_with("/.venv"),
+            "VIRTUAL_ENV should point to .venv, got: {}",
+            parts[1]
+        );
+        let venv_idx = parts[2].find(".venv/bin");
+        let tc_idx = parts[2].find(".dmz/toolchains/python/bin");
+        assert!(
+            matches!((venv_idx, tc_idx), (Some(v), Some(t)) if v < t),
+            ".venv/bin must precede .dmz/toolchains/python/bin on PATH: {}",
+            parts[2]
+        );
+        assert!(
+            parts[3].contains(".dmz/venv/lib/python3.11/site-packages"),
+            "PYTHONPATH should expose .dmz/venv site-packages: {}",
+            parts[3]
+        );
     }
 }

@@ -341,6 +341,7 @@ async fn test_multi_sidecar_lifecycle_and_cancelled_wait_for_exit_teardown() {
             workspace_root: root.to_path_buf(),
             project,
             allow_network: false,
+            ..SidecarPairConfig::default()
         })
         .await
         .expect("Failed to start multi-sidecar pair");
@@ -374,4 +375,99 @@ async fn test_multi_sidecar_lifecycle_and_cancelled_wait_for_exit_teardown() {
         SidecarLifecycleState::Stopped
     );
     assert!(!sock.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_sidecar_orchestrator_sandbox_and_no_sandbox_modes() {
+    use dmz_core::workspace::{MemberRole, WorkspaceMember, WorkspaceProjectConfig};
+    use dmz_supervisor::sidecar_orchestrator::SidecarPairConfig;
+
+    let temp_dir = tempfile::tempdir().expect("create tempdir");
+    let root = temp_dir.path().join("ws");
+    let prim_dir = root.join("primary");
+    let sc_dir = root.join("sidecar");
+    let outside_secret = temp_dir.path().join("outside_secret.txt");
+    fs::create_dir_all(&prim_dir).expect("create primary dir");
+    fs::create_dir_all(&sc_dir).expect("create sidecar dir");
+    fs::write(&outside_secret, "top-secret").expect("write outside file");
+
+    let mut primary = WorkspaceMember::new("primary", "primary", MemberRole::Primary);
+    primary.exec_command = Some("/bin/sh".to_string());
+    // Must run with DMZ_SANDBOX=1 and enforce OS-specific kernel confinement:
+    // macOS Seatbelt blocks reads outside workspace; Linux enforces PR_SET_NO_NEW_PRIVS=1.
+    let sandbox_probe_script = if cfg!(target_os = "macos") {
+        format!(
+            "test \"$DMZ_SANDBOX\" = \"1\" && ! /bin/cat \"{}\"",
+            outside_secret.display()
+        )
+    } else {
+        "test \"$DMZ_SANDBOX\" = \"1\" && grep -q '^NoNewPrivs:[[:space:]]*1$' /proc/self/status"
+            .to_string()
+    };
+    primary.exec_args = Some(vec!["-c".to_string(), sandbox_probe_script]);
+
+    let mut sidecar = WorkspaceMember::new("sidecar", "sidecar", MemberRole::Sidecar);
+    sidecar.exec_command = Some("/bin/sh".to_string());
+    sidecar.exec_args = Some(vec!["-c".to_string(), "sleep 10".to_string()]);
+
+    let mut project = WorkspaceProjectConfig::new("sb-test", vec![primary, sidecar]);
+    project.ipc.readiness_timeout_ms = 0;
+    project.ipc.drain_timeout_ms = 500;
+
+    let orch = SidecarOrchestrator::new();
+    let _sock = orch
+        .start_pair(SidecarPairConfig {
+            workspace_root: root.clone(),
+            project: project.clone(),
+            allow_network: false,
+            no_sandbox: false,
+            ..SidecarPairConfig::default()
+        })
+        .await
+        .expect("start sandboxed pair");
+    let mut guard = SidecarTestGuard::new(&orch);
+    let status = orch
+        .wait_for_exit()
+        .await
+        .expect("wait for sandboxed primary");
+    assert!(
+        status.success(),
+        "Sandboxed primary must see DMZ_SANDBOX=1 and be denied reading outside workspace (status={status})"
+    );
+    orch.stop_pair().await.expect("stop sandboxed pair");
+    guard.disarm();
+
+    // Now verify no_sandbox=true sets DMZ_SANDBOX=0 and executes directly on the host
+    let mut host_project = project;
+    if let Some(p) = host_project.members.first_mut() {
+        p.exec_args = Some(vec![
+            "-c".to_string(),
+            format!(
+                "test \"$DMZ_SANDBOX\" = \"0\" && /bin/cat \"{}\" >/dev/null",
+                outside_secret.display()
+            ),
+        ]);
+    }
+    let _sock2 = orch
+        .start_pair(SidecarPairConfig {
+            workspace_root: root,
+            project: host_project,
+            allow_network: false,
+            no_sandbox: true,
+            ..SidecarPairConfig::default()
+        })
+        .await
+        .expect("start unsandboxed pair");
+    let mut guard2 = SidecarTestGuard::new(&orch);
+    let host_status = orch
+        .wait_for_exit()
+        .await
+        .expect("wait for unsandboxed primary");
+    assert!(
+        host_status.success(),
+        "no_sandbox=true must export DMZ_SANDBOX=0 and allow host execution"
+    );
+    orch.stop_pair().await.expect("stop unsandboxed pair");
+    guard2.disarm();
 }

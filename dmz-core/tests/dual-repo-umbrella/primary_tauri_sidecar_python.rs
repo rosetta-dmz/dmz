@@ -111,6 +111,7 @@ fn test_dual_repo_umbrella_export_and_import_roundtrip() {
         since: None,
         with_toolchain: false,
         multi_workspace: Some(manifest),
+        ..Default::default()
     };
 
     let manifest_result = AirGapExporter::export(&export_config).expect("Export failed");
@@ -220,6 +221,7 @@ fn test_dual_repo_umbrella_export_and_import_roundtrip() {
         target_store_dir: target_dir.join(".dmz/store"),
         target_workspace_dir: target_dir.clone(),
         verify_closure_hash: true,
+        ..Default::default()
     };
 
     let import_res = AirGapImporter::import(&import_config).expect("Import failed");
@@ -245,11 +247,19 @@ fn test_dual_repo_umbrella_export_and_import_roundtrip() {
     assert!(target_dir.join("README.md").is_file());
 
     // Verify offline dependency hydration:
-    // a) Tauri CLI shim was materialized
-    let tauri_shim = target_dir.join("workspaces/frontend/node_modules/.bin/tauri");
+    // a) Unbundled devDependency must NOT create a dead Tauri CLI shim; once installed it MUST
+    let frontend_member = target_dir.join("workspaces/frontend");
+    let tauri_shim = frontend_member.join("node_modules/.bin/tauri");
+    assert!(
+        !tauri_shim.exists(),
+        "Unbundled devDependency @tauri-apps/cli must not leave a dead shim at {:?}",
+        tauri_shim
+    );
+    fs::create_dir_all(frontend_member.join("node_modules/@tauri-apps/cli")).unwrap();
+    dmz_core::install::mappers::NpmMapper::hydrate_workspace_bin_shims(&frontend_member);
     assert!(
         tauri_shim.is_file(),
-        "Expected tauri CLI shim at {:?}",
+        "Expected tauri CLI shim at {:?} once package is installed",
         tauri_shim
     );
     if cfg!(windows) {

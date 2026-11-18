@@ -92,6 +92,7 @@ fn test_dual_repo_umbrella_export_and_import_reversed_roles_python_primary_node_
         since: None,
         with_toolchain: false,
         multi_workspace: Some(manifest),
+        ..Default::default()
     };
 
     AirGapExporter::export(&export_config).expect("Export failed");
@@ -104,6 +105,7 @@ fn test_dual_repo_umbrella_export_and_import_reversed_roles_python_primary_node_
         target_store_dir: target_dir.join(".dmz/store"),
         target_workspace_dir: target_dir.clone(),
         verify_closure_hash: true,
+        ..Default::default()
     };
 
     let import_res = AirGapImporter::import(&import_config).expect("Import failed");
@@ -129,11 +131,19 @@ fn test_dual_repo_umbrella_export_and_import_reversed_roles_python_primary_node_
     let py_settings_content = fs::read_to_string(&primary_py_settings).unwrap();
     assert!(py_settings_content.contains("python.terminal.activateEnvironment"));
 
-    // b) Tauri CLI shim materialized in sidecar Node/GUI folder
-    let sidecar_tauri_shim = target_dir.join("workspaces/ui-client/node_modules/.bin/tauri");
+    // b) Dead Tauri CLI shim is NOT created when unbundled devDependency is absent from node_modules,
+    // and IS materialized when @tauri-apps/cli exists in node_modules.
+    let ui_member = target_dir.join("workspaces/ui-client");
+    let sidecar_tauri_shim = ui_member.join("node_modules/.bin/tauri");
+    assert!(
+        !sidecar_tauri_shim.exists(),
+        "Unbundled devDependency @tauri-apps/cli must not materialize a dead shim"
+    );
+    fs::create_dir_all(ui_member.join("node_modules/@tauri-apps/cli")).unwrap();
+    dmz_core::install::mappers::NpmMapper::hydrate_workspace_bin_shims(&ui_member);
     assert!(
         sidecar_tauri_shim.is_file(),
-        "Expected Tauri CLI shim in sidecar desktop-ui directory"
+        "Expected Tauri CLI shim in sidecar desktop-ui directory once package is installed"
     );
     if cfg!(windows) {
         assert!(

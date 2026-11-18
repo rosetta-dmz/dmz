@@ -240,7 +240,7 @@ fn parse_elf_dynamic(buf: &[u8], has_native: &mut bool) -> bool {
 
         let (phoff, phentsize, phnum) = if class == 2 {
             (
-                safe_read_u64(buf, 32, is_le).unwrap_or(0) as usize,
+                usize::try_from(safe_read_u64(buf, 32, is_le).unwrap_or(0)).unwrap_or(0),
                 safe_read_u16(buf, 54, is_le).unwrap_or(0) as usize,
                 safe_read_u16(buf, 56, is_le).unwrap_or(0) as usize,
             )

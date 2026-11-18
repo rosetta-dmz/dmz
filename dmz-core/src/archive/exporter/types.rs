@@ -53,6 +53,11 @@ pub struct ExportConfig {
     pub since: Option<String>,
     pub with_toolchain: bool,
     pub multi_workspace: Option<crate::workspace::WorkspaceProjectConfig>,
+    pub include_dev: bool,
+    pub toolchain_profile: crate::toolchain::ToolchainProfile,
+    /// When `false` (default), `with_toolchain` exports fail if a required primary runtime
+    /// toolchain (e.g., standalone Python) cannot be discovered on the export host.
+    pub allow_missing_toolchains: bool,
 }
 
 impl Default for ExportConfig {
@@ -69,6 +74,9 @@ impl Default for ExportConfig {
             since: None,
             with_toolchain: false,
             multi_workspace: None,
+            include_dev: true,
+            toolchain_profile: crate::toolchain::ToolchainProfile::Minimal,
+            allow_missing_toolchains: false,
         }
     }
 }

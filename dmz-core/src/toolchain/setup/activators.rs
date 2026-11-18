@@ -5,31 +5,38 @@ use std::fs;
 use std::path::Path;
 
 /// Generates shell and batch activator scripts in `.dmz/` for immediate developer use.
+///
+/// # Errors
+/// Returns `ToolchainError::SetupFailed` if `.dmz`, `env.sh`, or `env.bat` cannot be written.
 pub fn generate_activator_scripts(workspace_root: &Path) -> Result<(), ToolchainError> {
     let env_sh_path = workspace_root.join(".dmz/env.sh");
     let env_bat_path = workspace_root.join(".dmz/env.bat");
 
+    let default_ws_escaped = workspace_root.to_string_lossy().replace('\'', "'\\''");
     let mut env_sh_content = r#"#!/bin/sh
 # DMZ Toolchain Environment Activator
 # Source this script to activate bundled compilers and runtimes:
 #   source .dmz/env.sh
 
 # Ensure safe globbing behavior across shells (POSIX sh, bash, and zsh)
-if [ -n "$ZSH_VERSION" ]; then
+if [ -n "${ZSH_VERSION:-}" ]; then
     setopt localoptions nonomatch nullglob 2>/dev/null || true
 fi
 
 # Determine DMZ workspace root reliably across bash, zsh, and dash/POSIX sh
-if [ -n "$BASH_SOURCE" ]; then
+_DMZ_SELF=""
+if [ -n "${BASH_SOURCE:-}" ]; then
     _DMZ_SELF="$BASH_SOURCE"
-elif [ -n "$ZSH_VERSION" ]; then
-    _DMZ_SELF="${(%):-%x}"
+elif [ -n "${ZSH_VERSION:-}" ]; then
+    eval '_DMZ_SELF="${(%):-%x}"'
 else
-    _DMZ_SELF="$0"
+    case "$0" in
+        */env.sh|env.sh) _DMZ_SELF="$0" ;;
+    esac
 fi
 
 # Resolve physical path to handle symlinked .dmz directories in member workspaces
-if [ -f "$_DMZ_SELF" ]; then
+if [ -n "$_DMZ_SELF" ] && [ -f "$_DMZ_SELF" ]; then
     _DMZ_DIR="$(cd -P "$(dirname "$_DMZ_SELF")" 2>/dev/null && pwd -P)"
     DMZ_WS="$(cd -P "$_DMZ_DIR/.." 2>/dev/null && pwd -P)"
 elif [ -d "./.dmz" ]; then
@@ -42,7 +49,12 @@ elif [ -d "../../.dmz" ]; then
     _DMZ_DIR="$(cd -P "../../.dmz" 2>/dev/null && pwd -P)"
     DMZ_WS="$(cd -P "$_DMZ_DIR/.." 2>/dev/null && pwd -P)"
 else
-    DMZ_WS="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
+    _DMZ_DEFAULT_WS='__DMZ_DEFAULT_WS__'
+    if [ -n "$_DMZ_DEFAULT_WS" ] && [ -d "$_DMZ_DEFAULT_WS/.dmz" ]; then
+        DMZ_WS="$(cd -P "$_DMZ_DEFAULT_WS" 2>/dev/null && pwd -P)"
+    else
+        DMZ_WS="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
+    fi
 fi
 
 # Fallback parent directory traversal if .dmz/toolchains is in an ancestor directory
@@ -60,13 +72,6 @@ export DMZ_WORKSPACE="$DMZ_WS"
 if [ -d "$DMZ_WS/.dmz/toolchains" ]; then
     for tc_bin in "$DMZ_WS"/.dmz/toolchains/*/bin; do
         if [ -d "$tc_bin" ]; then
-            case "$tc_bin" in
-                *"/applesdk/bin")
-                    if [ ! -d "$DMZ_WS/.dmz/toolchains/applesdk/SDKs" ] && [ ! -d "$DMZ_WS/.dmz/toolchains/applesdk/Platforms" ]; then
-                        continue
-                    fi
-                    ;;
-            esac
             case ":$PATH:" in
                 *":$tc_bin:"*) ;;
                 *) export PATH="$tc_bin:$PATH" ;;
@@ -75,9 +80,12 @@ if [ -d "$DMZ_WS/.dmz/toolchains" ]; then
     done
 fi
 
-# Prepend member node_modules/.bin directories to PATH
+# Prepend member and nested node_modules/.bin directories to PATH
 if [ -d "$DMZ_WS/workspaces" ]; then
-    for ws_bin in "$DMZ_WS"/workspaces/*/node_modules/.bin; do
+    for ws_bin in \
+        "$DMZ_WS"/workspaces/*/node_modules/.bin \
+        "$DMZ_WS"/workspaces/*/*/node_modules/.bin \
+        "$DMZ_WS"/workspaces/*/*/*/node_modules/.bin; do
         if [ -d "$ws_bin" ]; then
             case ":$PATH:" in
                 *":$ws_bin:"*) ;;
@@ -86,6 +94,14 @@ if [ -d "$DMZ_WS/workspaces" ]; then
         fi
     done
 fi
+for nested_bin in "$DMZ_WS"/*/node_modules/.bin "$DMZ_WS"/*/*/node_modules/.bin; do
+    if [ -d "$nested_bin" ]; then
+        case ":$PATH:" in
+            *":$nested_bin:"*) ;;
+            *) export PATH="$nested_bin:$PATH" ;;
+        esac
+    fi
+done
 if [ -d "$DMZ_WS/node_modules/.bin" ]; then
     case ":$PATH:" in
         *":$DMZ_WS/node_modules/.bin:"*) ;;
@@ -111,8 +127,103 @@ if [ -d "$DMZ_WS/.dmz/toolchains/go" ] && ([ -f "$DMZ_WS/.dmz/toolchains/go/bin/
     export GOROOT="$DMZ_WS/.dmz/toolchains/go"
 fi
 
-if [ -d "$DMZ_WS/.dmz/toolchains/python" ] && ([ -d "$DMZ_WS/.dmz/toolchains/python/lib" ] || [ -d "$DMZ_WS/.dmz/toolchains/python/Lib" ]); then
-    export PYTHONHOME="$DMZ_WS/.dmz/toolchains/python"
+# Configure Python virtual environment (.venv) and offline site-packages cleanly.
+# Unset PYTHONHOME so .venv/pyvenv.cfg and relative standalone sys.prefix resolution work
+# without pinning sys.prefix exclusively to .dmz/toolchains/python (which excludes site-packages).
+unset PYTHONHOME 2>/dev/null || true
+
+_DMZ_VENV=""
+if [ -d "$PWD/.venv" ]; then
+    case "$PWD" in
+        "$DMZ_WS"|"$DMZ_WS"/*) _DMZ_VENV="$PWD/.venv" ;;
+    esac
+fi
+if [ -z "$_DMZ_VENV" ] && [ -d "$DMZ_WS/.venv" ]; then
+    _DMZ_VENV="$DMZ_WS/.venv"
+fi
+if [ -z "$_DMZ_VENV" ] && [ -d "$DMZ_WS/workspaces" ]; then
+    for _cand_venv in "$DMZ_WS"/workspaces/*/.venv "$DMZ_WS"/workspaces/*/*/.venv; do
+        if [ -d "$_cand_venv" ]; then
+            _DMZ_VENV="$_cand_venv"
+            break
+        fi
+    done
+fi
+if [ -z "$_DMZ_VENV" ]; then
+    for _cand_venv in "$DMZ_WS"/*/.venv; do
+        if [ -d "$_cand_venv" ]; then
+            _DMZ_VENV="$_cand_venv"
+            break
+        fi
+    done
+fi
+
+if [ -n "$_DMZ_VENV" ] && [ -d "$_DMZ_VENV" ]; then
+    export VIRTUAL_ENV="$_DMZ_VENV"
+    if [ -d "$_DMZ_VENV/bin" ]; then
+        case ":$PATH:" in
+            *":$_DMZ_VENV/bin:"*) ;;
+            *) export PATH="$_DMZ_VENV/bin:$PATH" ;;
+        esac
+    fi
+fi
+
+_DMZ_PY_VER=""
+if command -v python3 >/dev/null 2>&1; then
+    _DMZ_PY_VER="$(python3 -c 'import sys; print(f"python{sys.version_info[0]}.{sys.version_info[1]}")' 2>/dev/null)"
+    case "$_DMZ_PY_VER" in
+        python3.*) ;;
+        *) _DMZ_PY_VER="" ;;
+    esac
+fi
+
+_DMZ_PYPATH=""
+_DMZ_ADD_PY_ROOTS=""
+if [ -n "$_DMZ_VENV" ] && [ -d "$_DMZ_VENV" ]; then
+    _DMZ_VENV_PARENT="$(cd -P "$_DMZ_VENV/.." 2>/dev/null && pwd -P)"
+    _DMZ_ADD_PY_ROOTS="$_DMZ_VENV
+$_DMZ_VENV_PARENT/.dmz/venv
+$DMZ_WS/.dmz/venv"
+elif [ -d "$DMZ_WS/.dmz/venv" ]; then
+    _DMZ_ADD_PY_ROOTS="$DMZ_WS/.dmz/venv"
+fi
+
+if [ -n "$_DMZ_ADD_PY_ROOTS" ]; then
+    _DMZ_MATCHED_EXACT=0
+    if [ -n "$_DMZ_PY_VER" ]; then
+        while IFS= read -r _py_root; do
+            [ -n "$_py_root" ] || continue
+            _py_sp="$_py_root/lib/$_DMZ_PY_VER/site-packages"
+            if [ -d "$_py_sp" ]; then
+                _DMZ_MATCHED_EXACT=1
+                case ":$_DMZ_PYPATH:" in
+                    *":$_py_sp:"*) ;;
+                    *) _DMZ_PYPATH="${_DMZ_PYPATH:+$_DMZ_PYPATH:}$_py_sp" ;;
+                esac
+            fi
+        done <<EOF
+$_DMZ_ADD_PY_ROOTS
+EOF
+    fi
+    if [ "$_DMZ_MATCHED_EXACT" = "0" ]; then
+        while IFS= read -r _py_root; do
+            [ -n "$_py_root" ] || continue
+            for _py_sp in "$_py_root"/lib/python3.*/site-packages; do
+                if [ -d "$_py_sp" ]; then
+                    case ":$_DMZ_PYPATH:" in
+                        *":$_py_sp:"*) ;;
+                        *) _DMZ_PYPATH="${_DMZ_PYPATH:+$_DMZ_PYPATH:}$_py_sp" ;;
+                    esac
+                fi
+            done
+        done <<EOF
+$_DMZ_ADD_PY_ROOTS
+EOF
+    fi
+fi
+
+if [ -n "$_DMZ_PYPATH" ]; then
+    export PYTHONPATH="$_DMZ_PYPATH${PYTHONPATH:+:$PYTHONPATH}"
 fi
 
 if [ -d "$DMZ_WS/.dmz/toolchains/node" ]; then
@@ -212,30 +323,18 @@ if [ -d "$DMZ_WS/.dmz/toolchains/pkgconfig" ]; then
     fi
 fi
 "#
-    .to_string();
+    .replace("__DMZ_DEFAULT_WS__", &default_ws_escaped);
 
-    if crate::toolchain::ToolchainEnv::is_genuine_apple_developer_dir(
-        &workspace_root.join(".dmz/toolchains/applesdk"),
-    ) || crate::toolchain::ToolchainEnv::find_apple_sdk_root(
-        &workspace_root.join(".dmz/toolchains/applesdk"),
-    )
-    .is_some()
+    if cfg!(target_os = "macos")
+        || workspace_root.join(".dmz/toolchains/cmake").exists()
+        || workspace_root.join(".dmz/toolchains/cc").exists()
     {
         env_sh_content.push_str(
             r#"
-if [ -d "$DMZ_WS/.dmz/toolchains/applesdk" ]; then
-    for sdk_parent in "$DMZ_WS/.dmz/toolchains/applesdk/Platforms/MacOSX.platform/Developer/SDKs" "$DMZ_WS/.dmz/toolchains/applesdk/SDKs"; do
-        if [ -d "$sdk_parent" ]; then
-            for sdk_path in "$sdk_parent"/MacOSX*.sdk; do
-                if [ -d "$sdk_path" ]; then
-                    export SDKROOT="$sdk_path"
-                    break 2
-                fi
-            done
-        fi
-    done
-    if [ -f "$DMZ_WS/.dmz/toolchains/applesdk/usr/bin/xcrun" ] || [ -f "$DMZ_WS/.dmz/toolchains/applesdk/bin/xcrun" ]; then
-        export DEVELOPER_DIR="$DMZ_WS/.dmz/toolchains/applesdk"
+if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ -z "${SDKROOT:-}" ] && [ -x /usr/bin/xcrun ] && { [ -d /Library/Developer/CommandLineTools/SDKs ] || [ -L /var/db/xcode_select_link ] || [ -n "${DEVELOPER_DIR:-}" ]; }; then
+    _DMZ_HOST_SDK="$(/usr/bin/xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
+    if [ -n "$_DMZ_HOST_SDK" ] && [ -d "$_DMZ_HOST_SDK" ]; then
+        export SDKROOT="$_DMZ_HOST_SDK"
     fi
 fi
 "#,
@@ -251,20 +350,18 @@ REM DMZ Toolchain Environment Activator (Windows)
 set DMZ_WORKSPACE=%~dp0..
 
 for /d %%D in ("%DMZ_WORKSPACE%\.dmz\toolchains\*") do (
-    if exist "%%D\bin" (
-        echo ;%PATH%; | findstr /I /C:";%%D\bin;" >nul || set "PATH=%%D\bin;%PATH%"
-    )
+    if exist "%%D\bin" call :_dmz_prepend_path "%%D\bin"
+    if exist "%%D\python.exe" call :_dmz_prepend_path "%%D"
 )
 
 for /d %%D in ("%DMZ_WORKSPACE%\workspaces\*") do (
-    if exist "%%D\node_modules\.bin" (
-        echo ;%PATH%; | findstr /I /C:";%%D\node_modules\.bin;" >nul || set "PATH=%%D\node_modules\.bin;%PATH%"
+    if exist "%%D\node_modules\.bin" call :_dmz_prepend_path "%%D\node_modules\.bin"
+    for /d %%S in ("%%D\*") do (
+        if exist "%%S\node_modules\.bin" call :_dmz_prepend_path "%%S\node_modules\.bin"
     )
 )
 
-if exist "%DMZ_WORKSPACE%\node_modules\.bin" (
-    echo ;%PATH%; | findstr /I /C:";%DMZ_WORKSPACE%\node_modules\.bin;" >nul || set "PATH=%DMZ_WORKSPACE%\node_modules\.bin;%PATH%"
-)
+if exist "%DMZ_WORKSPACE%\node_modules\.bin" call :_dmz_prepend_path "%DMZ_WORKSPACE%\node_modules\.bin"
 
 if exist "%DMZ_WORKSPACE%\.dmz\toolchains\rust" (
     set "RUSTUP_HOME=%DMZ_WORKSPACE%\.dmz\toolchains\rust"
@@ -275,10 +372,30 @@ if exist "%DMZ_WORKSPACE%\.dmz\toolchains\go\bin\go.exe" (
     set "GOROOT=%DMZ_WORKSPACE%\.dmz\toolchains\go"
 )
 
-if exist "%DMZ_WORKSPACE%\.dmz\toolchains\python\Lib" (
-    set "PYTHONHOME=%DMZ_WORKSPACE%\.dmz\toolchains\python"
-) else if exist "%DMZ_WORKSPACE%\.dmz\toolchains\python\lib" (
-    set "PYTHONHOME=%DMZ_WORKSPACE%\.dmz\toolchains\python"
+set "PYTHONHOME="
+set "_DMZ_VENV="
+if exist "%CD%\.venv" (
+    set "_DMZ_VENV=%CD%\.venv"
+) else if exist "%DMZ_WORKSPACE%\.venv" (
+    set "_DMZ_VENV=%DMZ_WORKSPACE%\.venv"
+) else (
+    for /d %%D in ("%DMZ_WORKSPACE%\workspaces\*") do (
+        if not defined _DMZ_VENV if exist "%%D\.venv" set "_DMZ_VENV=%%D\.venv"
+    )
+)
+if defined _DMZ_VENV (
+    set "VIRTUAL_ENV=%_DMZ_VENV%"
+    if exist "%_DMZ_VENV%\Scripts" call :_dmz_prepend_path "%_DMZ_VENV%\Scripts"
+    if exist "%_DMZ_VENV%\Lib\site-packages" (
+        set "PYTHONPATH=%_DMZ_VENV%\Lib\site-packages;%PYTHONPATH%"
+    )
+    for /d %%S in ("%_DMZ_VENV%\..\.dmz\venv\lib\python3.*") do (
+        if exist "%%S\site-packages" set "PYTHONPATH=%%S\site-packages;%PYTHONPATH%"
+    )
+) else (
+    for /d %%S in ("%DMZ_WORKSPACE%\.dmz\venv\lib\python3.*") do (
+        if exist "%%S\site-packages" set "PYTHONPATH=%%S\site-packages;%PYTHONPATH%"
+    )
 )
 
 if exist "%DMZ_WORKSPACE%\.dmz\toolchains\node\lib\node_modules" (
@@ -359,6 +476,14 @@ if exist "%DMZ_WORKSPACE%\.dmz\toolchains\pkgconfig\lib\pkgconfig" (
 )
 
 echo DMZ bundled toolchains activated.
+goto :eof
+
+:_dmz_prepend_path
+set "_DMZ_ADD=%~1"
+if "%_DMZ_ADD%"=="" goto :eof
+echo ;%PATH%; | findstr /I /C:";%_DMZ_ADD%;" >nul || set "PATH=%_DMZ_ADD%;%PATH%"
+set "_DMZ_ADD="
+goto :eof
 "#;
 
     fs::create_dir_all(workspace_root.join(".dmz")).map_err(|e| {
@@ -378,4 +503,20 @@ echo DMZ bundled toolchains activated.
         .map_err(|e| ToolchainError::SetupFailed(format!("Failed to write env.bat: {}", e)))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_env_bat_uses_subroutine_for_loop_path_updates() {
+        let ws = tempdir().unwrap();
+        generate_activator_scripts(ws.path()).unwrap();
+        let bat = fs::read_to_string(ws.path().join(".dmz/env.bat")).unwrap();
+        assert!(bat.contains("call :_dmz_prepend_path \"%%D\\bin\""));
+        assert!(bat.contains("call :_dmz_prepend_path \"%%D\""));
+        assert!(bat.contains(":_dmz_prepend_path"));
+    }
 }

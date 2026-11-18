@@ -1,5 +1,7 @@
 use super::backup::{create_backup_snapshot, restore_backup_snapshot};
-use super::hydration::{hydrate_offline_dependencies, relative_path_between};
+use super::hydration::{
+    hydrate_offline_dependencies, hydrate_offline_dependencies_with_options, relative_path_between,
+};
 use super::security::{
     is_contained_path, is_safe_relative_path, unpack_tar_entry_contained,
     unpack_tar_entry_contained_bounded,
@@ -164,6 +166,8 @@ impl AirGapImporter {
             &effective_store,
             &effective_workspace,
             config.verify_closure_hash,
+            config.include_dev,
+            config.install_dependencies,
         );
 
         match result {
@@ -182,6 +186,8 @@ impl AirGapImporter {
         effective_store: &Path,
         effective_workspace: &Path,
         verify_closure_hash: bool,
+        include_dev: bool,
+        install_dependencies: bool,
     ) -> Result<ImportResult, ImportError> {
         // Open archive and initialize zstd stream
         let file = File::open(effective_archive)
@@ -194,14 +200,16 @@ impl AirGapImporter {
         let mut archive = TarArchive::new(zstd_decoder);
 
         let mut closure_signature = String::new();
-        let mut imported_count = 0;
+        let mut imported_count: usize = 0;
         let mut is_delta = false;
         let mut has_git_history = false;
-        let mut has_toolchains = false;
         let mut vcs_provenance = None;
         let mut manifest_toolchains = Vec::new();
         let mut parsed_lockfile: Option<DmzLockfile> = None;
         let mut workspace_project = None;
+        let mut extracted_store_files: Vec<(PathBuf, PathBuf)> = Vec::new();
+        let mut cleaned_toolchain_ecosystems: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         // Single-pass entry iteration, extraction, and verification
         let mut file_count: usize = 0;
@@ -398,6 +406,10 @@ impl AirGapImporter {
                     remaining_quota,
                 )?;
                 total_bytes = total_bytes.saturating_add(written);
+                let unpacked_abs = effective_store.join(rel_path);
+                if unpacked_abs.is_file() {
+                    extracted_store_files.push((rel_path.to_path_buf(), unpacked_abs));
+                }
                 imported_count += 1;
             } else if path.starts_with("toolchains") || path.starts_with(".dmz/toolchains") {
                 let rel_path = path
@@ -409,6 +421,11 @@ impl AirGapImporter {
                 }
 
                 let tc_root = effective_workspace.join(".dmz/toolchains");
+                prepare_clean_toolchain_ecosystem_dir(
+                    &tc_root,
+                    rel_path,
+                    &mut cleaned_toolchain_ecosystems,
+                )?;
                 let written = unpack_tar_entry_contained_bounded(
                     &mut entry,
                     &tc_root,
@@ -416,7 +433,6 @@ impl AirGapImporter {
                     remaining_quota,
                 )?;
                 total_bytes = total_bytes.saturating_add(written);
-                has_toolchains = true;
             } else {
                 // Workspace source files (Cargo.toml, src/, etc.)
                 let written = unpack_tar_entry_contained_bounded(
@@ -429,24 +445,65 @@ impl AirGapImporter {
             }
         }
 
-        // Root Manifest Dominance: Clean up or ignore orphaned / unrequested toolchain stubs
-        // across all 14 ecosystems that may have been bundled inadvertently or left over from previous imports.
-        let mut declared_ecosystems =
-            crate::toolchain::ToolchainProvider::detect_workspace_ecosystems(
-                effective_workspace,
-                parsed_lockfile.as_ref(),
-            );
-        for tc_entry in &manifest_toolchains {
-            if tc_entry.ecosystem == crate::toolchain::ToolchainEcosystem::AppleSdk {
-                let apple_dir = effective_workspace.join(".dmz/toolchains/applesdk");
-                if !crate::toolchain::ToolchainEnv::is_genuine_apple_developer_dir(&apple_dir)
-                    && crate::toolchain::ToolchainEnv::find_apple_sdk_root(&apple_dir).is_none()
-                {
-                    continue;
+        // Prune any store files extracted from the archive that are not referenced by dmz.lock
+        if let Some(ref lockfile) = parsed_lockfile {
+            if !extracted_store_files.is_empty() {
+                let mut expected_store_files: std::collections::HashSet<PathBuf> =
+                    std::collections::HashSet::new();
+                for pkg in lockfile.packages.values() {
+                    if pkg.is_local_path() {
+                        continue;
+                    }
+                    if let Ok(artifact_path) =
+                        crate::install::locate_locked_store_artifact(effective_store, pkg)
+                    {
+                        let canon = fs::canonicalize(&artifact_path).unwrap_or(artifact_path);
+                        expected_store_files.insert(canon);
+                    } else {
+                        let safe_name = pkg.name.replace('/', "__");
+                        let flat = effective_store.join(&safe_name);
+                        if flat.is_file() {
+                            expected_store_files.insert(fs::canonicalize(&flat).unwrap_or(flat));
+                        }
+                    }
+                }
+
+                for (_rel_path, abs_path) in extracted_store_files {
+                    let canon_abs =
+                        fs::canonicalize(&abs_path).unwrap_or_else(|_| abs_path.clone());
+                    if !expected_store_files.contains(&canon_abs)
+                        && abs_path.is_file()
+                        && fs::remove_file(&abs_path).is_ok()
+                    {
+                        imported_count = imported_count.saturating_sub(1);
+                        let mut cur = abs_path.parent();
+                        while let Some(dir) = cur {
+                            if dir == effective_store || !dir.starts_with(effective_store) {
+                                break;
+                            }
+                            if fs::read_dir(dir)
+                                .map(|mut it| it.next().is_none())
+                                .unwrap_or(false)
+                            {
+                                let _ = fs::remove_dir(dir);
+                                cur = dir.parent();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
                 }
             }
-            declared_ecosystems.insert(tc_entry.ecosystem);
         }
+
+        // Root Manifest Dominance: Clean up or ignore orphaned / unrequested toolchain stubs
+        // across all 14 ecosystems that may have been bundled inadvertently or left over from previous imports.
+        let declared_ecosystems =
+            crate::toolchain::ToolchainProvider::detect_workspace_ecosystems_with_options(
+                effective_workspace,
+                parsed_lockfile.as_ref(),
+                crate::toolchain::ToolchainDetectOptions { include_dev },
+            );
         for eco in crate::toolchain::ToolchainEcosystem::all() {
             if !declared_ecosystems.contains(eco) {
                 let stray_tc = effective_workspace
@@ -477,6 +534,10 @@ impl AirGapImporter {
         {
             let _ = fs::remove_dir(&toolchains_dir);
         }
+        let has_toolchains = toolchains_dir.exists()
+            && fs::read_dir(&toolchains_dir)
+                .map(|mut i| i.next().is_some())
+                .unwrap_or(false);
 
         // Setup imported toolchain permissions, quarantine flags, activator scripts, and IDE settings.
         // Always invoked so `.vscode/settings.json` is generated even when `has_toolchains` is false.
@@ -494,9 +555,10 @@ impl AirGapImporter {
         // Verify that every declared toolchain in airgap_manifest.json was extracted with valid binaries
         if verify_closure_hash {
             for tc_entry in &manifest_toolchains {
-                if declared_ecosystems.is_empty()
-                    || declared_ecosystems.contains(&tc_entry.ecosystem)
-                {
+                if tc_entry.ecosystem.is_host_prerequisite() {
+                    continue;
+                }
+                if declared_ecosystems.contains(&tc_entry.ecosystem) {
                     let tc_root = effective_workspace
                         .join(".dmz/toolchains")
                         .join(tc_entry.ecosystem.as_str());
@@ -532,7 +594,7 @@ impl AirGapImporter {
         // Automatically discover workspace project manifest if not already populated from airgap_manifest.json
         if workspace_project.is_none() {
             if let Some((discovered, _)) =
-                crate::workspace::WorkspaceProjectConfig::discover_workspace_manifest(
+                crate::workspace::WorkspaceProjectConfig::discover_workspace_manifest_scoped(
                     effective_workspace,
                 )
             {
@@ -541,45 +603,97 @@ impl AirGapImporter {
         }
 
         // Materialize offline dependencies (.venv, node_modules, .cargo/vendor) from the local store
-        // BEFORE generating final IDE settings and hydrating workspace configurations.
+        // BEFORE generating final IDE settings, hydrating workspace configurations, or checking optional host SDKs.
         let lockfile_path = effective_workspace.join("dmz.lock");
-        if lockfile_path.is_file() && effective_store.is_dir() && imported_count > 0 {
-            let has_installable_packages = parsed_lockfile
+        let mut installed_packages = 0usize;
+        let mut install_warning = None;
+        if install_dependencies && lockfile_path.is_file() && effective_store.is_dir() {
+            let installable_pkgs: Vec<&crate::resolver::lockfile::LockedPackage> = parsed_lockfile
                 .as_ref()
-                .map(|l| l.packages.values().any(|p| !p.is_local_path()))
-                .unwrap_or(false);
-            if has_installable_packages {
+                .map(|l| l.packages.values().filter(|p| !p.is_local_path()).collect())
+                .unwrap_or_default();
+            let store_has_cached = imported_count > 0
+                || installable_pkgs.iter().any(|pkg| {
+                    crate::install::locate_locked_store_artifact(effective_store, pkg).is_ok()
+                });
+            if !installable_pkgs.is_empty() && store_has_cached {
                 let install_cfg = crate::install::InstallConfig {
                     workspace_path: effective_workspace.to_path_buf(),
                     lockfile_path,
                     store_dir: effective_store.to_path_buf(),
                 };
-                if let Err(e) = crate::install::InstallerEngine::install(&install_cfg) {
-                    if verify_closure_hash {
-                        return Err(ImportError::VerificationFailed(format!(
-                            "Post-extraction dependency install failed: {}",
-                            e
-                        )));
+                match crate::install::InstallerEngine::install(&install_cfg) {
+                    Ok(count) => {
+                        installed_packages = count;
                     }
-                    warn!(
-                        error = %e,
-                        "Post-extraction store install skipped or deferred (verify_closure_hash=false)"
-                    );
+                    Err(e) => {
+                        if verify_closure_hash {
+                            return Err(ImportError::VerificationFailed(format!(
+                                "Post-extraction dependency install failed: {}",
+                                e
+                            )));
+                        }
+                        let msg = e.to_string();
+                        warn!(
+                            error = %msg,
+                            "Post-extraction store install skipped or deferred (verify_closure_hash=false)"
+                        );
+                        install_warning = Some(msg);
+                    }
                 }
             }
         }
 
         // Hydrate offline dependencies: Tauri/npm CLI shims, Cargo vendored sources, and scoped Python settings
-        hydrate_offline_dependencies(
+        let resolved_include_dev = parsed_lockfile
+            .as_ref()
+            .and_then(|l| l.include_dev)
+            .unwrap_or(include_dev);
+        hydrate_offline_dependencies_with_options(
             effective_workspace,
             effective_store,
             workspace_project.as_ref(),
+            resolved_include_dev,
         );
+
+        // Non-blocking macOS host SDK/CLT check (zero GUI popup): import and node_modules/.venv
+        // materialization never abort on missing CLT; surface advisory only when native build tools are absent.
+        if !crate::toolchain::has_usable_apple_sdk_or_clt(effective_workspace) {
+            if let Err(e) =
+                crate::toolchain::verify_apple_prereq_for_ecosystems(&declared_ecosystems)
+            {
+                let note = e.to_string();
+                warn!(warning = %note, "macOS host prerequisite notice after import");
+                install_warning = Some(match install_warning {
+                    Some(prev) => format!("{prev}; {note}"),
+                    None => note,
+                });
+            }
+        }
 
         // Re-synchronize IDE settings and .code-workspace after .venv and node_modules are materialized
         if let Err(e) = crate::toolchain::ToolchainSetup::generate_ide_settings(effective_workspace)
         {
             warn!(error = %e, "Failed to update IDE settings after import");
+        }
+
+        // Exported .code-workspace files embed interpreter paths from the source machine; drop or
+        // redirect any that don't resolve on this machine (VS Code errors on dangling paths).
+        crate::workspace::interpreter::sanitize_code_workspace_interpreters(effective_workspace);
+        crate::workspace::interpreter::sanitize_vscode_settings_interpreters(
+            effective_workspace,
+            effective_workspace,
+        );
+        if let Some(wp) = workspace_project.as_ref() {
+            for member in &wp.members {
+                let member_dir = effective_workspace.join(&member.path);
+                if member_dir.is_dir() {
+                    crate::workspace::interpreter::sanitize_vscode_settings_interpreters(
+                        &member_dir,
+                        effective_workspace,
+                    );
+                }
+            }
         }
 
         // Run post-import ecosystem validation using the registry
@@ -604,6 +718,8 @@ impl AirGapImporter {
 
         Ok(ImportResult {
             imported_packages: imported_count,
+            installed_packages,
+            install_warning,
             closure_signature,
             store_path: effective_store.to_path_buf(),
             workspace_path: effective_workspace.to_path_buf(),
@@ -614,4 +730,55 @@ impl AirGapImporter {
             vcs: vcs_provenance,
         })
     }
+}
+
+/// Clears stale `.dmz/toolchains/<eco>` directories once per archive import before unpacking,
+/// preventing mixed-version stdlib dirs (e.g. leftover `python3.14` alongside `python3.12`)
+/// after validating that `rel_path` contains no traversal or absolute components (CWE-22).
+fn prepare_clean_toolchain_ecosystem_dir(
+    tc_root: &Path,
+    rel_path: &Path,
+    cleaned_ecosystems: &mut std::collections::HashSet<String>,
+) -> Result<(), ImportError> {
+    use std::path::Component;
+
+    let mut normal_components = Vec::new();
+    for component in rel_path.components() {
+        match component {
+            Component::Normal(seg) => normal_components.push(seg),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(ImportError::VerificationFailed(format!(
+                    "Security violation: unsafe path component in toolchain entry {:?}",
+                    rel_path
+                )));
+            }
+        }
+    }
+
+    let Some(first) = normal_components.first() else {
+        return Ok(());
+    };
+    let eco_name = first.to_string_lossy().to_string();
+    if eco_name.is_empty() || !cleaned_ecosystems.insert(eco_name.clone()) {
+        return Ok(());
+    }
+
+    let eco_dir = tc_root.join(&eco_name);
+    if eco_dir.is_symlink() {
+        fs::remove_file(&eco_dir).map_err(|e| {
+            ImportError::IoError(format!(
+                "Failed to remove symlinked toolchain path {:?}: {}",
+                eco_dir, e
+            ))
+        })?;
+    } else if eco_dir.is_dir() {
+        fs::remove_dir_all(&eco_dir).map_err(|e| {
+            ImportError::IoError(format!(
+                "Failed to replace existing toolchain directory {:?}: {}",
+                eco_dir, e
+            ))
+        })?;
+    }
+    Ok(())
 }

@@ -43,16 +43,35 @@ impl NativeBuildDetector {
 /// Returns true if the workspace root or any declared member explicitly contains `build.ninja`
 /// or explicitly declares a `ninja` dependency in its manifest tables.
 pub fn has_explicit_ninja_manifest(workspace_root: &Path) -> bool {
+    has_explicit_ninja_manifest_with_options(workspace_root, false)
+}
+
+/// Options-aware check for explicit `build.ninja` or `ninja` Cargo dependency tables.
+pub fn has_explicit_ninja_manifest_with_options(workspace_root: &Path, include_dev: bool) -> bool {
     if workspace_root.join("build.ninja").is_file() {
         return true;
     }
-    let cargo_toml = workspace_root.join("Cargo.toml");
-    if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
-        if let Ok(val) = toml::from_str::<toml::Value>(&content) {
-            for section in &["dependencies", "build-dependencies", "dev-dependencies"] {
-                if let Some(table) = val.get(*section).and_then(|v| v.as_table()) {
-                    if table.contains_key("ninja") || table.contains_key("ninja-build") {
-                        return true;
+    let sections: &[&str] = if include_dev {
+        &["dependencies", "build-dependencies", "dev-dependencies"]
+    } else {
+        &["dependencies", "build-dependencies"]
+    };
+    let mut cargo_dirs = crate::workspace::discover_tauri_cargo_dirs(workspace_root);
+    if !cargo_dirs.iter().any(|d| d == workspace_root) {
+        cargo_dirs.insert(0, workspace_root.to_path_buf());
+    }
+    for cargo_dir in cargo_dirs {
+        if cargo_dir.join("build.ninja").is_file() {
+            return true;
+        }
+        let cargo_toml = cargo_dir.join("Cargo.toml");
+        if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
+            if let Ok(val) = toml::from_str::<toml::Value>(&content) {
+                for section in sections {
+                    if let Some(table) = val.get(*section).and_then(|v| v.as_table()) {
+                        if table.contains_key("ninja") || table.contains_key("ninja-build") {
+                            return true;
+                        }
                     }
                 }
             }
