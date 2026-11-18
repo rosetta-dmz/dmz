@@ -144,7 +144,8 @@ fn test_fetch_dependencies_pypi_transitive_pep508() {
 
     let cached_artifact = store_path
         .join("charset_normalizer")
-        .join("charset_normalizer-2.0.0.archive");
+        .join("v2")
+        .join("charset_normalizer-2.0.0-py3-none-any.archive");
     assert!(
         cached_artifact.exists(),
         "Expected cached artifact at {:?}",
@@ -348,13 +349,13 @@ fn test_fetch_dependencies_pypi_cuda_bindings_platform_wheel_fallback() {
     );
     assert_eq!(count.unwrap(), 1);
 
-    let cuda_dir = store_path.join("cuda-bindings");
+    let v2_dir = store_path.join("cuda-bindings").join("v2");
     assert!(
-        cuda_dir.exists(),
-        "Expected cuda-bindings directory in store"
+        v2_dir.exists(),
+        "Expected cuda-bindings v2 directory in store"
     );
 
-    let entries: Vec<_> = std::fs::read_dir(&cuda_dir)
+    let entries: Vec<_> = std::fs::read_dir(&v2_dir)
         .unwrap()
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("archive"))
@@ -431,11 +432,12 @@ fn test_fetch_dependencies_cached_artifact_fast_path() {
     let lockfile = DmzLockfile::new(vec![pkg.clone()]);
     lockfile.save(&lockfile_path).unwrap();
 
-    let pkg_dir = store_path.join("cached-pkg");
-    std::fs::create_dir_all(&pkg_dir).unwrap();
-    let artifact_path = pkg_dir.join("cached-pkg-1.0.0.archive");
+    let v2_dir = store_path.join("cached-pkg").join("v2");
+    std::fs::create_dir_all(&v2_dir).unwrap();
+    let stem = "cached-pkg-1.0.0-py3-none-any";
+    let artifact_path = v2_dir.join(format!("{stem}.archive"));
     std::fs::write(&artifact_path, payload).unwrap();
-    let meta_path = pkg_dir.join("metadata.json");
+    let meta_path = v2_dir.join(format!("{stem}.meta.json"));
     std::fs::write(&meta_path, serde_json::to_string_pretty(&pkg).unwrap()).unwrap();
 
     let count = DependencyFetcher::fetch_dependencies(&lockfile_path, &store_path);
@@ -782,4 +784,64 @@ fn test_fetch_dependencies_npm_transitive_semver_and_cache_preserves_member_id()
 
     stop.store(true, Ordering::Relaxed);
     let _ = server_handle.join();
+}
+
+#[test]
+fn test_fetch_dependencies_rejects_pypi_sha256_digest_mismatch() {
+    let (bases, _base_url, shutdown, handle) =
+        spawn_mock_registry_server(|path, base| match path {
+            "/pypi/demo/1.0.0/json" | "/pypi/demo/json" => {
+                let payload = serde_json::json!({
+                    "info": { "name": "demo", "version": "1.0.0", "requires_dist": [] },
+                    "urls": [{
+                        "filename": "demo-1.0.0-py3-none-any.whl",
+                        "url": format!("{}/files/demo-1.0.0-py3-none-any.whl", base),
+                        "digests": { "sha256": "a".repeat(64) }
+                    }]
+                });
+                (
+                    "200 OK",
+                    "application/json",
+                    payload.to_string().into_bytes(),
+                )
+            }
+            "/files/demo-1.0.0-py3-none-any.whl" => (
+                "200 OK",
+                "application/octet-stream",
+                b"PK\x03\x04tampered-wheel-bytes".to_vec(),
+            ),
+            _ => ("404 Not Found", "text/plain", b"not found".to_vec()),
+        });
+
+    let temp = tempdir().unwrap();
+    let lockfile_path = temp.path().join("dmz.lock");
+    let store_path = temp.path().join("store");
+
+    let pkg = LockedPackage {
+        name: "demo".to_string(),
+        version: "1.0.0".to_string(),
+        ecosystem: Ecosystem::PyPI,
+        sha256: "dummy".to_string(),
+        source_url: None,
+        dependencies: Vec::new(),
+        member_id: None,
+    };
+    DmzLockfile::new(vec![pkg]).save(&lockfile_path).unwrap();
+
+    let res = DependencyFetcher::fetch_dependencies_with_bases(&lockfile_path, &store_path, &bases);
+    shutdown.store(true, Ordering::Relaxed);
+    let _ = handle.join();
+
+    let err = res.expect_err("Mismatched PyPI digests.sha256 must fail fast");
+    assert!(
+        err.to_string().contains("Cryptographic Lock Mismatch"),
+        "Unexpected error: {}",
+        err
+    );
+    assert!(
+        !store_path
+            .join("demo/v2/demo-1.0.0-py3-none-any.archive")
+            .exists(),
+        "Tampered download must be removed instead of remaining cached"
+    );
 }

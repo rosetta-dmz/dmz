@@ -1,7 +1,8 @@
 //! Single package fetch orchestrator coordinating cache validation, URL resolution, and streamed transport.
 
-use crate::resolver::fetch::cache::check_cached_artifact;
+use crate::resolver::fetch::cache::{check_cached_artifact, check_cached_pypi_artifact};
 use crate::resolver::fetch::ecosystems::resolve_download_url_with_python_tag;
+use crate::resolver::fetch::pypi::pypi_v2_archive_filename;
 use crate::resolver::fetch::stream::stream_download_with_retry;
 use crate::resolver::lockfile::LockedPackage;
 use crate::resolver::manifest::ManifestScanner;
@@ -48,8 +49,9 @@ pub fn fetch_single_package(
         .trim()
         .to_string();
 
+    let is_pypi = eco_str == "pypi" || eco_str == "python";
     let mut clean_pkg_name = pkg.name.clone();
-    if eco_str == "pypi" || eco_str == "python" {
+    if is_pypi {
         if let Some((n, v)) = ManifestScanner::parse_pep508_requirement(&clean_pkg_name) {
             clean_pkg_name = n;
             if (clean_version == "*" || clean_version.is_empty()) && v != "*" {
@@ -68,9 +70,19 @@ pub fn fetch_single_package(
     })?;
 
     // Fast-path: check if a verified artifact already exists in the store cache
-    if let Some((cached_key, mut cached_pkg)) =
+    let cached_hit = if is_pypi {
+        check_cached_pypi_artifact(
+            &pkg_dir,
+            &safe_pkg_name,
+            &clean_version,
+            &map_key,
+            target_platform,
+            preferred_cp_tag,
+        )
+    } else {
         check_cached_artifact(&pkg_dir, &safe_pkg_name, &clean_version, &map_key)
-    {
+    };
+    if let Some((cached_key, mut cached_pkg)) = cached_hit {
         if pkg.member_id.is_some() {
             cached_pkg.member_id = pkg.member_id.clone();
         }
@@ -94,15 +106,36 @@ pub fn fetch_single_package(
         golang_proxy_base,
     )?;
 
-    let artifact_filename = format!("{}-{}.archive", safe_pkg_name, resolved.concrete_version);
-    let artifact_path = pkg_dir.join(&artifact_filename);
+    let (target_dir, artifact_filename, meta_path) = if is_pypi {
+        let v2_dir = pkg_dir.join("v2");
+        std::fs::create_dir_all(&v2_dir).map_err(|e| {
+            ResolverError::Io(format!(
+                "Failed to create PyPI v2 store directory at {:?}: {}",
+                v2_dir, e
+            ))
+        })?;
+        let fname = pypi_v2_archive_filename(
+            &safe_pkg_name,
+            &resolved.concrete_version,
+            &resolved.download_url,
+        );
+        let stem = fname.strip_suffix(".archive").unwrap_or(&fname);
+        let m_path = v2_dir.join(format!("{stem}.meta.json"));
+        (v2_dir, fname, m_path)
+    } else {
+        let fname = format!("{}-{}.archive", safe_pkg_name, resolved.concrete_version);
+        let m_path = pkg_dir.join("metadata.json");
+        (pkg_dir.clone(), fname, m_path)
+    };
+
+    let artifact_path = target_dir.join(&artifact_filename);
     let temp_guard = tempfile::Builder::new()
         .prefix(&format!(".{}.download.", artifact_filename))
-        .tempfile_in(&pkg_dir)
+        .tempfile_in(&target_dir)
         .map_err(|e| {
             ResolverError::Io(format!(
                 "Failed to allocate unique temporary download file in {:?}: {}",
-                pkg_dir, e
+                target_dir, e
             ))
         })?
         .into_temp_path();
@@ -115,6 +148,17 @@ pub fn fetch_single_package(
         &pkg.name,
     )?;
 
+    if let Some(ref expected) = resolved.expected_sha256 {
+        if !computed_hash.eq_ignore_ascii_case(expected) {
+            let _ = std::fs::remove_file(&artifact_path);
+            return Err(crate::resolver::lockfile::LockError::IntegrityMismatch {
+                expected: expected.clone(),
+                actual: computed_hash,
+            }
+            .into());
+        }
+    }
+
     let mut updated_pkg = pkg;
     updated_pkg.name = clean_pkg_name;
     updated_pkg.version = resolved.concrete_version.clone();
@@ -123,7 +167,6 @@ pub fn fetch_single_package(
         updated_pkg.dependencies = resolved.requires_dist;
     }
 
-    let meta_path = pkg_dir.join("metadata.json");
     let meta_data = serde_json::to_string_pretty(&updated_pkg).map_err(|e| {
         ResolverError::Io(format!(
             "Failed to serialize metadata for {}: {}",

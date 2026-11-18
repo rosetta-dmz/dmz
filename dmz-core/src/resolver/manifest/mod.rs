@@ -72,6 +72,26 @@ impl ManifestScanner {
         )
     }
 
+    #[must_use]
+    pub fn parse_pep508_requirement_for_target_python(
+        raw_line: &str,
+        target_platform: Option<&str>,
+        target_py: Option<(u8, u8)>,
+    ) -> Option<(String, String)> {
+        python::PythonManifestScanner::parse_pep508_requirement_for_target_python(
+            raw_line,
+            target_platform,
+            target_py,
+        )
+    }
+
+    pub(crate) fn is_obsolete_python_backport(
+        normalized_name: &str,
+        target_py: Option<(u8, u8)>,
+    ) -> bool {
+        python::PythonManifestScanner::is_obsolete_stdlib_backport(normalized_name, target_py)
+    }
+
     pub fn normalize_pypi_name(name: &str) -> String {
         python::PythonManifestScanner::normalize_pypi_name(name)
     }
@@ -283,6 +303,60 @@ snapshots:
         let r12 =
             ManifestScanner::parse_pep508_requirement("direct @ https://example.com/foo.tar.gz");
         assert!(r12.is_none());
+
+        assert!(ManifestScanner::parse_pep508_requirement_for_target(
+            "pywin32>=300; sys_platform == 'win32' and implementation_name != 'pypy'",
+            Some("macos-arm64")
+        )
+        .is_none());
+        assert!(ManifestScanner::parse_pep508_requirement_for_target(
+            "pyobjc>=10.0; sys_platform != 'win32'",
+            Some("macos-arm64")
+        )
+        .is_some());
+        assert!(ManifestScanner::parse_pep508_requirement_for_target(
+            "linux-only>=1.0; sys_platform != 'darwin'",
+            Some("macos-arm64")
+        )
+        .is_none());
+
+        // Legacy stdlib backport markers and packages must not leak into Python 3.11/3.12+.
+        assert!(ManifestScanner::parse_pep508_requirement_for_target_python(
+            "typing>=3.7.4; python_version < '3.5'",
+            Some("macos-arm64"),
+            Some((3, 12)),
+        )
+        .is_none());
+        assert!(ManifestScanner::parse_pep508_requirement_for_target_python(
+            "enum34>=1.1.6; python_version < '3.4'",
+            Some("linux-x86_64"),
+            Some((3, 11)),
+        )
+        .is_none());
+        assert!(ManifestScanner::parse_pep508_requirement_for_target_python(
+            "tomli>=2.0; python_version < '3.11'",
+            Some("macos-arm64"),
+            Some((3, 12)),
+        )
+        .is_none());
+        assert!(ManifestScanner::parse_pep508_requirement_for_target_python(
+            "tomli>=2.0; python_version < '3.11'",
+            Some("macos-arm64"),
+            Some((3, 10)),
+        )
+        .is_some());
+        assert!(ManifestScanner::parse_pep508_requirement_for_target_python(
+            "typing-extensions>=4.8; (sys_platform != 'win32' or implementation_name != 'pypy') and python_version >= '3.10'",
+            Some("macos-arm64"),
+            Some((3, 12)),
+        )
+        .is_some());
+        assert!(ManifestScanner::parse_pep508_requirement_for_target_python(
+            "typing>=3.7.4",
+            Some("macos-arm64"),
+            Some((3, 12)),
+        )
+        .is_none());
     }
 
     #[test]

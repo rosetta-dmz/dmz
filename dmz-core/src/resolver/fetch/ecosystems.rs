@@ -1,13 +1,15 @@
 //! Multi-ecosystem registry querying and download URL resolution.
 
-use crate::resolver::fetch::pypi::select_pypi_artifact_for_python;
+use crate::resolver::fetch::pypi::select_pypi_artifact_with_digest_for_python;
 use crate::resolver::lockfile::LockedPackage;
 use crate::resolver::ResolverError;
 
-/// Resolved download parameters including the artifact URL, resolved concrete version, and discovered transitive dependencies.
+/// Resolved download parameters including the artifact URL, concrete version, expected SHA-256 digest,
+/// and discovered transitive dependencies.
 pub struct ResolvedPackageUrl {
     pub download_url: String,
     pub concrete_version: String,
+    pub expected_sha256: Option<String>,
     pub requires_dist: Vec<String>,
 }
 
@@ -62,10 +64,12 @@ pub fn resolve_download_url_with_python_tag(
         return Ok(ResolvedPackageUrl {
             download_url: url.clone(),
             concrete_version: clean_version,
+            expected_sha256: None,
             requires_dist: discovered_requires_dist,
         });
     }
 
+    let mut expected_sha256 = None;
     let download_url = match eco_str.as_str() {
         "cargo" | "rust" => {
             resolve_cargo_url(
@@ -91,16 +95,20 @@ pub fn resolve_download_url_with_python_tag(
             target_platform,
             &mut discovered_requires_dist,
         ),
-        "pypi" | "python" => resolve_pypi_url(
-            client,
-            pypi_base,
-            pkg,
-            clean_pkg_name,
-            &mut clean_version,
-            target_platform,
-            preferred_cp_tag,
-            &mut discovered_requires_dist,
-        ),
+        "pypi" | "python" => {
+            let (url, digest) = resolve_pypi_url(
+                client,
+                pypi_base,
+                pkg,
+                clean_pkg_name,
+                &mut clean_version,
+                target_platform,
+                preferred_cp_tag,
+                &mut discovered_requires_dist,
+            );
+            expected_sha256 = digest;
+            url
+        }
         "go" | "golang" => {
             format!(
                 "{}/{}/@v/{}.zip",
@@ -120,6 +128,7 @@ pub fn resolve_download_url_with_python_tag(
     Ok(ResolvedPackageUrl {
         download_url,
         concrete_version: clean_version,
+        expected_sha256,
         requires_dist: discovered_requires_dist,
     })
 }
@@ -676,8 +685,9 @@ fn resolve_pypi_url(
     target_platform: Option<&str>,
     preferred_cp_tag: Option<&str>,
     discovered_requires_dist: &mut Vec<String>,
-) -> String {
+) -> (String, Option<String>) {
     let mut resolved_url = String::new();
+    let mut resolved_sha256: Option<String> = None;
     let pypi_root = pypi_base.trim_end_matches('/');
 
     let candidate_urls = if *clean_version == "*" || clean_version.is_empty() {
@@ -713,19 +723,16 @@ fn resolve_pypi_url(
                             }
                         }
                         if let Some(urls) = json.get("urls").and_then(|u| u.as_array()) {
-                            if let Some(best) = select_pypi_artifact_for_python(
-                                urls,
-                                target_platform,
-                                preferred_cp_tag,
-                            ) {
+                            if let Some((best, digest)) =
+                                select_pypi_artifact_with_digest_for_python(
+                                    urls,
+                                    target_platform,
+                                    preferred_cp_tag,
+                                )
+                            {
                                 resolved_url = best;
+                                resolved_sha256 = digest;
                                 break;
-                            } else if let Some(first_entry) = urls.first() {
-                                if let Some(u) = first_entry.get("url").and_then(|val| val.as_str())
-                                {
-                                    resolved_url = u.to_string();
-                                    break;
-                                }
                             }
                         }
                     }
@@ -740,11 +747,14 @@ fn resolve_pypi_url(
             .next()
             .map(|c| c.to_ascii_lowercase())
             .unwrap_or('a');
-        format!(
-            "https://files.pythonhosted.org/packages/source/{}/{}/{}-{}.tar.gz",
-            first_char, clean_pkg_name, clean_pkg_name, clean_version
+        (
+            format!(
+                "https://files.pythonhosted.org/packages/source/{}/{}/{}-{}.tar.gz",
+                first_char, clean_pkg_name, clean_pkg_name, clean_version
+            ),
+            None,
         )
     } else {
-        resolved_url
+        (resolved_url, resolved_sha256)
     }
 }

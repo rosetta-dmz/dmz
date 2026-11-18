@@ -488,8 +488,10 @@ impl NpmManifestScanner {
 
         let mentions_darwin = lower.contains("-darwin") || lower.contains("darwin-");
         let mentions_linux = lower.contains("-linux") || lower.contains("linux-");
-        let mentions_win =
-            lower.contains("-win32") || lower.contains("win32-") || lower.contains("-windows");
+        let mentions_win = lower.contains("-win32")
+            || lower.contains("win32-")
+            || lower.contains("-win-")
+            || lower.contains("-windows");
         let mentions_other_os = lower.contains("-android")
             || lower.contains("-freebsd")
             || lower.contains("-openbsd")

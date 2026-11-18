@@ -1,6 +1,10 @@
 use crate::install::archive::SafeArchiveExtractor;
 use crate::install::InstallError;
 use crate::resolver::lockfile::LockedPackage;
+use crate::resolver::manifest::ManifestScanner;
+use crate::toolchain::discovery::python::{
+    find_highest_python_minor_dir, resolve_workspace_python_minor,
+};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -10,48 +14,57 @@ use tracing::warn;
 pub struct PyPiMapper;
 
 impl PyPiMapper {
-    /// Detects the target Python version from existing environments or bundled toolchains,
-    /// defaulting to `python3.11` for backward compatibility.
+    fn find_python_minor_dir(lib_dir: &Path) -> Option<String> {
+        find_highest_python_minor_dir(lib_dir).map(|(_, name)| name)
+    }
+
+    fn parse_python_minor_tuple(py_ver: &str) -> Option<(u8, u8)> {
+        let rest = py_ver.strip_prefix("python")?;
+        let (maj_str, min_str) = rest.split_once('.')?;
+        Some((maj_str.parse().ok()?, min_str.parse().ok()?))
+    }
+
+    fn remove_stale_typing_backport(site_packages: &Path, target_py: Option<(u8, u8)>) {
+        if !target_py.is_some_and(|v| v >= (3, 5)) {
+            return;
+        }
+        let stale_typing = site_packages.join("typing.py");
+        if stale_typing.is_file() {
+            if let Err(e) = fs::remove_file(&stale_typing) {
+                warn!(path = ?stale_typing, error = %e, "Failed to remove shadowed site-packages/typing.py");
+            }
+        }
+    }
+
+    /// Detects the target Python version from bundled toolchains, workspace manifests,
+    /// or existing environments, defaulting to `python3.11` for backward compatibility.
     #[must_use]
     pub fn detect_python_version(workspace_path: &Path) -> String {
-        // 1. Check existing .dmz/venv/lib/python3.X
-        let dmz_venv_lib = workspace_path.join(".dmz").join("venv").join("lib");
-        if let Ok(entries) = fs::read_dir(&dmz_venv_lib) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let s = name.to_string_lossy();
-                if s.starts_with("python3.") && entry.path().is_dir() {
-                    return s.to_string();
-                }
-            }
-        }
-
-        // 2. Check existing .venv/lib/python3.X
-        let venv_lib = workspace_path.join(".venv").join("lib");
-        if let Ok(entries) = fs::read_dir(&venv_lib) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let s = name.to_string_lossy();
-                if s.starts_with("python3.") && entry.path().is_dir() {
-                    return s.to_string();
-                }
-            }
-        }
-
-        // 3. Check bundled toolchain .dmz/toolchains/python/lib/python3.X
+        // 1. Prefer bundled toolchain .dmz/toolchains/python/lib/python3.X
         let tc_lib = workspace_path
             .join(".dmz")
             .join("toolchains")
             .join("python")
             .join("lib");
-        if let Ok(entries) = fs::read_dir(&tc_lib) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let s = name.to_string_lossy();
-                if s.starts_with("python3.") && entry.path().is_dir() {
-                    return s.to_string();
-                }
-            }
+        if let Some(ver) = Self::find_python_minor_dir(&tc_lib) {
+            return ver;
+        }
+
+        // 2. Consult workspace manifest Python version constraints (.python-version / pyproject.toml / uv.lock)
+        if let Some((major, minor)) = resolve_workspace_python_minor(Some(workspace_path), &[]) {
+            return format!("python{major}.{minor}");
+        }
+
+        // 3. Check existing .venv/lib/python3.X
+        let venv_lib = workspace_path.join(".venv").join("lib");
+        if let Some(ver) = Self::find_python_minor_dir(&venv_lib) {
+            return ver;
+        }
+
+        // 4. Check existing .dmz/venv/lib/python3.X
+        let dmz_venv_lib = workspace_path.join(".dmz").join("venv").join("lib");
+        if let Some(ver) = Self::find_python_minor_dir(&dmz_venv_lib) {
+            return ver;
         }
 
         "python3.11".to_string()
@@ -221,23 +234,144 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
         let _ = fs::write(&ps1_path, ps1_content);
     }
 
+    fn extract_cpython_minor_tag(entry_name: &str) -> Option<u8> {
+        let lower = entry_name.to_ascii_lowercase();
+        if !(lower.ends_with(".so") || lower.ends_with(".pyd")) || lower.contains(".abi3.") {
+            return None;
+        }
+        for marker in [".cpython-3", ".cp3"] {
+            if let Some((_, rest)) = lower.split_once(marker) {
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !digits.is_empty() {
+                    return digits.parse::<u8>().ok();
+                }
+            }
+        }
+        None
+    }
+
+    fn is_foreign_os_extension(entry_lower: &str, target_os: &str) -> bool {
+        if target_os == "macos" {
+            entry_lower.ends_with(".pyd")
+                || entry_lower.contains("linux-gnu.so")
+                || entry_lower.contains("linux-musl.so")
+        } else if target_os == "linux" {
+            entry_lower.ends_with(".pyd") || entry_lower.contains("-darwin.so")
+        } else if target_os == "windows" {
+            entry_lower.ends_with(".so")
+        } else {
+            false
+        }
+    }
+
+    fn verify_wheel_extension_abi(
+        pkg_name: &str,
+        archive_path: &Path,
+        target_py: Option<(u8, u8)>,
+    ) -> Result<(), InstallError> {
+        Self::verify_wheel_extension_abi_for_os(
+            pkg_name,
+            archive_path,
+            target_py,
+            std::env::consts::OS,
+        )
+    }
+
+    fn verify_wheel_extension_abi_for_os(
+        pkg_name: &str,
+        archive_path: &Path,
+        target_py: Option<(u8, u8)>,
+        target_os: &str,
+    ) -> Result<(), InstallError> {
+        let Some((major, target_minor)) = target_py else {
+            return Ok(());
+        };
+        let Ok(file) = fs::File::open(archive_path) else {
+            return Ok(());
+        };
+        let Ok(archive) = zip::ZipArchive::new(std::io::BufReader::new(file)) else {
+            return Ok(());
+        };
+
+        let mut has_compatible_ext = false;
+        let mut mismatched: Vec<String> = Vec::new();
+
+        for name_res in archive.file_names() {
+            let Ok(name) = name_res else {
+                continue;
+            };
+            let lower = name.to_ascii_lowercase();
+            if !(lower.ends_with(".so") || lower.ends_with(".pyd")) {
+                continue;
+            }
+            if Self::is_foreign_os_extension(&lower, target_os) {
+                let tag = format!("foreign-os({})", name.rsplit('/').next().unwrap_or(&name));
+                if !mismatched.contains(&tag) {
+                    mismatched.push(tag);
+                }
+                continue;
+            }
+            if lower.contains(".abi3.") {
+                has_compatible_ext = true;
+                continue;
+            }
+            if let Some(ext_minor) = Self::extract_cpython_minor_tag(&name) {
+                if ext_minor == target_minor {
+                    has_compatible_ext = true;
+                } else {
+                    let tag = format!("cp{major}{ext_minor}");
+                    if !mismatched.contains(&tag) {
+                        mismatched.push(tag);
+                    }
+                }
+            }
+        }
+
+        if !mismatched.is_empty() && !has_compatible_ext {
+            return Err(InstallError::MapperError(format!(
+                "Python ABI/OS mismatch for package '{}': wheel contains incompatible compiled extension(s) [{}], but target runtime is python{}.{} on {}. Re-run `dmz bundle --refresh-lock` to fetch matching wheels.",
+                pkg_name,
+                mismatched.join(", "),
+                major,
+                target_minor,
+                target_os
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Unpacks a Python package archive into `.dmz/venv`, creates `.venv` `.pth` wiring,
     /// and hydrates the virtual environment interpreter.
     ///
     /// # Errors
-    /// Returns `InstallError` if archive extraction, `.venv` wiring, or I/O fails.
+    /// Returns `InstallError` if archive extraction, `.venv` wiring, ABI validation, or I/O fails.
     pub fn map_package(
         workspace_path: &Path,
         pkg: &LockedPackage,
         archive_path: &Path,
     ) -> Result<(), InstallError> {
         let py_ver = Self::detect_python_version(workspace_path);
+        let target_py = Self::parse_python_minor_tuple(&py_ver);
         let venv_site_packages = workspace_path
             .join(".dmz")
             .join("venv")
             .join("lib")
             .join(&py_ver)
             .join("site-packages");
+
+        let norm_name = ManifestScanner::normalize_pypi_name(&pkg.name);
+        if ManifestScanner::is_obsolete_python_backport(&norm_name, target_py) {
+            Self::remove_stale_typing_backport(&venv_site_packages, target_py);
+            warn!(
+                package = %pkg.name,
+                python = %py_ver,
+                "Skipping obsolete Python stdlib backport package"
+            );
+            return Ok(());
+        }
+
+        Self::verify_wheel_extension_abi(&pkg.name, archive_path, target_py)?;
 
         fs::create_dir_all(&venv_site_packages).map_err(|e| {
             InstallError::IoError(format!("Failed to create python site-packages dir: {}", e))
@@ -249,6 +383,8 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
                 pkg.name, e
             ))
         })?;
+
+        Self::remove_stale_typing_backport(&venv_site_packages, target_py);
 
         // Write PEP 376 INSTALLER metadata attribution
         Self::write_installer_attribution(&venv_site_packages);
@@ -690,5 +826,149 @@ mod tests {
             b"dll-bin"
         );
         assert!(!scripts.join("README.txt").exists());
+    }
+
+    #[test]
+    fn test_detect_python_version_prefers_bundled_and_manifest_over_stale_dmz_venv(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = tempdir()?;
+        let ws = tmp.path();
+
+        // Stale .dmz/venv/lib/python3.11 exists from an earlier bundle
+        fs::create_dir_all(ws.join(".dmz/venv/lib/python3.11/site-packages"))?;
+        assert_eq!(PyPiMapper::detect_python_version(ws), "python3.11");
+
+        // Workspace .python-version pins 3.12 -> overrides stale .dmz/venv/lib/python3.11
+        fs::write(ws.join(".python-version"), "3.12\n")?;
+        assert_eq!(PyPiMapper::detect_python_version(ws), "python3.12");
+
+        // Bundled toolchain python3.12 takes highest priority even without .python-version
+        fs::remove_file(ws.join(".python-version"))?;
+        fs::create_dir_all(ws.join(".dmz/toolchains/python/lib/python3.12/site-packages"))?;
+        assert_eq!(PyPiMapper::detect_python_version(ws), "python3.12");
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_package_skips_obsolete_typing_backport_and_cleans_stale_file(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = tempdir()?;
+        let ws = tmp.path();
+        fs::create_dir_all(ws.join(".dmz/toolchains/python/lib/python3.11"))?;
+        let sp = ws.join(".dmz/venv/lib/python3.11/site-packages");
+        fs::create_dir_all(&sp)?;
+        let stale_typing = sp.join("typing.py");
+        fs::write(
+            &stale_typing,
+            b"AnyStr = TypeVar('AnyStr', bytes, unicode)\n",
+        )?;
+
+        let archive_path = ws.join("typing-3.7.4.3-py3-none-any.whl");
+        fs::write(&archive_path, b"not-a-zip-should-never-extract")?;
+
+        let pkg = LockedPackage {
+            name: "typing".to_string(),
+            version: "3.7.4.3".to_string(),
+            ecosystem: crate::resolver::manifest::Ecosystem::PyPI,
+            sha256: "0".repeat(64),
+            source_url: None,
+            dependencies: Vec::new(),
+            member_id: None,
+        };
+
+        PyPiMapper::map_package(ws, &pkg, &archive_path)?;
+        assert!(
+            !stale_typing.exists(),
+            "stale site-packages/typing.py must be removed for Python >= 3.5"
+        );
+        Ok(())
+    }
+
+    fn write_mock_wheel_with_entry(
+        path: &Path,
+        entry_name: &str,
+        bytes: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Write as _;
+        let file = fs::File::create(path)?;
+        let mut zw = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zw.start_file(entry_name, options)?;
+        zw.write_all(bytes)?;
+        zw.finish()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_package_rejects_mismatched_cpython_abi_and_accepts_matching_or_abi3(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = tempdir()?;
+        let ws = tmp.path();
+        fs::create_dir_all(ws.join(".dmz/toolchains/python/lib/python3.12"))?;
+
+        let wheel_311 = ws.join("pydantic_core-2.27.1-cp311-cp311-macosx_11_0_arm64.archive");
+        write_mock_wheel_with_entry(
+            &wheel_311,
+            "pydantic_core/_pydantic_core.cpython-311-darwin.so",
+            b"fake-macho",
+        )?;
+
+        let pkg = LockedPackage {
+            name: "pydantic_core".to_string(),
+            version: "2.27.1".to_string(),
+            ecosystem: crate::resolver::manifest::Ecosystem::PyPI,
+            sha256: "0".repeat(64),
+            source_url: None,
+            dependencies: Vec::new(),
+            member_id: None,
+        };
+
+        let err = PyPiMapper::map_package(ws, &pkg, &wheel_311)
+            .expect_err("cp311 native extension must be rejected for python3.12 runtime");
+        assert!(err.to_string().contains("cp311"));
+        assert!(err.to_string().contains("python3.12"));
+
+        let abi3_entry = if cfg!(windows) {
+            "cryptography/hazmat/bindings/_rust.pyd"
+        } else {
+            "cryptography/hazmat/bindings/_rust.abi3.so"
+        };
+        let wheel_abi3 = ws.join("cryptography-43.0.0-cp39-abi3-macosx_10_9_universal2.archive");
+        write_mock_wheel_with_entry(&wheel_abi3, abi3_entry, b"fake-abi3")?;
+        let abi3_pkg = LockedPackage {
+            name: "cryptography".to_string(),
+            version: "43.0.0".to_string(),
+            ..pkg.clone()
+        };
+        PyPiMapper::map_package(ws, &abi3_pkg, &wheel_abi3)?;
+
+        let host_ext_entry = if cfg!(target_os = "macos") {
+            "pydantic_core/_pydantic_core.cpython-312-darwin.so"
+        } else if cfg!(target_os = "linux") {
+            "pydantic_core/_pydantic_core.cpython-312-x86_64-linux-gnu.so"
+        } else {
+            "pydantic_core/_pydantic_core.cp312-win_amd64.pyd"
+        };
+        let wheel_312 = ws.join("pydantic_core-2.27.1-cp312-cp312-macosx_11_0_arm64.archive");
+        write_mock_wheel_with_entry(&wheel_312, host_ext_entry, b"fake-native-312")?;
+        PyPiMapper::map_package(ws, &pkg, &wheel_312)?;
+
+        // Foreign-OS compiled extension with matching minor must also fail fast.
+        let wheel_linux_312 =
+            ws.join("pydantic_core-2.27.1-cp312-cp312-manylinux_2_17_x86_64.archive");
+        write_mock_wheel_with_entry(
+            &wheel_linux_312,
+            "pydantic_core/_pydantic_core.cpython-312-x86_64-linux-gnu.so",
+            b"fake-elf-312",
+        )?;
+        let os_err = PyPiMapper::verify_wheel_extension_abi_for_os(
+            "pydantic_core",
+            &wheel_linux_312,
+            Some((3, 12)),
+            "macos",
+        )
+        .expect_err("linux-gnu.so extension must be rejected for macos runtime");
+        assert!(os_err.to_string().contains("foreign-os"));
+        Ok(())
     }
 }

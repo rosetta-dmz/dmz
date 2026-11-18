@@ -15,19 +15,27 @@ impl PythonManifestScanner {
         target_platform: Option<&str>,
         include_dev: bool,
     ) -> Result<(), ManifestError> {
+        let target_py = crate::toolchain::discovery::python::resolve_effective_python_minor(
+            Some(root_path),
+            &[],
+            target_platform,
+        );
         let req_path = root_path.join("requirements.txt");
         if req_path.exists() {
-            results.push(Self::parse_requirements_txt_with_target(
+            results.push(Self::parse_requirements_txt_with_target_python(
                 &req_path,
                 target_platform,
+                target_py,
             )?);
         }
 
         let pyproject_path = root_path.join("pyproject.toml");
         if pyproject_path.exists() {
-            if let Ok(pyproject_info) =
-                Self::parse_pyproject_toml_with_target(&pyproject_path, target_platform)
-            {
+            if let Ok(pyproject_info) = Self::parse_pyproject_toml_with_target_python(
+                &pyproject_path,
+                target_platform,
+                target_py,
+            ) {
                 if !pyproject_info.dependencies.is_empty() {
                     results.push(pyproject_info);
                 }
@@ -38,16 +46,18 @@ impl PythonManifestScanner {
         let uv_lock_path = root_path.join("uv.lock");
         let poetry_lock_path = root_path.join("poetry.lock");
         let py_lock_deps = if uv_lock_path.is_file() {
-            Self::parse_python_toml_lockfile_with_options(
+            Self::parse_python_toml_lockfile_with_options_and_python(
                 &uv_lock_path,
                 target_platform,
                 include_dev,
+                target_py,
             )
         } else if poetry_lock_path.is_file() {
-            Self::parse_python_toml_lockfile_with_options(
+            Self::parse_python_toml_lockfile_with_options_and_python(
                 &poetry_lock_path,
                 target_platform,
                 include_dev,
+                target_py,
             )
         } else {
             Vec::new()
@@ -80,6 +90,19 @@ impl PythonManifestScanner {
         path: &Path,
         target_platform: Option<&str>,
     ) -> Result<ManifestInfo, ManifestError> {
+        Self::parse_requirements_txt_with_target_python(path, target_platform, None)
+    }
+
+    /// Parses `requirements.txt` filtering PEP 508 markers against both `target_platform`
+    /// and `target_py` (major, minor).
+    ///
+    /// # Errors
+    /// Returns `ManifestError::IoError` if `path` cannot be read.
+    pub fn parse_requirements_txt_with_target_python(
+        path: &Path,
+        target_platform: Option<&str>,
+        target_py: Option<(u8, u8)>,
+    ) -> Result<ManifestInfo, ManifestError> {
         let content = fs::read_to_string(path).map_err(|e| {
             ManifestError::IoError(format!("Failed to read requirements.txt: {}", e))
         })?;
@@ -88,7 +111,7 @@ impl PythonManifestScanner {
 
         for line in content.lines() {
             if let Some((name, version_req)) =
-                Self::parse_pep508_requirement_for_target(line, target_platform)
+                Self::parse_pep508_requirement_for_target_python(line, target_platform, target_py)
             {
                 dependencies.push(DependencySpec {
                     name,
@@ -115,6 +138,19 @@ impl PythonManifestScanner {
         path: &Path,
         target_platform: Option<&str>,
     ) -> Result<ManifestInfo, ManifestError> {
+        Self::parse_pyproject_toml_with_target_python(path, target_platform, None)
+    }
+
+    /// Parses `pyproject.toml` filtering PEP 508 markers against both `target_platform`
+    /// and `target_py` (major, minor).
+    ///
+    /// # Errors
+    /// Returns `ManifestError` if `path` cannot be read or contains invalid TOML.
+    pub fn parse_pyproject_toml_with_target_python(
+        path: &Path,
+        target_platform: Option<&str>,
+        target_py: Option<(u8, u8)>,
+    ) -> Result<ManifestInfo, ManifestError> {
         let content = fs::read_to_string(path)
             .map_err(|e| ManifestError::IoError(format!("Failed to read pyproject.toml: {}", e)))?;
 
@@ -132,7 +168,11 @@ impl PythonManifestScanner {
             for dep in deps_arr {
                 if let Some(line) = dep.as_str() {
                     if let Some((name, version_req)) =
-                        Self::parse_pep508_requirement_for_target(line, target_platform)
+                        Self::parse_pep508_requirement_for_target_python(
+                            line,
+                            target_platform,
+                            target_py,
+                        )
                     {
                         dependencies.push(DependencySpec {
                             name,
@@ -162,7 +202,11 @@ impl PythonManifestScanner {
                     for dep in arr {
                         if let Some(line) = dep.as_str() {
                             if let Some((name, version_req)) =
-                                Self::parse_pep508_requirement_for_target(line, target_platform)
+                                Self::parse_pep508_requirement_for_target_python(
+                                    line,
+                                    target_platform,
+                                    target_py,
+                                )
                             {
                                 if !dependencies
                                     .iter()
@@ -252,37 +296,152 @@ impl PythonManifestScanner {
         }
     }
 
+    /// Returns `true` when `normalized_name` is a legacy Python stdlib backport (e.g. Python 2
+    /// `typing` or `enum34`) that shadows built-in modules on `target_py`.
+    #[must_use]
+    pub(crate) fn is_obsolete_stdlib_backport(
+        normalized_name: &str,
+        target_py: Option<(u8, u8)>,
+    ) -> bool {
+        let py = target_py.unwrap_or((3, 11));
+        if py < (3, 5) {
+            return false;
+        }
+        matches!(
+            normalized_name,
+            "typing" | "enum34" | "pathlib" | "pathlib2" | "ordereddict" | "argparse"
+        ) || (normalized_name == "dataclasses" && py >= (3, 7))
+    }
+
+    fn parse_pep508_ver_tuple(raw: &str) -> Option<(u8, u8, u16, bool)> {
+        let cleaned = raw.trim().trim_matches(['\'', '"', '(', ')']).trim();
+        let mut parts = cleaned.split('.');
+        let maj_str = parts.next()?.trim();
+        let maj = maj_str.parse::<u8>().ok()?;
+        let min_part = parts.next().unwrap_or("0").trim();
+        let min_wild = min_part.contains('*');
+        let min_digits: String = min_part.chars().take_while(char::is_ascii_digit).collect();
+        let min = if min_digits.is_empty() {
+            0
+        } else {
+            min_digits.parse::<u8>().ok()?
+        };
+        let pat_part = parts.next().unwrap_or("0").trim();
+        let pat_wild = pat_part.contains('*');
+        let pat_digits: String = pat_part.chars().take_while(char::is_ascii_digit).collect();
+        let pat = if pat_digits.is_empty() {
+            0
+        } else {
+            pat_digits.parse::<u16>().ok()?
+        };
+        Some((maj, min, pat, min_wild || pat_wild))
+    }
+
+    fn eval_python_version_clause(c: &str, target_py: (u8, u8)) -> Option<bool> {
+        let var = if c.contains("python_full_version") {
+            "python_full_version"
+        } else if c.contains("python_version") {
+            "python_version"
+        } else {
+            return None;
+        };
+        let rhs = c.split_once(var)?.1.trim();
+        const OPS: &[&str] = &["===", "==", "!=", ">=", "<=", "~=", ">", "<"];
+        let op = OPS.iter().find(|&&o| rhs.starts_with(o))?;
+        let ver_raw = rhs.strip_prefix(op)?.trim();
+        let (maj, min, pat, is_wild) = Self::parse_pep508_ver_tuple(ver_raw)?;
+
+        // If patch > 0 on same major.minor, we only know target minor -> stay permissive for `>=`/`>`.
+        if var == "python_full_version"
+            && maj == target_py.0
+            && min == target_py.1
+            && pat > 0
+            && matches!(*op, ">=" | ">")
+        {
+            return Some(true);
+        }
+
+        let target_mm = (target_py.0, target_py.1);
+        let req_mm = (maj, min);
+        Some(match *op {
+            "==" | "===" => target_mm == req_mm && (is_wild || pat == 0),
+            "!=" => target_mm != req_mm && !is_wild,
+            ">=" => target_mm >= req_mm,
+            "<=" => target_mm <= req_mm,
+            ">" => target_mm > req_mm,
+            "<" => target_mm < req_mm,
+            "~=" => target_py.0 == maj && target_py.1 >= min,
+            _ => return None,
+        })
+    }
+
+    fn eval_pep508_clause(clause: &str, target_os: &str, target_py: (u8, u8)) -> bool {
+        let c = clause.trim().trim_matches(['(', ')']).trim();
+        if let Some(py_match) = Self::eval_python_version_clause(c, target_py) {
+            return py_match;
+        }
+        let has_os_var =
+            c.contains("sys_platform") || c.contains("platform_system") || c.contains("os_name");
+        if !has_os_var {
+            return true;
+        }
+        let is_neq = c.contains("!=");
+        let is_eq = !is_neq && (c.contains("==") || c.contains("===") || c.contains(" in "));
+        if !is_eq && !is_neq {
+            return true;
+        }
+
+        let mentions_win = c.contains("win32")
+            || c.contains("windows")
+            || c.contains("'nt'")
+            || c.contains("\"nt\"");
+        let mentions_mac = c.contains("darwin") || c.contains("macos");
+        let mentions_linux = c.contains("linux");
+        let mentions_bsd = c.contains("freebsd")
+            || c.contains("openbsd")
+            || c.contains("sunos")
+            || c.contains("aix")
+            || c.contains("cygwin");
+        if !mentions_win && !mentions_mac && !mentions_linux && !mentions_bsd {
+            return true;
+        }
+
+        let clause_os_matches = match target_os {
+            "macos" => mentions_mac,
+            "linux" => mentions_linux,
+            "windows" => mentions_win,
+            _ => true,
+        };
+        if is_neq {
+            !clause_os_matches
+        } else {
+            clause_os_matches
+        }
+    }
+
     /// Evaluates a PEP 508 environment marker string against an optional target platform tag.
     pub fn matches_pep508_marker(marker: &str, target_platform: Option<&str>) -> bool {
+        Self::matches_pep508_marker_for_python(marker, target_platform, None)
+    }
+
+    /// Evaluates a PEP 508 environment marker string against `target_platform` and `target_py`.
+    #[must_use]
+    pub fn matches_pep508_marker_for_python(
+        marker: &str,
+        target_platform: Option<&str>,
+        target_py: Option<(u8, u8)>,
+    ) -> bool {
         let m = marker.to_lowercase();
         if m.contains("extra ==") || m.contains("extra==") {
             return false;
         }
         let (target_os, _target_arch) = crate::workspace::resolve_target_os_arch(target_platform);
-        if (m.contains("sys_platform") || m.contains("platform_system") || m.contains("os_name"))
-            && m.contains("==")
-            && !m.contains("!=")
-        {
-            let mentions_win = m.contains("win32")
-                || m.contains("windows")
-                || m.contains("'nt'")
-                || m.contains("\"nt\"");
-            let mentions_mac = m.contains("darwin") || m.contains("macos");
-            let mentions_linux = m.contains("linux");
-            let mentions_bsd = m.contains("freebsd")
-                || m.contains("openbsd")
-                || m.contains("sunos")
-                || m.contains("aix")
-                || m.contains("cygwin");
-
-            return match target_os {
-                "macos" => mentions_mac || (!mentions_win && !mentions_linux && !mentions_bsd),
-                "linux" => mentions_linux || (!mentions_win && !mentions_mac && !mentions_bsd),
-                "windows" => mentions_win || (!mentions_mac && !mentions_linux && !mentions_bsd),
-                _ => true,
-            };
-        }
-        true
+        let effective_py = target_py.unwrap_or((3, 11));
+        m.split(" or ").any(|or_part| {
+            or_part
+                .split(" and ")
+                .all(|clause| Self::eval_pep508_clause(clause, target_os, effective_py))
+        })
     }
 
     /// Parses a PEP 508 dependency specification string for the current host platform.
@@ -297,6 +456,17 @@ impl PythonManifestScanner {
         raw_line: &str,
         target_platform: Option<&str>,
     ) -> Option<(String, String)> {
+        Self::parse_pep508_requirement_for_target_python(raw_line, target_platform, None)
+    }
+
+    /// Variant of [`Self::parse_pep508_requirement_for_target`] evaluating `python_version`
+    /// markers and rejecting obsolete stdlib backports against `target_py`.
+    #[must_use]
+    pub fn parse_pep508_requirement_for_target_python(
+        raw_line: &str,
+        target_platform: Option<&str>,
+        target_py: Option<(u8, u8)>,
+    ) -> Option<(String, String)> {
         let without_comment = raw_line.split('#').next().unwrap_or("").trim();
         if without_comment.is_empty() || without_comment.starts_with('-') {
             return None;
@@ -305,7 +475,7 @@ impl PythonManifestScanner {
         let mut parts = without_comment.splitn(2, ';');
         let req_part = parts.next().unwrap_or("").trim();
         if let Some(marker) = parts.next() {
-            if !Self::matches_pep508_marker(marker, target_platform) {
+            if !Self::matches_pep508_marker_for_python(marker, target_platform, target_py) {
                 return None;
             }
         }
@@ -412,6 +582,9 @@ impl PythonManifestScanner {
             }
         }
 
+        if Self::is_obsolete_stdlib_backport(&Self::normalize_pypi_name(&name), target_py) {
+            return None;
+        }
         Some((name, version_req))
     }
 
@@ -443,6 +616,23 @@ impl PythonManifestScanner {
         target_platform: Option<&str>,
         include_dev: bool,
     ) -> Vec<DependencySpec> {
+        Self::parse_python_toml_lockfile_with_options_and_python(
+            path,
+            target_platform,
+            include_dev,
+            None,
+        )
+    }
+
+    /// Parses `uv.lock` or `poetry.lock` TOML `[[package]]` entries with `target_platform`, `include_dev`,
+    /// and `target_py` filtering.
+    #[must_use]
+    pub fn parse_python_toml_lockfile_with_options_and_python(
+        path: &Path,
+        target_platform: Option<&str>,
+        include_dev: bool,
+        target_py: Option<(u8, u8)>,
+    ) -> Vec<DependencySpec> {
         let Ok(content) = fs::read_to_string(path) else {
             return Vec::new();
         };
@@ -459,9 +649,9 @@ impl PythonManifestScanner {
             .is_some_and(|n| n == "uv.lock");
 
         if is_uv_lock {
-            Self::walk_uv_lock_closure(packages, target_platform, include_dev)
+            Self::walk_uv_lock_closure(packages, target_platform, include_dev, target_py)
         } else {
-            Self::parse_poetry_lock_packages(packages, include_dev)
+            Self::parse_poetry_lock_packages(packages, include_dev, target_py)
         }
     }
 
@@ -479,6 +669,7 @@ impl PythonManifestScanner {
     fn parse_poetry_lock_packages(
         packages: &[toml::Value],
         include_dev: bool,
+        target_py: Option<(u8, u8)>,
     ) -> Vec<DependencySpec> {
         let mut deps = Vec::new();
         for pkg in packages {
@@ -507,9 +698,14 @@ impl PythonManifestScanner {
             if name.is_empty() || version.is_empty() {
                 continue;
             }
-            if !deps.iter().any(|d: &DependencySpec| {
-                Self::normalize_pypi_name(&d.name) == Self::normalize_pypi_name(name)
-            }) {
+            let norm = Self::normalize_pypi_name(name);
+            if Self::is_obsolete_stdlib_backport(&norm, target_py) {
+                continue;
+            }
+            if !deps
+                .iter()
+                .any(|d: &DependencySpec| Self::normalize_pypi_name(&d.name) == norm)
+            {
                 deps.push(DependencySpec {
                     name: name.to_string(),
                     version_req: version.to_string(),
@@ -526,6 +722,7 @@ impl PythonManifestScanner {
         packages: &[toml::Value],
         target_platform: Option<&str>,
         include_dev: bool,
+        target_py: Option<(u8, u8)>,
     ) -> Vec<DependencySpec> {
         let mut by_name: std::collections::HashMap<String, Vec<&toml::Value>> =
             std::collections::HashMap::new();
@@ -563,13 +760,14 @@ impl PythonManifestScanner {
                     continue;
                 };
                 for pkg in pkg_variants {
-                    if !Self::uv_pkg_matches_target(pkg, target_platform) {
+                    if !Self::uv_pkg_matches_target(pkg, target_platform, target_py) {
                         continue;
                     }
                     let is_root = Self::is_virtual_python_package(pkg);
                     Self::enqueue_uv_dep_array(
                         pkg.get("dependencies"),
                         target_platform,
+                        target_py,
                         &mut visited,
                         &mut queue,
                     );
@@ -580,6 +778,7 @@ impl PythonManifestScanner {
                                     Self::enqueue_uv_dep_array(
                                         Some(group_val),
                                         target_platform,
+                                        target_py,
                                         &mut visited,
                                         &mut queue,
                                     );
@@ -598,7 +797,7 @@ impl PythonManifestScanner {
             if Self::is_virtual_python_package(pkg) {
                 continue;
             }
-            if !Self::uv_pkg_matches_target(pkg, target_platform) {
+            if !Self::uv_pkg_matches_target(pkg, target_platform, target_py) {
                 continue;
             }
             let Some(name) = pkg.get("name").and_then(|n| n.as_str()) else {
@@ -611,6 +810,9 @@ impl PythonManifestScanner {
                 continue;
             }
             let norm = Self::normalize_pypi_name(name);
+            if Self::is_obsolete_stdlib_backport(&norm, target_py) {
+                continue;
+            }
             if let Some(ref allowed) = reachable_names {
                 if !allowed.contains(&norm) {
                     continue;
@@ -632,22 +834,54 @@ impl PythonManifestScanner {
         deps
     }
 
-    fn uv_pkg_matches_target(pkg: &toml::Value, target_platform: Option<&str>) -> bool {
-        let Some(markers) = pkg.get("resolution-markers").and_then(|m| m.as_array()) else {
-            return true;
+    fn uv_pkg_matches_target(
+        pkg: &toml::Value,
+        target_platform: Option<&str>,
+        target_py: Option<(u8, u8)>,
+    ) -> bool {
+        let markers_match = match pkg.get("resolution-markers").and_then(|m| m.as_array()) {
+            Some(markers) if !markers.is_empty() => markers
+                .iter()
+                .filter_map(|m| m.as_str())
+                .any(|m| Self::matches_pep508_marker_for_python(m, target_platform, target_py)),
+            _ => true,
         };
-        if markers.is_empty() {
-            return true;
+        if !markers_match {
+            return false;
         }
-        markers
-            .iter()
-            .filter_map(|m| m.as_str())
-            .any(|m| Self::matches_pep508_marker(m, target_platform))
+
+        // Reject packages whose lock entry has no sdist and only foreign-OS binary wheels.
+        let (target_os, _) = crate::workspace::resolve_target_os_arch(target_platform);
+        if target_os != "windows" && pkg.get("sdist").is_none() {
+            if let Some(wheels) = pkg.get("wheels").and_then(|w| w.as_array()) {
+                if !wheels.is_empty() {
+                    let all_win_wheels = wheels.iter().all(|w| {
+                        let raw = w
+                            .get("url")
+                            .and_then(|u| u.as_str())
+                            .or_else(|| w.get("filename").and_then(|f| f.as_str()))
+                            .unwrap_or("")
+                            .to_ascii_lowercase();
+                        !raw.is_empty()
+                            && !raw.contains("-none-any.whl")
+                            && (raw.contains("win_amd64")
+                                || raw.contains("win_arm64")
+                                || raw.contains("win32"))
+                    });
+                    if all_win_wheels {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        true
     }
 
     fn enqueue_uv_dep_array(
         deps_val: Option<&toml::Value>,
         target_platform: Option<&str>,
+        target_py: Option<(u8, u8)>,
         visited: &mut std::collections::HashSet<String>,
         queue: &mut std::collections::VecDeque<String>,
     ) {
@@ -656,12 +890,15 @@ impl PythonManifestScanner {
         };
         for dep in arr {
             if let Some(marker) = dep.get("marker").and_then(|m| m.as_str()) {
-                if !Self::matches_pep508_marker(marker, target_platform) {
+                if !Self::matches_pep508_marker_for_python(marker, target_platform, target_py) {
                     continue;
                 }
             }
             if let Some(name) = dep.get("name").and_then(|n| n.as_str()) {
                 let norm = Self::normalize_pypi_name(name);
+                if Self::is_obsolete_stdlib_backport(&norm, target_py) {
+                    continue;
+                }
                 if visited.insert(norm.clone()) {
                     queue.push_back(norm);
                 }

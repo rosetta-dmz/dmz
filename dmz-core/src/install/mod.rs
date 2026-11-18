@@ -637,7 +637,30 @@ impl InstallerEngine {
     }
 }
 
-/// Resolves and validates a locked package's single `.archive` artifact inside `store_dir`.
+fn collect_matching_store_archives(dir: &Path, prefix: &str, version: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "archive") && path.is_file() {
+            if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
+                if fname.starts_with(prefix) && fname.contains(version) {
+                    out.push(path);
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Resolves and validates a locked package's immutable `.archive` artifact inside `store_dir`.
+///
+/// # Errors
+/// Returns `InstallError` if the package name attempts traversal, escapes `store_dir`,
+/// or no matching artifact exists on disk.
 pub fn locate_locked_store_artifact(
     store_dir: &Path,
     pkg: &LockedPackage,
@@ -652,28 +675,36 @@ pub fn locate_locked_store_artifact(
     }
 
     let pkg_store_dir = store_dir.join(&safe_name);
+    let v2_dir = pkg_store_dir.join("v2");
     let exact_name = format!("{}-{}.archive", safe_name, pkg.version);
     let exact_path = pkg_store_dir.join(&exact_name);
+    let prefix = format!("{}-", safe_name);
 
-    let archive_path = if exact_path.exists() {
-        exact_path
-    } else if let Ok(entries) = fs::read_dir(&pkg_store_dir) {
-        let prefix = format!("{}-", safe_name);
-        let mut matched_path = None;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "archive") {
-                if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
-                    if fname.starts_with(&prefix) && fname.contains(&pkg.version) {
-                        matched_path = Some(path);
-                        break;
-                    }
-                }
-            }
+    let mut candidates = collect_matching_store_archives(&v2_dir, &prefix, &pkg.version);
+    if exact_path.is_file() {
+        candidates.push(exact_path.clone());
+    }
+    for path in collect_matching_store_archives(&pkg_store_dir, &prefix, &pkg.version) {
+        if !candidates.contains(&path) {
+            candidates.push(path);
         }
-        matched_path.unwrap_or(exact_path)
-    } else {
+    }
+
+    let has_valid_sha256 =
+        pkg.sha256.len() == 64 && pkg.sha256.bytes().all(|b| b.is_ascii_hexdigit());
+
+    let archive_path = if has_valid_sha256 {
+        candidates
+            .iter()
+            .find(|p| crate::resolver::fetch::cache::verify_file_sha256(p, &pkg.sha256))
+            .cloned()
+            // Fallback lets downstream `verify_artifact_integrity` surface `IntegrityMismatch`
+            // if a single cached file was tampered on disk instead of masking it as `ArtifactMissing`.
+            .unwrap_or_else(|| candidates.into_iter().next().unwrap_or(exact_path))
+    } else if exact_path.exists() {
         exact_path
+    } else {
+        candidates.into_iter().next().unwrap_or(exact_path)
     };
 
     let canonical_store = store_dir

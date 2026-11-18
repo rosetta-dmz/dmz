@@ -103,11 +103,12 @@ impl DependencyFetcher {
         let member_roots = workspace_dir
             .map(|ws| crate::toolchain::ToolchainDetector::collect_workspace_member_dirs(ws, None))
             .unwrap_or_default();
-        let preferred_cp_tag = crate::toolchain::discovery::python::resolve_workspace_python_minor(
+        let target_py_minor = crate::toolchain::discovery::python::resolve_effective_python_minor(
             workspace_dir,
             &member_roots,
-        )
-        .map(|(major, minor)| format!("cp{}{}", major, minor));
+            target_platform.as_deref(),
+        );
+        let preferred_cp_tag = target_py_minor.map(|(major, minor)| format!("cp{major}{minor}"));
 
         // Defensive sanitation of lockfile packages against stale/dirty names (e.g. from prior PEP 508 bugs)
         let mut sanitized_packages = std::collections::BTreeMap::new();
@@ -127,6 +128,12 @@ impl DependencyFetcher {
                         package_dirty = true;
                         mutated_lockfile = true;
                     }
+                }
+                let norm = ManifestScanner::normalize_pypi_name(&pkg.name);
+                if ManifestScanner::is_obsolete_python_backport(&norm, target_py_minor) {
+                    // Strip stdlib backports (e.g. `typing`, `enum34`) inherited from stale lockfiles.
+                    mutated_lockfile = true;
+                    continue;
                 }
             }
             if package_dirty {
@@ -252,12 +259,19 @@ impl DependencyFetcher {
                     if updated_pkg.ecosystem == Ecosystem::PyPI {
                         for dep_str in &updated_pkg.dependencies {
                             if let Some((dep_name, dep_ver)) =
-                                ManifestScanner::parse_pep508_requirement_for_target(
+                                ManifestScanner::parse_pep508_requirement_for_target_python(
                                     dep_str,
                                     target_platform.as_deref(),
+                                    target_py_minor,
                                 )
                             {
                                 let norm = ManifestScanner::normalize_pypi_name(&dep_name);
+                                if ManifestScanner::is_obsolete_python_backport(
+                                    &norm,
+                                    target_py_minor,
+                                ) {
+                                    continue;
+                                }
                                 if seen_pypi.insert(norm) {
                                     let dummy_hash = DmzLockfile::hash_bytes(
                                         format!("{}:{}:{:?}", dep_name, dep_ver, Ecosystem::PyPI)

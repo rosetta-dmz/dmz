@@ -189,7 +189,7 @@ fn test_compilation_proof_python() {
         ToolchainPackager::setup_imported_toolchains(target_ws).unwrap();
 
         let shell_cmd = format!(
-            "unset DYLD_LIBRARY_PATH LD_LIBRARY_PATH; . \"{}/.dmz/env.sh\" >/dev/null && python -c \"import sys, json, ctypes, ssl, sqlite3, fake_pydantic; print(sys.executable, fake_pydantic.VERSION)\"",
+            "unset DYLD_LIBRARY_PATH LD_LIBRARY_PATH; . \"{}/.dmz/env.sh\" >/dev/null && python -c \"import sys, json, ctypes, ssl, sqlite3, typing, fake_pydantic; assert hasattr(typing, 'TypeVar'); assert 'site-packages' not in (typing.__file__ or ''), typing.__file__; print(sys.executable, fake_pydantic.VERSION)\"",
             target_ws.to_string_lossy()
         );
         let sh_out = std::process::Command::new("/bin/sh")

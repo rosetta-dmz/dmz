@@ -149,7 +149,6 @@ if [ -z "$_DMZ_VENV" ]; then
     done
 fi
 
-_DMZ_PYPATH=""
 if [ -n "$_DMZ_VENV" ] && [ -d "$_DMZ_VENV" ]; then
     export VIRTUAL_ENV="$_DMZ_VENV"
     if [ -d "$_DMZ_VENV/bin" ]; then
@@ -158,27 +157,60 @@ if [ -n "$_DMZ_VENV" ] && [ -d "$_DMZ_VENV" ]; then
             *) export PATH="$_DMZ_VENV/bin:$PATH" ;;
         esac
     fi
+fi
+
+_DMZ_PY_VER=""
+if command -v python3 >/dev/null 2>&1; then
+    _DMZ_PY_VER="$(python3 -c 'import sys; print(f"python{sys.version_info[0]}.{sys.version_info[1]}")' 2>/dev/null)"
+    case "$_DMZ_PY_VER" in
+        python3.*) ;;
+        *) _DMZ_PY_VER="" ;;
+    esac
+fi
+
+_DMZ_PYPATH=""
+_DMZ_ADD_PY_ROOTS=""
+if [ -n "$_DMZ_VENV" ] && [ -d "$_DMZ_VENV" ]; then
     _DMZ_VENV_PARENT="$(cd -P "$_DMZ_VENV/.." 2>/dev/null && pwd -P)"
-    for _py_sp in \
-        "$_DMZ_VENV"/lib/python3.*/site-packages \
-        "$_DMZ_VENV_PARENT"/.dmz/venv/lib/python3.*/site-packages \
-        "$DMZ_WS"/.dmz/venv/lib/python3.*/site-packages; do
-        if [ -d "$_py_sp" ]; then
-            case ":$_DMZ_PYPATH:" in
-                *":$_py_sp:"*) ;;
-                *) _DMZ_PYPATH="${_DMZ_PYPATH:+$_DMZ_PYPATH:}$_py_sp" ;;
-            esac
-        fi
-    done
+    _DMZ_ADD_PY_ROOTS="$_DMZ_VENV
+$_DMZ_VENV_PARENT/.dmz/venv
+$DMZ_WS/.dmz/venv"
 elif [ -d "$DMZ_WS/.dmz/venv" ]; then
-    for _py_sp in "$DMZ_WS"/.dmz/venv/lib/python3.*/site-packages; do
-        if [ -d "$_py_sp" ]; then
-            case ":$_DMZ_PYPATH:" in
-                *":$_py_sp:"*) ;;
-                *) _DMZ_PYPATH="${_DMZ_PYPATH:+$_DMZ_PYPATH:}$_py_sp" ;;
-            esac
-        fi
-    done
+    _DMZ_ADD_PY_ROOTS="$DMZ_WS/.dmz/venv"
+fi
+
+if [ -n "$_DMZ_ADD_PY_ROOTS" ]; then
+    _DMZ_MATCHED_EXACT=0
+    if [ -n "$_DMZ_PY_VER" ]; then
+        while IFS= read -r _py_root; do
+            [ -n "$_py_root" ] || continue
+            _py_sp="$_py_root/lib/$_DMZ_PY_VER/site-packages"
+            if [ -d "$_py_sp" ]; then
+                _DMZ_MATCHED_EXACT=1
+                case ":$_DMZ_PYPATH:" in
+                    *":$_py_sp:"*) ;;
+                    *) _DMZ_PYPATH="${_DMZ_PYPATH:+$_DMZ_PYPATH:}$_py_sp" ;;
+                esac
+            fi
+        done <<EOF
+$_DMZ_ADD_PY_ROOTS
+EOF
+    fi
+    if [ "$_DMZ_MATCHED_EXACT" = "0" ]; then
+        while IFS= read -r _py_root; do
+            [ -n "$_py_root" ] || continue
+            for _py_sp in "$_py_root"/lib/python3.*/site-packages; do
+                if [ -d "$_py_sp" ]; then
+                    case ":$_DMZ_PYPATH:" in
+                        *":$_py_sp:"*) ;;
+                        *) _DMZ_PYPATH="${_DMZ_PYPATH:+$_DMZ_PYPATH:}$_py_sp" ;;
+                    esac
+                fi
+            done
+        done <<EOF
+$_DMZ_ADD_PY_ROOTS
+EOF
+    fi
 fi
 
 if [ -n "$_DMZ_PYPATH" ]; then

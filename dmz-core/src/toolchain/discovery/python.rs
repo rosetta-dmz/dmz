@@ -577,6 +577,16 @@ fn collect_python_libraries(
     profile: ToolchainProfile,
     include_headers: bool,
 ) -> Vec<(PathBuf, String)> {
+    collect_python_libraries_for_os(py_bin, py_root, profile, include_headers, cfg!(windows))
+}
+
+fn collect_python_libraries_for_os(
+    py_bin: &Path,
+    py_root: &Path,
+    profile: ToolchainProfile,
+    include_headers: bool,
+    is_windows: bool,
+) -> Vec<(PathBuf, String)> {
     let mut lib_files = Vec::new();
     let mut seen_lib = HashSet::new();
 
@@ -596,10 +606,10 @@ fn collect_python_libraries(
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("python3");
-                let target_prefix = if cfg!(windows) || folder_name.eq_ignore_ascii_case("Lib") {
+                let target_prefix = if is_windows {
                     "Lib".to_string()
                 } else {
-                    format!("lib/{}", folder_name)
+                    format!("lib/{folder_name}")
                 };
                 collect_python_files_recursive_deduped(
                     &stdlib_dir,
@@ -636,30 +646,32 @@ fn collect_python_libraries(
         );
     }
 
-    let win_lib = py_root.join("Lib");
-    if win_lib.is_dir() && !win_lib.is_symlink() {
-        collect_python_files_recursive_deduped(
-            &win_lib,
-            py_root,
-            &mut lib_files,
-            &mut seen_lib,
-            "",
-            0,
-            profile,
-        );
-    }
+    if is_windows {
+        let win_lib = py_root.join("Lib");
+        if win_lib.is_dir() && !win_lib.is_symlink() {
+            collect_python_files_recursive_deduped(
+                &win_lib,
+                py_root,
+                &mut lib_files,
+                &mut seen_lib,
+                "",
+                0,
+                profile,
+            );
+        }
 
-    let win_dlls = py_root.join("DLLs");
-    if win_dlls.is_dir() && !win_dlls.is_symlink() {
-        collect_python_files_recursive_deduped(
-            &win_dlls,
-            py_root,
-            &mut lib_files,
-            &mut seen_lib,
-            "",
-            0,
-            profile,
-        );
+        let win_dlls = py_root.join("DLLs");
+        if win_dlls.is_dir() && !win_dlls.is_symlink() {
+            collect_python_files_recursive_deduped(
+                &win_dlls,
+                py_root,
+                &mut lib_files,
+                &mut seen_lib,
+                "",
+                0,
+                profile,
+            );
+        }
     }
 
     if include_headers {
@@ -676,14 +688,20 @@ fn collect_python_libraries(
     lib_files
 }
 
-/// Parses a Python version constraint or pin (e.g. `"3.12"`, `"3.11.9"`, `">=3.12"`, `"==3.11.*"`)
+/// Parses a Python version constraint or pin (e.g. `"3.12"`, `"Python 3.12.7"`, `">=3.12"`, `"==3.11.*"`)
 /// into a `(major, minor)` pair when an explicit major.minor token is present.
 pub(crate) fn parse_python_minor_spec(raw: &str) -> Option<(u8, u8)> {
     for clause in raw.split(',') {
         let trimmed = clause
             .trim()
-            .trim_start_matches(['>', '<', '=', '~', '!', '^']);
-        let cleaned = trimmed.trim();
+            .trim_start_matches(['>', '<', '=', '~', '!', '^'])
+            .trim();
+        let cleaned = trimmed
+            .strip_prefix("Python ")
+            .or_else(|| trimmed.strip_prefix("python "))
+            .or_else(|| trimmed.strip_prefix("python"))
+            .unwrap_or(trimmed)
+            .trim();
         let mut parts = cleaned.split('.');
         let major_str = parts.next()?.trim();
         let minor_str = parts.next()?.trim();
@@ -701,6 +719,68 @@ pub(crate) fn parse_python_minor_spec(raw: &str) -> Option<(u8, u8)> {
         }
     }
     None
+}
+
+/// Scans `lib_dir` for versioned `python3.<minor>` directories and returns `(minor, "python3.<minor>")`
+/// for the highest numeric minor version found.
+#[must_use]
+pub(crate) fn find_highest_python_minor_dir(lib_dir: &Path) -> Option<(u8, String)> {
+    let entries = fs::read_dir(lib_dir).ok()?;
+    let mut best: Option<(u8, String)> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let s = name.to_string_lossy();
+        let Some(rest) = s.strip_prefix("python3.") else {
+            continue;
+        };
+        if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        if !entry.path().is_dir() {
+            continue;
+        }
+        if let Ok(minor) = rest.parse::<u8>() {
+            if best.as_ref().is_none_or(|(b, _)| minor > *b) {
+                best = Some((minor, s.to_string()));
+            }
+        }
+    }
+    best
+}
+
+fn detect_bundled_python_minor(workspace_root: &Path) -> Option<(u8, u8)> {
+    let lib_dir = workspace_root
+        .join(".dmz")
+        .join("toolchains")
+        .join("python")
+        .join("lib");
+    find_highest_python_minor_dir(&lib_dir).map(|(minor, _)| (3, minor))
+}
+
+/// Resolves the concrete `(major, minor)` Python ABI for dependency fetching and PEP 508 markers,
+/// aligning with the already-bundled runtime or the standalone host Python selected by `PythonDiscoverer`.
+pub(crate) fn resolve_effective_python_minor(
+    workspace_root: Option<&Path>,
+    member_roots: &[PathBuf],
+    target_platform: Option<&str>,
+) -> Option<(u8, u8)> {
+    if let Some(ws) = workspace_root {
+        if let Some(bundled) = detect_bundled_python_minor(ws) {
+            return Some(bundled);
+        }
+    }
+    let manifest_minor = resolve_workspace_python_minor(workspace_root, member_roots);
+    if is_target_matching_host(target_platform) {
+        let candidates =
+            prioritize_candidates_by_minor(collect_python_candidates(), manifest_minor);
+        if let Some(py_bin) = filter_and_select_python(candidates) {
+            let ver = read_python_version(&py_bin);
+            if let Some(parsed) = parse_python_minor_spec(&ver) {
+                return Some(parsed);
+            }
+        }
+    }
+    manifest_minor
 }
 
 /// Resolves the desired `(major, minor)` Python version declared by `.python-version`,
@@ -1557,13 +1637,59 @@ mod tests {
 
         let py_bin = py_root.join("python.exe");
         fs::write(&py_bin, b"exe")?;
-        let collected =
-            collect_python_libraries(&py_bin, &py_root, ToolchainProfile::Minimal, false);
+        let collected = collect_python_libraries_for_os(
+            &py_bin,
+            &py_root,
+            ToolchainProfile::Minimal,
+            false,
+            true,
+        );
         let rels: Vec<&str> = collected.iter().map(|(_, r)| r.as_str()).collect();
         assert!(rels.contains(&"DLLs/_ssl.pyd"));
         assert!(rels.contains(&"DLLs/libssl-3-x64.dll"));
         assert!(rels.contains(&"Lib/os.py"));
         assert!(!rels.contains(&"Lib/leaked.py"));
+
+        // Non-Windows collection must never emit Windows `Lib/` duplicates even on case-insensitive APFS.
+        let non_win = collect_python_libraries_for_os(
+            &py_bin,
+            &py_root,
+            ToolchainProfile::Minimal,
+            false,
+            false,
+        );
+        assert!(
+            !non_win
+                .iter()
+                .any(|(_, r)| r.starts_with("Lib/") || r.starts_with("DLLs/")),
+            "Unix collection must never emit Windows Lib/ or DLLs/ paths"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_resolve_effective_python_minor_aligns_bundled_runtime_over_lower_bound(
+    ) -> std::io::Result<()> {
+        let temp = tempdir()?;
+        let ws = temp.path();
+        fs::write(
+            ws.join("pyproject.toml"),
+            "[project]\nname = \"demo\"\nrequires-python = \">=3.11\"\n",
+        )?;
+        assert_eq!(parse_python_minor_spec("Python 3.12.7"), Some((3, 12)));
+
+        // Cross-target without host bundling keeps manifest minor
+        assert_eq!(
+            resolve_effective_python_minor(Some(ws), &[], Some("windows-x86_64")),
+            Some((3, 11))
+        );
+
+        // Once .dmz/toolchains/python ships 3.12, it overrides `>=3.11` lower-bound heuristics.
+        fs::create_dir_all(ws.join(".dmz/toolchains/python/lib/python3.12"))?;
+        assert_eq!(
+            resolve_effective_python_minor(Some(ws), &[], None),
+            Some((3, 12))
+        );
         Ok(())
     }
 }

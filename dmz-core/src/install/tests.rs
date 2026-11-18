@@ -316,3 +316,34 @@ fn test_verify_cargo_vendor_completeness_catches_missing_crate_and_passes_when_p
     );
     assert!(direct_missing.to_string().contains("serde"));
 }
+
+#[test]
+fn test_locate_locked_store_artifact_selects_exact_sha256_among_coexisting_v2_abis() {
+    use sha2::Digest as _;
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("store");
+    let v2_dir = store.join("pydantic_core").join("v2");
+    fs::create_dir_all(&v2_dir).unwrap();
+
+    let bytes_311 = b"wheel-cp311-payload";
+    let bytes_312 = b"wheel-cp312-payload";
+    let path_311 = v2_dir.join("pydantic_core-2.27.1-cp311-cp311-macosx_11_0_arm64.archive");
+    let path_312 = v2_dir.join("pydantic_core-2.27.1-cp312-cp312-macosx_11_0_arm64.archive");
+    fs::write(&path_311, bytes_311).unwrap();
+    fs::write(&path_312, bytes_312).unwrap();
+
+    let sha_312 = crate::archive::format_sha256_hex(&sha2::Sha256::digest(bytes_312));
+    let pkg = LockedPackage {
+        name: "pydantic_core".to_string(),
+        version: "2.27.1".to_string(),
+        ecosystem: Ecosystem::PyPI,
+        sha256: sha_312,
+        source_url: None,
+        dependencies: vec![],
+        member_id: None,
+    };
+
+    let located = locate_locked_store_artifact(&store, &pkg)
+        .expect("locate_locked_store_artifact must find exact sha256 match in v2/");
+    assert_eq!(located, path_312);
+}
