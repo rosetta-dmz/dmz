@@ -351,9 +351,10 @@ fn test_android_ndk_and_apple_host_prereq_e2e_setup_and_environment() -> anyhow:
 }
 
 #[test]
-fn test_export_rejects_mismatched_python_wheel_and_cleans_partial_archive() -> anyhow::Result<()> {
+fn test_export_and_import_python314_enforces_strict_bazel_abi_mode() -> anyhow::Result<()> {
     use dmz_core::resolver::lockfile::{DmzLockfile, LockedPackage};
     use dmz_core::resolver::manifest::Ecosystem;
+    use dmz_core::toolchain::PythonTargetAbi;
     use sha2::{Digest, Sha256};
     use std::io::Write;
 
@@ -364,100 +365,137 @@ fn test_export_rejects_mismatched_python_wheel_and_cleans_partial_archive() -> a
     fs::create_dir_all(&v2)?;
 
     fs::write(ws.join(".python-version"), "3.14\n")?;
-    fs::write(ws.join("requirements.txt"), "PyYAML==6.0.2\n")?;
+    fs::write(ws.join("requirements.txt"), "PyYAML==6.0.3\n")?;
 
-    // Write a mock PyYAML wheel containing a cp312 native extension against a pinned python3.14 workspace.
-    let wheel_name = "pyyaml-6.0.2-cp312-cp312-macosx_11_0_arm64.archive";
-    let wheel_path = v2.join(wheel_name);
+    let ext_for_host = |cp_digits: &str| -> String {
+        if cfg!(target_os = "macos") {
+            format!("yaml/_yaml.cpython-{}-darwin.so", cp_digits)
+        } else if cfg!(target_os = "linux") {
+            format!("yaml/_yaml.cpython-{}-x86_64-linux-gnu.so", cp_digits)
+        } else {
+            format!("yaml/_yaml.cp{}-win_amd64.pyd", cp_digits)
+        }
+    };
+
+    // 1. Mismatched cp312 wheel must be hard-rejected by both closure verification and export.
+    let wheel_312_name = "pyyaml-6.0.2-cp312-cp312-macosx_11_0_arm64.archive";
+    let wheel_312_path = v2.join(wheel_312_name);
     {
-        let f = fs::File::create(&wheel_path)?;
+        let f = fs::File::create(&wheel_312_path)?;
         let mut zw = zip::ZipWriter::new(f);
         let opts = zip::write::SimpleFileOptions::default();
-        zw.start_file("yaml/_yaml.cpython-312-darwin.so", opts)?;
+        zw.start_file("yaml/__init__.py", opts)?;
+        zw.write_all(b"__version__ = '6.0.2'\n")?;
+        zw.start_file(ext_for_host("312"), opts)?;
         zw.write_all(b"mock-cp312-so")?;
         zw.finish()?;
     }
-    let wheel_sha = dmz_core::archive::exporter::hashing::format_sha256_hex(&Sha256::digest(
-        fs::read(&wheel_path)?,
+    let wheel_312_sha = dmz_core::archive::exporter::hashing::format_sha256_hex(&Sha256::digest(
+        fs::read(&wheel_312_path)?,
     ));
 
-    let mut lockfile = DmzLockfile::new(vec![LockedPackage {
+    let diag = PythonTargetAbi::verify_bundle_python_closure(
+        [("PyYAML", wheel_312_path.as_path())],
+        Some(PythonTargetAbi::new(3, 14, false)),
+        std::env::consts::OS,
+    )
+    .expect_err("strict closure inspector should report cp312 vs python3.14");
+    assert!(diag.contains("cp312"), "unexpected diagnostic: {diag}");
+    assert!(diag.contains("python3.14"), "unexpected diagnostic: {diag}");
+
+    let mut mismatched_lock = DmzLockfile::new(vec![LockedPackage {
         name: "PyYAML".to_string(),
         version: "6.0.2".to_string(),
         ecosystem: Ecosystem::PyPI,
-        sha256: wheel_sha,
+        sha256: wheel_312_sha,
         source_url: None,
         dependencies: Vec::new(),
         member_id: None,
     }]);
-    lockfile.target_platform = Some("macos-arm64".to_string());
-    let lock_path = ws.join("dmz.lock");
-    lockfile.save(&lock_path)?;
+    mismatched_lock.python_abi = Some("cp312".to_string());
+    let bad_lock_path = ws.join("dmz_bad.lock");
+    mismatched_lock.save(&bad_lock_path)?;
 
-    let out_archive = tmp.path().join("dist/should_fail.tar.zst");
-    let err = AirGapExporter::export(&ExportConfig {
+    let failed_archive = tmp.path().join("dist/py314_bad_bundle.tar.zst");
+    let export_err = AirGapExporter::export(&ExportConfig {
         workspace_path: ws.clone(),
-        lockfile_path: lock_path.clone(),
+        lockfile_path: bad_lock_path,
         store_dir: store.clone(),
-        output_path: out_archive.clone(),
+        output_path: failed_archive.clone(),
         zstd_level: 1,
         mode: ExportMode::Unified,
-        target_platform: Some("macos-arm64".to_string()),
+        target_platform: None,
         with_toolchain: false,
         ..Default::default()
     })
-    .expect_err("export must fail fast when packed PyPI wheel ABI mismatches python3.14");
-    let err_msg = err.to_string();
-    assert!(err_msg.contains("cp312"), "unexpected error: {err_msg}");
+    .expect_err("Strict Bazel mode must fail export on cp312 vs python3.14 mismatch");
+    let export_msg = export_err.to_string();
     assert!(
-        err_msg.contains("python3.14"),
-        "unexpected error: {err_msg}"
+        export_msg.contains("cp312") && export_msg.contains("python3.14"),
+        "unexpected export error: {export_msg}"
     );
     assert!(
-        !out_archive.exists(),
-        "partial export archive must be removed on validation failure"
+        !failed_archive.exists(),
+        "failed strict export must clean up partial archive"
     );
 
-    // Replace with matching cp314 extension wheel and confirm export succeeds cleanly.
-    fs::remove_file(&wheel_path)?;
-    let wheel_314_path = v2.join("pyyaml-6.0.3-cp314-cp314-macosx_11_0_arm64.archive");
+    // 2. Matched cp314 wheel exports and imports cleanly for python3.14.
+    let wheel_314_name = "pyyaml-6.0.3-cp314-cp314-macosx_11_0_arm64.archive";
+    let wheel_314_path = v2.join(wheel_314_name);
     {
         let f = fs::File::create(&wheel_314_path)?;
         let mut zw = zip::ZipWriter::new(f);
         let opts = zip::write::SimpleFileOptions::default();
-        zw.start_file("yaml/_yaml.cpython-314-darwin.so", opts)?;
+        zw.start_file("yaml/__init__.py", opts)?;
+        zw.write_all(b"__version__ = '6.0.3'\n")?;
+        zw.start_file(ext_for_host("314"), opts)?;
         zw.write_all(b"mock-cp314-so")?;
         zw.finish()?;
     }
-    let sha_314 = dmz_core::archive::exporter::hashing::format_sha256_hex(&Sha256::digest(
+    let wheel_314_sha = dmz_core::archive::exporter::hashing::format_sha256_hex(&Sha256::digest(
         fs::read(&wheel_314_path)?,
     ));
-    let mut valid_lock = DmzLockfile::new(vec![LockedPackage {
+
+    let mut matched_lock = DmzLockfile::new(vec![LockedPackage {
         name: "PyYAML".to_string(),
         version: "6.0.3".to_string(),
         ecosystem: Ecosystem::PyPI,
-        sha256: sha_314,
+        sha256: wheel_314_sha,
         source_url: None,
         dependencies: Vec::new(),
         member_id: None,
     }]);
-    valid_lock.target_platform = Some("macos-arm64".to_string());
-    valid_lock.save(&lock_path)?;
+    matched_lock.python_abi = Some("cp314".to_string());
+    let lock_path = ws.join("dmz.lock");
+    matched_lock.save(&lock_path)?;
 
-    let ok_archive = tmp.path().join("dist/valid_314.tar.zst");
+    let out_archive = tmp.path().join("dist/py314_yaml_bundle.tar.zst");
     let manifest = AirGapExporter::export(&ExportConfig {
         workspace_path: ws,
         lockfile_path: lock_path,
         store_dir: store,
-        output_path: ok_archive.clone(),
+        output_path: out_archive.clone(),
         zstd_level: 1,
         mode: ExportMode::Unified,
-        target_platform: Some("macos-arm64".to_string()),
+        target_platform: None,
         with_toolchain: false,
         ..Default::default()
     })?;
     assert_eq!(manifest.package_count, 1);
-    assert!(ok_archive.is_file());
+
+    let target_ws = tmp.path().join("target_314");
+    let import_res = AirGapImporter::import(&ImportConfig {
+        archive_path: out_archive,
+        target_workspace_dir: target_ws.clone(),
+        target_store_dir: target_ws.join(".dmz/store"),
+        verify_closure_hash: true,
+        install_dependencies: true,
+        ..Default::default()
+    })?;
+    assert_eq!(import_res.installed_packages, 1);
+    assert!(target_ws
+        .join(".dmz/venv/lib/python3.14/site-packages/yaml/__init__.py")
+        .is_file());
     Ok(())
 }
 
@@ -594,5 +632,240 @@ fn test_import_atomically_replaces_stale_python_toolchain_dir() -> anyhow::Resul
     assert!(target_ws
         .join(".dmz/venv/lib/python3.12/site-packages/yaml/__init__.py")
         .is_file());
+    Ok(())
+}
+
+#[test]
+fn test_import_rejects_mismatched_compiled_extension_in_strict_bazel_mode() -> anyhow::Result<()> {
+    use dmz_core::archive::exporter::AirGapManifest;
+    use dmz_core::resolver::lockfile::{DmzLockfile, LockedPackage};
+    use dmz_core::resolver::manifest::Ecosystem;
+    use dmz_core::toolchain::{ToolchainEcosystem, ToolchainManifestEntry};
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+    use zstd::stream::write::Encoder as ZstdEncoder;
+
+    let tmp = tempdir()?;
+    let target_ws = tmp.path().join("target_strict");
+    let stage = tmp.path().join("stage");
+    fs::create_dir_all(&stage)?;
+
+    let ext_312 = if cfg!(target_os = "macos") {
+        "yaml/_yaml.cpython-312-darwin.so"
+    } else if cfg!(target_os = "linux") {
+        "yaml/_yaml.cpython-312-x86_64-linux-gnu.so"
+    } else {
+        "yaml/_yaml.cp312-win_amd64.pyd"
+    };
+    let wheel_path = stage.join("pyyaml-6.0.2-cp312-cp312-macosx_11_0_arm64.archive");
+    {
+        let f = fs::File::create(&wheel_path)?;
+        let mut zw = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default();
+        zw.start_file("yaml/__init__.py", opts)?;
+        zw.write_all(b"__version__ = '6.0.2'\n")?;
+        zw.start_file(ext_312, opts)?;
+        zw.write_all(b"mock-cp312")?;
+        zw.finish()?;
+    }
+    let wheel_bytes = fs::read(&wheel_path)?;
+    let wheel_sha =
+        dmz_core::archive::exporter::hashing::format_sha256_hex(&Sha256::digest(&wheel_bytes));
+
+    let lock = DmzLockfile::new(vec![LockedPackage {
+        name: "PyYAML".to_string(),
+        version: "6.0.2".to_string(),
+        ecosystem: Ecosystem::PyPI,
+        sha256: wheel_sha,
+        source_url: None,
+        dependencies: Vec::new(),
+        member_id: None,
+    }]);
+    let lock_json = serde_json::to_string_pretty(&lock)?;
+
+    let archive_path = tmp.path().join("mismatched_314_312.tar.zst");
+    {
+        let file = fs::File::create(&archive_path)?;
+        let zstd = ZstdEncoder::new(file, 1)?;
+        let mut tar = tar::Builder::new(zstd);
+
+        let manifest = AirGapManifest {
+            dmz_version: env!("CARGO_PKG_VERSION").to_string(),
+            target_platform: None,
+            vcs: None,
+            delta_base: None,
+            has_git_history: false,
+            toolchains: vec![ToolchainManifestEntry {
+                ecosystem: ToolchainEcosystem::Python,
+                version: "Python 3.14.2".to_string(),
+                path_in_archive: "toolchains/python".to_string(),
+                binaries: vec!["python3".to_string()],
+            }],
+            workspace_project: None,
+            closure_signature: lock.closure_signature.clone(),
+            package_count: 1,
+            created_at_utc: 315_532_800,
+            archive_sha256: String::new(),
+        };
+        let manifest_json = serde_json::to_string_pretty(&manifest)?;
+
+        let mut append_bytes = |name: &str, data: &[u8]| -> anyhow::Result<()> {
+            let mut hdr = tar::Header::new_gnu();
+            hdr.set_size(data.len() as u64);
+            hdr.set_mode(0o644);
+            hdr.set_cksum();
+            tar.append_data(&mut hdr, name, data)?;
+            Ok(())
+        };
+
+        append_bytes("airgap_manifest.json", manifest_json.as_bytes())?;
+        append_bytes("dmz.lock", lock_json.as_bytes())?;
+        append_bytes("requirements.txt", b"PyYAML==6.0.2\n")?;
+        append_bytes(
+            "store/pyyaml/v2/pyyaml-6.0.2-cp312-cp312-macosx_11_0_arm64.archive",
+            &wheel_bytes,
+        )?;
+        append_bytes("toolchains/python/bin/python3", b"#!/bin/sh\n")?;
+        append_bytes("toolchains/python/lib/python3.14/os.py", b"# 3.14 stdlib\n")?;
+
+        let zstd_fin = tar.into_inner()?;
+        zstd_fin.finish()?;
+    }
+
+    let import_err = AirGapImporter::import(&ImportConfig {
+        archive_path,
+        target_workspace_dir: target_ws.clone(),
+        target_store_dir: target_ws.join(".dmz/store"),
+        verify_closure_hash: true,
+        install_dependencies: true,
+        ..Default::default()
+    })
+    .expect_err("Strict Bazel mode must hard-fail import when cp312 wheel targets python3.14");
+    let msg = import_err.to_string();
+    assert!(
+        msg.contains("cp312") && msg.contains("python3.14"),
+        "unexpected strict import error: {msg}"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_dual_repo_import_hydrates_member_venv_from_root_toolchain() -> anyhow::Result<()> {
+    use dmz_core::archive::exporter::AirGapManifest;
+    use dmz_core::resolver::lockfile::{DmzLockfile, LockedPackage};
+    use dmz_core::resolver::manifest::Ecosystem;
+    use dmz_core::toolchain::{ToolchainEcosystem, ToolchainManifestEntry};
+    use dmz_core::workspace::{MemberRole, WorkspaceMember, WorkspaceProjectConfig};
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+    use zstd::stream::write::Encoder as ZstdEncoder;
+
+    let tmp = tempdir()?;
+    let target_ws = tmp.path().join("dual_target");
+    let stage = tmp.path().join("stage");
+    fs::create_dir_all(&stage)?;
+
+    let wheel_path = stage.join("six-1.17.0-py3-none-any.archive");
+    {
+        let f = fs::File::create(&wheel_path)?;
+        let mut zw = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default();
+        zw.start_file("six.py", opts)?;
+        zw.write_all(b"__version__ = '1.17.0'\n")?;
+        zw.finish()?;
+    }
+    let wheel_bytes = fs::read(&wheel_path)?;
+    let wheel_sha =
+        dmz_core::archive::exporter::hashing::format_sha256_hex(&Sha256::digest(&wheel_bytes));
+
+    let lock = DmzLockfile::new(vec![LockedPackage {
+        name: "six".to_string(),
+        version: "1.17.0".to_string(),
+        ecosystem: Ecosystem::PyPI,
+        sha256: wheel_sha,
+        source_url: None,
+        dependencies: Vec::new(),
+        member_id: Some("engine".to_string()),
+    }]);
+    let lock_json = serde_json::to_string_pretty(&lock)?;
+
+    let ws_cfg = WorkspaceProjectConfig::new(
+        "dual",
+        vec![
+            WorkspaceMember::new("engine", "engine", MemberRole::Primary),
+            WorkspaceMember::new("repo2", "repo2", MemberRole::Sidecar),
+        ],
+    );
+
+    let archive_path = tmp.path().join("dual_314.tar.zst");
+    {
+        let file = fs::File::create(&archive_path)?;
+        let zstd = ZstdEncoder::new(file, 1)?;
+        let mut tar = tar::Builder::new(zstd);
+
+        let manifest = AirGapManifest {
+            dmz_version: env!("CARGO_PKG_VERSION").to_string(),
+            target_platform: None,
+            vcs: None,
+            delta_base: None,
+            has_git_history: false,
+            toolchains: vec![ToolchainManifestEntry {
+                ecosystem: ToolchainEcosystem::Python,
+                version: "Python 3.14.2".to_string(),
+                path_in_archive: "toolchains/python".to_string(),
+                binaries: vec!["python3".to_string()],
+            }],
+            workspace_project: Some(ws_cfg.clone()),
+            closure_signature: lock.closure_signature.clone(),
+            package_count: 1,
+            created_at_utc: 315_532_800,
+            archive_sha256: String::new(),
+        };
+        let manifest_json = serde_json::to_string_pretty(&manifest)?;
+        let ws_toml = toml::to_string_pretty(&ws_cfg)?;
+
+        let mut append_bytes = |name: &str, data: &[u8]| -> anyhow::Result<()> {
+            let mut hdr = tar::Header::new_gnu();
+            hdr.set_size(data.len() as u64);
+            hdr.set_mode(0o644);
+            hdr.set_cksum();
+            tar.append_data(&mut hdr, name, data)?;
+            Ok(())
+        };
+
+        append_bytes("airgap_manifest.json", manifest_json.as_bytes())?;
+        append_bytes("dmz-workspace.toml", ws_toml.as_bytes())?;
+        append_bytes("dmz.lock", lock_json.as_bytes())?;
+        append_bytes("engine/requirements.txt", b"six==1.17.0\n")?;
+        append_bytes("repo2/requirements.txt", b"six==1.17.0\n")?;
+        append_bytes("store/six/v2/six-1.17.0-py3-none-any.archive", &wheel_bytes)?;
+        append_bytes("toolchains/python/bin/python3", b"#!/bin/sh\n")?;
+        append_bytes("toolchains/python/lib/python3.14/os.py", b"# 3.14 stdlib\n")?;
+
+        let zstd_fin = tar.into_inner()?;
+        zstd_fin.finish()?;
+    }
+
+    let import_res = AirGapImporter::import(&ImportConfig {
+        archive_path,
+        target_workspace_dir: target_ws.clone(),
+        target_store_dir: target_ws.join(".dmz/store"),
+        verify_closure_hash: true,
+        install_dependencies: true,
+        ..Default::default()
+    })?;
+    assert_eq!(import_res.installed_packages, 1);
+
+    // Member hydration must inherit root bundled python3.14 into member .venv/pyvenv.cfg
+    let engine_cfg = fs::read_to_string(target_ws.join("engine/.venv/pyvenv.cfg"))?;
+    let repo2_cfg = fs::read_to_string(target_ws.join("repo2/.venv/pyvenv.cfg"))?;
+    assert!(
+        engine_cfg.contains("3.14"),
+        "engine pyvenv.cfg should reference 3.14: {engine_cfg}"
+    );
+    assert!(
+        repo2_cfg.contains("3.14"),
+        "repo2 pyvenv.cfg should reference 3.14: {repo2_cfg}"
+    );
     Ok(())
 }

@@ -407,7 +407,12 @@ impl InstallerEngine {
                 )?;
             }
             Ecosystem::PyPI => {
-                mappers::PyPiMapper::map_package(target_workspace, pkg, archive_path)?;
+                mappers::PyPiMapper::map_package_with_root(
+                    target_workspace,
+                    Some(root_workspace),
+                    pkg,
+                    archive_path,
+                )?;
             }
             Ecosystem::Go => {
                 mappers::GoMapper::map_package(target_workspace, pkg, archive_path)?;

@@ -25,7 +25,7 @@ pub use preflight::{
     verify_apple_prereq_for_ecosystems, verify_apple_prereq_for_workspace,
     workspace_requires_apple_clt, ApplePrereqStatus,
 };
-pub use python_abi::PythonTargetAbi;
+pub use python_abi::{PythonTargetAbi, PythonVersionConstraint};
 pub use setup::ToolchainSetup;
 pub use types::{
     DiscoveredToolchain, ToolchainDiscoveryContext, ToolchainEcosystem, ToolchainManifestEntry,
@@ -196,7 +196,19 @@ impl ToolchainProvider {
             ecosystems: ecosystems.clone(),
         };
         let registry = DiscoveryRegistry::with_default_discoverers();
-        let toolchains = registry.discover_for_ecosystems_with_context(&ecosystems, &ctx);
+        let toolchains = match registry
+            .discover_for_ecosystems_with_context_checked(&ecosystems, &ctx)
+        {
+            Ok(tcs) => tcs,
+            Err(err) if !allow_missing_toolchains => return Err(err),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "Toolchain discovery encountered constraint/ABI failure (continuing because --allow-missing-toolchains is active)"
+                );
+                registry.discover_for_ecosystems_with_context(&ecosystems, &ctx)
+            }
+        };
 
         let mut missing_required: Vec<ToolchainEcosystem> = Vec::new();
         for eco in &ecosystems {

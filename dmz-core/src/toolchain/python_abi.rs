@@ -4,6 +4,212 @@ use std::fmt;
 use std::fs;
 use std::path::Path;
 
+/// Parsed PEP 440 / `.python-version` requirement distinguishing exact pins from lower-bounded ranges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PythonVersionConstraint {
+    /// Explicit pin (`.python-version`, `==3.12`, `~=3.12`).
+    Exact(PythonTargetAbi),
+    /// Range specification such as `>=3.12` or `>=3.12,<3.14`.
+    Range {
+        /// Preferred lower-bound ABI reported as fallback when no interpreter is inspected.
+        preferred: PythonTargetAbi,
+        /// Inclusive `(major, minor)` minimum (`>=` or `>`).
+        min_inclusive: Option<(u8, u8)>,
+        /// Exclusive `(major, minor)` ceiling (`<`).
+        max_exclusive: Option<(u8, u8)>,
+    },
+}
+
+impl PythonVersionConstraint {
+    /// Returns the representative `(major, minor)` version for fallback formatting.
+    #[must_use]
+    pub const fn fallback_abi(self) -> PythonTargetAbi {
+        match self {
+            Self::Exact(abi) | Self::Range { preferred: abi, .. } => abi,
+        }
+    }
+
+    /// Returns `true` when `candidate` satisfies this version constraint.
+    #[must_use]
+    pub fn satisfies(self, candidate: PythonTargetAbi) -> bool {
+        match self {
+            Self::Exact(pin) => {
+                (candidate.major, candidate.minor) == (pin.major, pin.minor)
+                    && (!pin.free_threaded || candidate.free_threaded)
+            }
+            Self::Range {
+                min_inclusive,
+                max_exclusive,
+                ..
+            } => {
+                let mm = (candidate.major, candidate.minor);
+                let min_ok = min_inclusive.is_none_or(|m| mm >= m);
+                let max_ok = max_exclusive.is_none_or(|m| mm < m);
+                min_ok && max_ok
+            }
+        }
+    }
+
+    /// Parses a PEP 440 specifier list or `.python-version` line into an exact pin or range constraint.
+    #[must_use]
+    pub fn parse(raw: &str, force_exact: bool) -> Option<Self> {
+        let mut exact: Option<PythonTargetAbi> = None;
+        let mut first_min: Option<PythonTargetAbi> = None;
+        let mut min_inclusive: Option<(u8, u8)> = None;
+        let mut max_exclusive: Option<(u8, u8)> = None;
+
+        for raw_clause in raw.split(',') {
+            let clause = raw_clause.trim();
+            if clause.is_empty() {
+                continue;
+            }
+            let Some(abi) = PythonTargetAbi::parse_runtime_spec(clause) else {
+                continue;
+            };
+            if force_exact || clause.starts_with("==") || clause.starts_with("~=") {
+                if exact.is_none() {
+                    exact = Some(abi);
+                }
+                continue;
+            }
+            if clause.starts_with(">=") {
+                min_inclusive = Some(min_inclusive.map_or((abi.major, abi.minor), |cur| {
+                    cur.max((abi.major, abi.minor))
+                }));
+                if first_min.is_none() {
+                    first_min = Some(abi);
+                }
+            } else if clause.starts_with('>') {
+                let next_mm = (abi.major, abi.minor.saturating_add(1));
+                min_inclusive = Some(min_inclusive.map_or(next_mm, |cur| cur.max(next_mm)));
+                if first_min.is_none() {
+                    first_min = Some(abi);
+                }
+            } else if clause.starts_with("<=") {
+                let ceil_mm = (abi.major, abi.minor.saturating_add(1));
+                max_exclusive = Some(max_exclusive.map_or(ceil_mm, |cur| cur.min(ceil_mm)));
+                if first_min.is_none() {
+                    first_min = Some(abi);
+                }
+            } else if clause.starts_with('<') {
+                max_exclusive = Some(max_exclusive.map_or((abi.major, abi.minor), |cur| {
+                    cur.min((abi.major, abi.minor))
+                }));
+                if first_min.is_none() {
+                    first_min = Some(abi);
+                }
+            } else if !clause.starts_with("!=") && exact.is_none() {
+                exact = Some(abi);
+            }
+        }
+
+        if let Some(pin) = exact {
+            return Some(Self::Exact(pin));
+        }
+        first_min.map(|preferred| Self::Range {
+            preferred,
+            min_inclusive,
+            max_exclusive,
+        })
+    }
+
+    /// Reconciles multiple Python version constraints across workspace members into a single
+    /// constraint satisfying every member.
+    ///
+    /// # Errors
+    /// Returns a diagnostic describing incompatible pins or disjoint bounds across members.
+    pub fn reconcile_all<I>(constraints: I) -> Result<Option<Self>, String>
+    where
+        I: IntoIterator<Item = Self>,
+    {
+        let mut combined: Option<Self> = None;
+        for next in constraints {
+            combined = Some(match combined {
+                None => next,
+                Some(cur) => cur.reconcile_with(next)?,
+            });
+        }
+        Ok(combined)
+    }
+
+    /// Intersects two Python version constraints, failing on mutually incompatible pins/bounds.
+    fn reconcile_with(self, other: Self) -> Result<Self, String> {
+        match (self, other) {
+            (Self::Exact(a), Self::Exact(b)) => {
+                if (a.major, a.minor) != (b.major, b.minor) || a.free_threaded != b.free_threaded {
+                    return Err(format!(
+                        "Conflicting exact Python pins across workspace members: {} vs {}",
+                        a, b
+                    ));
+                }
+                Ok(Self::Exact(a))
+            }
+            (Self::Exact(pin), r @ Self::Range { .. })
+            | (r @ Self::Range { .. }, Self::Exact(pin)) => {
+                if !r.satisfies(pin) {
+                    return Err(format!(
+                        "Conflicting workspace Python constraints: pin {} does not satisfy member constraint (preferred {})",
+                        pin,
+                        r.fallback_abi()
+                    ));
+                }
+                Ok(Self::Exact(pin))
+            }
+            (
+                Self::Range {
+                    preferred: pa,
+                    min_inclusive: min_a,
+                    max_exclusive: max_a,
+                },
+                Self::Range {
+                    preferred: pb,
+                    min_inclusive: min_b,
+                    max_exclusive: max_b,
+                },
+            ) => {
+                let min_inclusive = match (min_a, min_b) {
+                    (Some(x), Some(y)) => Some(x.max(y)),
+                    (a, b) => a.or(b),
+                };
+                let max_exclusive = match (max_a, max_b) {
+                    (Some(x), Some(y)) => Some(x.min(y)),
+                    (a, b) => a.or(b),
+                };
+                if let (Some(lo), Some(hi)) = (min_inclusive, max_exclusive) {
+                    if lo >= hi {
+                        return Err(format!(
+                            "Conflicting workspace Python ranges: lower bound {}.{} >= exclusive upper bound {}.{}",
+                            lo.0, lo.1, hi.0, hi.1
+                        ));
+                    }
+                }
+                let mut preferred = if (pb.major, pb.minor) > (pa.major, pa.minor) {
+                    pb
+                } else {
+                    pa
+                };
+                if let Some(hi) = max_exclusive {
+                    if (preferred.major, preferred.minor) >= hi {
+                        if let Some(lo) = min_inclusive {
+                            preferred = PythonTargetAbi::new(lo.0, lo.1, false);
+                        }
+                    }
+                }
+                if let Some(lo) = min_inclusive {
+                    if (preferred.major, preferred.minor) < lo {
+                        preferred = PythonTargetAbi::new(lo.0, lo.1, preferred.free_threaded);
+                    }
+                }
+                Ok(Self::Range {
+                    preferred,
+                    min_inclusive,
+                    max_exclusive,
+                })
+            }
+        }
+    }
+}
+
 /// Canonical Python runtime ABI tag (e.g., `python3.14` / `cp314` or free-threaded `python3.14t` / `cp314t`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PythonTargetAbi {
@@ -123,6 +329,60 @@ impl PythonTargetAbi {
             minor,
             free_threaded,
         })
+    }
+
+    /// Parses a PEP 405 `pyvenv.cfg` file, extracting `version_info` / `version` (or falling back
+    /// to versioned `home` directory path components).
+    #[must_use]
+    pub fn parse_pyvenv_cfg(contents: &str) -> Option<Self> {
+        let mut version_raw: Option<&str> = None;
+        let mut version_info_raw: Option<&str> = None;
+        let mut home_raw: Option<&str> = None;
+
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let Some((key, val)) = trimmed.split_once('=') else {
+                continue;
+            };
+            let key_clean = key.trim();
+            let val_clean = val.trim();
+            if val_clean.is_empty() {
+                continue;
+            }
+            if key_clean.eq_ignore_ascii_case("version_info") {
+                version_info_raw = Some(val_clean);
+            } else if key_clean.eq_ignore_ascii_case("version") {
+                version_raw = Some(val_clean);
+            } else if key_clean.eq_ignore_ascii_case("home") {
+                home_raw = Some(val_clean);
+            }
+        }
+
+        if let Some(abi) = version_info_raw.and_then(Self::parse_runtime_spec) {
+            return Some(abi);
+        }
+        if let Some(abi) = version_raw.and_then(Self::parse_runtime_spec) {
+            return Some(abi);
+        }
+        if let Some(home) = home_raw {
+            for comp in Path::new(home).components().rev() {
+                let s = comp.as_os_str().to_string_lossy();
+                if let Some(abi) = Self::parse_versioned_name(&s) {
+                    return Some(abi);
+                }
+                if let Some(idx) = s.find("3.") {
+                    if let Some(slice) = s.get(idx..) {
+                        if let Some(abi) = Self::parse_runtime_spec(slice) {
+                            return Some(abi);
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Parses a Python runtime version string, pin, or constraint clause
@@ -431,6 +691,57 @@ mod tests {
             PythonTargetAbi::new(3, 14, true).lib_dir_name(),
             "python3.14t".to_string()
         );
+
+        let range =
+            PythonVersionConstraint::parse(">=3.12", false).expect("range >=3.12 should parse");
+        assert!(matches!(range, PythonVersionConstraint::Range { .. }));
+        assert!(range.satisfies(PythonTargetAbi::new(3, 14, false)));
+        assert!(range.satisfies(PythonTargetAbi::new(3, 12, false)));
+        assert!(!range.satisfies(PythonTargetAbi::new(3, 11, false)));
+
+        let bounded = PythonVersionConstraint::parse(">=3.12,<3.14", false)
+            .expect("bounded range should parse");
+        assert!(bounded.satisfies(PythonTargetAbi::new(3, 13, false)));
+        assert!(!bounded.satisfies(PythonTargetAbi::new(3, 14, false)));
+
+        let exact = PythonVersionConstraint::parse("3.12", true).expect("exact pin should parse");
+        assert!(matches!(exact, PythonVersionConstraint::Exact(_)));
+        assert!(exact.satisfies(PythonTargetAbi::new(3, 12, false)));
+        assert!(!exact.satisfies(PythonTargetAbi::new(3, 14, false)));
+    }
+
+    #[test]
+    fn test_parse_pyvenv_cfg_and_reconcile_constraints() {
+        let cfg = "home = /opt/homebrew/opt/python@3.14/Frameworks/Python.framework/Versions/3.14/bin\nversion_info = 3.14.2.final.0\n";
+        assert_eq!(
+            PythonTargetAbi::parse_pyvenv_cfg(cfg),
+            Some(PythonTargetAbi::new(3, 14, false))
+        );
+
+        let home_only = "home = /opt/uv/cpython-3.13.2-macos-aarch64-none/bin\n";
+        assert_eq!(
+            PythonTargetAbi::parse_pyvenv_cfg(home_only),
+            Some(PythonTargetAbi::new(3, 13, false))
+        );
+
+        let r_311 = PythonVersionConstraint::parse(">=3.11", false).expect(">=3.11 parses");
+        let r_312 = PythonVersionConstraint::parse(">=3.12", false).expect(">=3.12 parses");
+        let p_314 = PythonVersionConstraint::parse("3.14", true).expect("3.14 pin parses");
+        let p_312 = PythonVersionConstraint::parse("3.12", true).expect("3.12 pin parses");
+        let lt_314 = PythonVersionConstraint::parse(">=3.11,<3.14", false).expect("<3.14 parses");
+
+        assert_eq!(
+            PythonVersionConstraint::reconcile_all([r_311, p_314]),
+            Ok(Some(p_314))
+        );
+        assert_eq!(
+            PythonVersionConstraint::reconcile_all([r_311, r_312])
+                .expect("ranges should intersect")
+                .map(PythonVersionConstraint::fallback_abi),
+            Some(PythonTargetAbi::new(3, 12, false))
+        );
+        assert!(PythonVersionConstraint::reconcile_all([p_312, p_314]).is_err());
+        assert!(PythonVersionConstraint::reconcile_all([lt_314, p_314]).is_err());
     }
 
     #[test]

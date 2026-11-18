@@ -1,4 +1,4 @@
-use super::super::python_abi::PythonTargetAbi;
+use super::super::python_abi::{PythonTargetAbi, PythonVersionConstraint};
 use super::super::types::{
     DiscoveredToolchain, ToolchainDiscoveryContext, ToolchainEcosystem, ToolchainProfile,
 };
@@ -739,19 +739,6 @@ fn collect_python_libraries_for_os(
     lib_files
 }
 
-/// Parses a Python version constraint or pin (e.g. `"3.12"`, `"Python 3.12.7"`, `">=3.12"`, `"==3.11.*"`)
-/// into a `(major, minor)` pair when an explicit major.minor token is present.
-pub(crate) fn parse_python_minor_spec(raw: &str) -> Option<(u8, u8)> {
-    PythonTargetAbi::parse_runtime_spec(raw).map(|abi| (abi.major, abi.minor))
-}
-
-/// Scans `lib_dir` for versioned `python3.<minor>[t]` directories and returns `(minor, dir_name)`
-/// for the highest numeric minor version found.
-#[must_use]
-pub(crate) fn find_highest_python_minor_dir(lib_dir: &Path) -> Option<(u8, String)> {
-    PythonTargetAbi::find_highest_lib_dir(lib_dir).map(|(abi, name)| (abi.minor, name))
-}
-
 fn detect_bundled_python_abi(workspace_root: &Path) -> Option<PythonTargetAbi> {
     let lib_dir = workspace_root
         .join(".dmz")
@@ -773,18 +760,20 @@ pub(crate) fn resolve_effective_python_abi(
             return Some(bundled);
         }
     }
-    let manifest_minor = resolve_workspace_python_minor(workspace_root, member_roots);
+    let constraint = resolve_workspace_python_constraint(workspace_root, member_roots);
     if is_target_matching_host(target_platform) {
         let candidates =
-            prioritize_candidates_by_minor(collect_python_candidates(), manifest_minor);
+            prioritize_candidates_by_constraint(collect_python_candidates(), constraint);
         if let Some(py_bin) = filter_and_select_python(candidates) {
             let ver = read_python_version(&py_bin);
             if let Some(parsed) = PythonTargetAbi::parse_runtime_spec(&ver) {
-                return Some(parsed);
+                if constraint.is_none_or(|c| c.satisfies(parsed)) {
+                    return Some(parsed);
+                }
             }
         }
     }
-    manifest_minor.map(|(major, minor)| PythonTargetAbi::new(major, minor, false))
+    constraint.map(PythonVersionConstraint::fallback_abi)
 }
 
 /// Resolves the concrete `(major, minor)` Python ABI for dependency fetching and PEP 508 markers,
@@ -798,86 +787,177 @@ pub(crate) fn resolve_effective_python_minor(
         .map(|abi| (abi.major, abi.minor))
 }
 
+/// Reads `.python-version` pin from `dir`, returning the first valid non-comment version line.
+fn parse_python_version_file(dir: &Path) -> Option<PythonVersionConstraint> {
+    let content = fs::read_to_string(dir.join(".python-version")).ok()?;
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .find_map(|line| PythonVersionConstraint::parse(line, true))
+}
+
+/// Collects PEP 440 constraints from `pyproject.toml` and `uv.lock` within a directory.
+fn parse_manifest_python_constraints(
+    dir: &Path,
+) -> Result<Option<PythonVersionConstraint>, String> {
+    let mut constraints: Vec<PythonVersionConstraint> = Vec::new();
+
+    if let Ok(content) = fs::read_to_string(dir.join("pyproject.toml")) {
+        if let Ok(toml_val) = toml::from_str::<toml::Value>(&content) {
+            let candidates = [
+                toml_val
+                    .get("project")
+                    .and_then(|p| p.get("requires-python"))
+                    .and_then(|v| v.as_str()),
+                toml_val
+                    .get("tool")
+                    .and_then(|t| t.get("poetry"))
+                    .and_then(|p| p.get("dependencies"))
+                    .and_then(|d| d.get("python"))
+                    .and_then(|v| v.as_str()),
+            ];
+            for req in candidates.into_iter().flatten() {
+                if let Some(c) = PythonVersionConstraint::parse(req, false) {
+                    constraints.push(c);
+                }
+            }
+        }
+    }
+
+    if let Ok(content) = fs::read_to_string(dir.join("uv.lock")) {
+        if let Ok(toml_val) = toml::from_str::<toml::Value>(&content) {
+            if let Some(req) = toml_val.get("requires-python").and_then(|v| v.as_str()) {
+                if let Some(c) = PythonVersionConstraint::parse(req, false) {
+                    constraints.push(c);
+                }
+            }
+        }
+    }
+
+    PythonVersionConstraint::reconcile_all(constraints)
+        .map_err(|e| format!("In {}: {}", dir.display(), e))
+}
+
+/// Refines an unset or ranged constraint using `<dir>/.venv/pyvenv.cfg` when satisfied.
+fn refine_constraint_with_pyvenv_cfg(
+    dir: &Path,
+    manifest_c: Option<PythonVersionConstraint>,
+) -> Option<PythonVersionConstraint> {
+    let Ok(cfg_content) = fs::read_to_string(dir.join(".venv").join("pyvenv.cfg")) else {
+        return manifest_c;
+    };
+    let Some(venv_abi) = PythonTargetAbi::parse_pyvenv_cfg(&cfg_content) else {
+        return manifest_c;
+    };
+    match manifest_c {
+        None => Some(PythonVersionConstraint::Exact(venv_abi)),
+        Some(r @ PythonVersionConstraint::Range { .. }) if r.satisfies(venv_abi) => {
+            Some(PythonVersionConstraint::Exact(venv_abi))
+        }
+        Some(c) if !c.satisfies(venv_abi) => {
+            warn!(
+                dir = %dir.display(),
+                venv_abi = %venv_abi,
+                manifest_target = %c.fallback_abi(),
+                "Local .venv/pyvenv.cfg does not satisfy manifest Python requirement; honoring manifest"
+            );
+            Some(c)
+        }
+        other => other,
+    }
+}
+
+/// Extracts the Python version constraint for a single directory.
+///
+/// Within one project directory, an explicit `.python-version` pin overrides `pyproject.toml` /
+/// `uv.lock` range metadata (matching `uv`/`pyenv` behavior). Otherwise `pyproject.toml` and
+/// `uv.lock` bounds are reconciled, and `<dir>/.venv/pyvenv.cfg` fills in or refines ranges.
+fn resolve_single_root_python_constraint(
+    dir: &Path,
+) -> Result<Option<PythonVersionConstraint>, String> {
+    let manifest_c = match parse_python_version_file(dir) {
+        Some(pin) => Some(pin),
+        None => parse_manifest_python_constraints(dir)?,
+    };
+    Ok(refine_constraint_with_pyvenv_cfg(dir, manifest_c))
+}
+
+/// Collects and reconciles Python version constraints across `workspace_root` and all `member_roots`.
+pub(crate) fn resolve_workspace_python_constraint_checked(
+    workspace_root: Option<&Path>,
+    member_roots: &[PathBuf],
+) -> Result<Option<PythonVersionConstraint>, String> {
+    let mut roots: Vec<&Path> = Vec::new();
+    let mut seen_canon: HashSet<PathBuf> = HashSet::new();
+    for dir in workspace_root
+        .into_iter()
+        .chain(member_roots.iter().map(PathBuf::as_path))
+    {
+        let key = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        if seen_canon.insert(key) {
+            roots.push(dir);
+        }
+    }
+
+    let mut constraints: Vec<PythonVersionConstraint> = Vec::new();
+    for dir in &roots {
+        if let Some(c) = resolve_single_root_python_constraint(dir)? {
+            constraints.push(c);
+        }
+    }
+
+    PythonVersionConstraint::reconcile_all(constraints)
+}
+
+/// Resolves whether workspace manifests or `.venv/pyvenv.cfg` pin an exact Python interpreter or
+/// specify a PEP 440 range across the workspace and its members.
+pub(crate) fn resolve_workspace_python_constraint(
+    workspace_root: Option<&Path>,
+    member_roots: &[PathBuf],
+) -> Option<PythonVersionConstraint> {
+    match resolve_workspace_python_constraint_checked(workspace_root, member_roots) {
+        Ok(c) => c,
+        Err(err) => {
+            warn!(error = %err, "Failed to reconcile workspace Python version constraints");
+            None
+        }
+    }
+}
+
 /// Resolves the desired `(major, minor)` Python version declared by `.python-version`,
 /// `pyproject.toml`, or `uv.lock` across the workspace and its members.
 pub(crate) fn resolve_workspace_python_minor(
     workspace_root: Option<&Path>,
     member_roots: &[PathBuf],
 ) -> Option<(u8, u8)> {
-    let mut roots: Vec<&Path> = Vec::new();
-    if let Some(ws) = workspace_root {
-        roots.push(ws);
-    }
-    for member in member_roots {
-        let m_path = member.as_path();
-        if !roots.contains(&m_path) {
-            roots.push(m_path);
-        }
-    }
-
-    for dir in &roots {
-        let py_ver_file = dir.join(".python-version");
-        if let Ok(content) = fs::read_to_string(&py_ver_file) {
-            for line in content.lines() {
-                let trimmed = line.trim();
-                if trimmed.is_empty() || trimmed.starts_with('#') {
-                    continue;
-                }
-                if let Some(ver) = parse_python_minor_spec(trimmed) {
-                    return Some(ver);
-                }
-            }
-        }
-    }
-
-    for dir in &roots {
-        let pyproject = dir.join("pyproject.toml");
-        if let Ok(content) = fs::read_to_string(&pyproject) {
-            if let Ok(toml_val) = toml::from_str::<toml::Value>(&content) {
-                if let Some(req) = toml_val
-                    .get("project")
-                    .and_then(|p| p.get("requires-python"))
-                    .and_then(|v| v.as_str())
-                {
-                    if let Some(ver) = parse_python_minor_spec(req) {
-                        return Some(ver);
-                    }
-                }
-                if let Some(req) = toml_val
-                    .get("tool")
-                    .and_then(|t| t.get("poetry"))
-                    .and_then(|p| p.get("dependencies"))
-                    .and_then(|d| d.get("python"))
-                    .and_then(|v| v.as_str())
-                {
-                    if let Some(ver) = parse_python_minor_spec(req) {
-                        return Some(ver);
-                    }
-                }
-            }
-        }
-    }
-
-    for dir in &roots {
-        let uv_lock = dir.join("uv.lock");
-        if let Ok(content) = fs::read_to_string(&uv_lock) {
-            if let Ok(toml_val) = toml::from_str::<toml::Value>(&content) {
-                if let Some(req) = toml_val.get("requires-python").and_then(|v| v.as_str()) {
-                    if let Some(ver) = parse_python_minor_spec(req) {
-                        return Some(ver);
-                    }
-                }
-            }
-        }
-    }
-
-    None
+    resolve_workspace_python_constraint(workspace_root, member_roots).map(|c| {
+        let abi = c.fallback_abi();
+        (abi.major, abi.minor)
+    })
 }
 
 /// Returns `true` when `target_platform` is unset or matches the current host `(os, arch)`.
 pub(crate) fn is_target_matching_host(target_platform: Option<&str>) -> bool {
     let (target_os, target_arch) = crate::workspace::resolve_target_os_arch(target_platform);
     target_os == std::env::consts::OS && target_arch == std::env::consts::ARCH
+}
+
+fn candidate_abi_from_path(candidate: &Path) -> Option<PythonTargetAbi> {
+    for comp in candidate.components().rev() {
+        let s = comp.as_os_str().to_string_lossy();
+        if let Some(abi) = PythonTargetAbi::parse_versioned_name(&s) {
+            return Some(abi);
+        }
+        if let Some(idx) = s.find("3.") {
+            if let Some(slice) = s.get(idx..) {
+                if let Some(abi) = PythonTargetAbi::parse_runtime_spec(slice) {
+                    return Some(abi);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn candidate_matches_minor(candidate: &Path, desired: (u8, u8)) -> bool {
@@ -913,6 +993,43 @@ fn prioritize_candidates_by_minor(
     matching
 }
 
+fn prioritize_candidates_by_constraint(
+    candidates: Vec<PathBuf>,
+    constraint: Option<PythonVersionConstraint>,
+) -> Vec<PathBuf> {
+    let Some(spec) = constraint else {
+        return candidates;
+    };
+    match spec {
+        PythonVersionConstraint::Exact(pin) => {
+            prioritize_candidates_by_minor(candidates, Some((pin.major, pin.minor)))
+        }
+        PythonVersionConstraint::Range { .. } => {
+            let mut matching: Vec<(Option<PythonTargetAbi>, PathBuf)> = Vec::new();
+            let mut rest = Vec::new();
+            for cand in candidates {
+                if let Some(abi) = candidate_abi_from_path(&cand) {
+                    if spec.satisfies(abi) {
+                        matching.push((Some(abi), cand));
+                    } else {
+                        rest.push(cand);
+                    }
+                } else {
+                    rest.push(cand);
+                }
+            }
+            matching.sort_by(|(a, pa), (b, pb)| {
+                let ka = a.map_or((0, 0, true), |v| (v.major, v.minor, !v.free_threaded));
+                let kb = b.map_or((0, 0, true), |v| (v.major, v.minor, !v.free_threaded));
+                kb.cmp(&ka).then_with(|| pa.cmp(pb))
+            });
+            let mut ordered: Vec<PathBuf> = matching.into_iter().map(|(_, p)| p).collect();
+            ordered.extend(rest);
+            ordered
+        }
+    }
+}
+
 /// Discovers host Python runtime (`python3`, `pip`), strictly preferring standalone official
 /// `python.org` and `uv` (`python-build-standalone`) builds and rejecting Homebrew/Xcode stubs.
 #[derive(Debug, Default, Clone)]
@@ -944,10 +1061,17 @@ impl ToolchainDiscoverer for PythonDiscoverer {
             return Ok(None);
         }
 
-        let desired_minor =
-            resolve_workspace_python_minor(ctx.workspace_root.as_deref(), &ctx.member_roots);
+        let constraint = resolve_workspace_python_constraint_checked(
+            ctx.workspace_root.as_deref(),
+            &ctx.member_roots,
+        )
+        .map_err(ToolchainError::DiscoveryFailed)?;
+        let desired_minor = constraint.map(|c| {
+            let a = c.fallback_abi();
+            (a.major, a.minor)
+        });
         let py_candidates =
-            prioritize_candidates_by_minor(collect_python_candidates(), desired_minor);
+            prioritize_candidates_by_constraint(collect_python_candidates(), constraint);
         if py_candidates.is_empty() {
             return Ok(None);
         }
@@ -962,6 +1086,23 @@ impl ToolchainDiscoverer for PythonDiscoverer {
         };
 
         let version = read_python_version(&py_bin);
+        if let (Some(req), Some(actual)) =
+            (constraint, PythonTargetAbi::parse_runtime_spec(&version))
+        {
+            if !req.satisfies(actual) {
+                let expected = req.fallback_abi();
+                return Err(ToolchainError::DiscoveryFailed(format!(
+                    "Workspace Python requirement ({}) is not satisfied by discovered standalone host Python ({} at {}). Install standalone Python {}.{} via `uv python install {}.{}` or python.org rather than bundling an incompatible runtime.",
+                    expected,
+                    actual,
+                    redact_home_prefix(&py_bin),
+                    expected.major,
+                    expected.minor,
+                    expected.major,
+                    expected.minor,
+                )));
+            }
+        }
         info!(
             py_root = %redact_home_prefix(&py_root),
             version = %version,
@@ -1691,7 +1832,10 @@ mod tests {
             ws.join("pyproject.toml"),
             "[project]\nname = \"demo\"\nrequires-python = \">=3.11\"\n",
         )?;
-        assert_eq!(parse_python_minor_spec("Python 3.12.7"), Some((3, 12)));
+        assert_eq!(
+            PythonTargetAbi::parse_runtime_spec("Python 3.12.7"),
+            Some(PythonTargetAbi::new(3, 12, false))
+        );
 
         // Cross-target without host bundling keeps manifest minor
         assert_eq!(
@@ -1742,6 +1886,82 @@ mod tests {
                 "python3.14t".to_string(),
                 "python3.12".to_string(),
             ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_prioritize_candidates_by_constraint_follows_uv2nix_highest_for_ranges_and_exact_for_pins(
+    ) {
+        let py312 = PathBuf::from("/opt/uv/cpython-3.12.7/bin/python3");
+        let py313 = PathBuf::from("/opt/uv/cpython-3.13.2/bin/python3");
+        let py314 = PathBuf::from("/opt/uv/cpython-3.14.0/bin/python3");
+
+        let ge_312 = PythonVersionConstraint::parse(">=3.12", false);
+        assert_eq!(
+            prioritize_candidates_by_constraint(
+                vec![py312.clone(), py313.clone(), py314.clone()],
+                ge_312
+            ),
+            vec![py314.clone(), py313.clone(), py312.clone()]
+        );
+
+        let lt_314 = PythonVersionConstraint::parse(">=3.12,<3.14", false);
+        assert_eq!(
+            prioritize_candidates_by_constraint(
+                vec![py314.clone(), py312.clone(), py313.clone()],
+                lt_314
+            ),
+            vec![py313.clone(), py312.clone(), py314.clone()]
+        );
+
+        let pin_312 = PythonVersionConstraint::parse("3.12", true);
+        assert_eq!(
+            prioritize_candidates_by_constraint(
+                vec![py314.clone(), py313.clone(), py312.clone()],
+                pin_312
+            ),
+            vec![py312, py314, py313]
+        );
+    }
+
+    #[test]
+    fn test_resolve_workspace_python_constraint_reconciles_dual_repo_and_pyvenv_cfg(
+    ) -> std::io::Result<()> {
+        let tmp = tempdir()?;
+        let ws = tmp.path();
+        let repo2 = ws.join("repo2");
+        let engine = ws.join("engine");
+        fs::create_dir_all(repo2.clone())?;
+        fs::create_dir_all(engine.join(".venv"))?;
+
+        // Repo 2 appears first with a wide range; Repo 1 (`engine`) has a `.venv` pinned to 3.14.
+        fs::write(
+            repo2.join("pyproject.toml"),
+            "[project]\nname = \"repo2\"\nrequires-python = \">=3.11\"\n",
+        )?;
+        fs::write(
+            engine.join(".venv/pyvenv.cfg"),
+            "home = /opt/homebrew/opt/python@3.14/bin\nversion_info = 3.14.2.final.0\n",
+        )?;
+
+        let reconciled =
+            resolve_workspace_python_constraint_checked(Some(ws), &[repo2.clone(), engine.clone()])
+                .expect("compatible dual-repo constraints must reconcile cleanly");
+        assert_eq!(
+            reconciled,
+            Some(PythonVersionConstraint::Exact(PythonTargetAbi::new(
+                3, 14, false
+            )))
+        );
+
+        // Conflicting explicit pins across repos must return an explicit error rather than picking first.
+        fs::write(repo2.join(".python-version"), "3.12\n")?;
+        let conflict = resolve_workspace_python_constraint_checked(Some(ws), &[repo2, engine])
+            .expect_err("conflicting dual-repo pins must error");
+        assert!(
+            conflict.contains("Conflicting"),
+            "unexpected conflict diagnostic: {conflict}"
         );
         Ok(())
     }

@@ -206,13 +206,7 @@ impl ResolverEngine {
 
         let mut unified_lock =
             DmzLockfile::with_platform(merged_packages, options.target_platform.clone());
-        unified_lock.include_dev = Some(options.include_dev);
-        unified_lock.inputs_digest = Some(DmzLockfile::compute_workspace_inputs_digest(
-            workspace_dir,
-            options.target_platform.as_deref(),
-            options.include_dev,
-            Some(project),
-        ));
+        Self::stamp_lockfile_metadata(&mut unified_lock, workspace_dir, options, Some(project));
         for meta in workspaces_meta {
             unified_lock.add_workspace(meta);
         }
@@ -260,13 +254,40 @@ impl ResolverEngine {
         options: &ResolveOptions,
     ) -> Result<DmzLockfile, ResolverError> {
         let mut lockfile = Self::resolve_single_workspace_excluding(workspace_dir, options, &[])?;
+        Self::stamp_lockfile_metadata(&mut lockfile, workspace_dir, options, None);
+        Ok(lockfile)
+    }
+
+    fn stamp_lockfile_metadata(
+        lockfile: &mut DmzLockfile,
+        workspace_dir: &Path,
+        options: &ResolveOptions,
+        multi_workspace: Option<&crate::workspace::WorkspaceProjectConfig>,
+    ) {
+        lockfile.include_dev = Some(options.include_dev);
+        if lockfile
+            .packages
+            .values()
+            .any(|p| p.ecosystem == crate::resolver::manifest::Ecosystem::PyPI)
+        {
+            let member_roots = crate::toolchain::ToolchainDetector::collect_workspace_member_dirs(
+                workspace_dir,
+                multi_workspace,
+            );
+            lockfile.python_abi =
+                crate::toolchain::discovery::python::resolve_effective_python_abi(
+                    Some(workspace_dir),
+                    &member_roots,
+                    options.target_platform.as_deref(),
+                )
+                .map(crate::toolchain::PythonTargetAbi::cp_tag);
+        }
         lockfile.inputs_digest = Some(DmzLockfile::compute_workspace_inputs_digest(
             workspace_dir,
             options.target_platform.as_deref(),
             options.include_dev,
-            None,
+            multi_workspace,
         ));
-        Ok(lockfile)
     }
 
     fn resolve_single_workspace_excluding(

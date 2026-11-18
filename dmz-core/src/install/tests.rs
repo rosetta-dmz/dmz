@@ -34,6 +34,7 @@ fn test_install_fails_fast_when_store_missing() {
         version: 1,
         target_platform: None,
         include_dev: None,
+        python_abi: None,
         inputs_digest: None,
         vcs: None,
         workspaces: std::collections::BTreeMap::new(),

@@ -59,6 +59,8 @@ pub struct DmzLockfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_dev: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub python_abi: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inputs_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcs: Option<VcsProvenance>,
@@ -121,6 +123,7 @@ impl DmzLockfile {
             version: 1,
             target_platform,
             include_dev: None,
+            python_abi: None,
             inputs_digest: None,
             vcs: None,
             workspaces: BTreeMap::new(),
@@ -174,7 +177,52 @@ impl DmzLockfile {
             }
         }
 
+        for rel in [".python-version", ".venv/pyvenv.cfg"] {
+            let path = workspace_root.join(rel);
+            if path.is_file() {
+                if let Ok(bytes) = fs::read(&path) {
+                    hasher.update(b"root_py\0");
+                    hasher.update(rel.as_bytes());
+                    hasher.update(b"\0");
+                    hasher.update((bytes.len() as u64).to_le_bytes());
+                    hasher.update(&bytes);
+                }
+            }
+        }
+
+        let member_roots = crate::toolchain::ToolchainDetector::collect_workspace_member_dirs(
+            workspace_root,
+            multi_workspace,
+        );
+        if Self::dirs_have_python_inputs(workspace_root, &member_roots) {
+            let py_abi_tag = crate::toolchain::discovery::python::resolve_effective_python_abi(
+                Some(workspace_root),
+                &member_roots,
+                target_platform,
+            )
+            .map_or_else(String::new, |abi| abi.cp_tag());
+            hasher.update(b"python_abi\0");
+            hasher.update(py_abi_tag.as_bytes());
+            hasher.update(b"\0");
+        }
+
         crate::archive::exporter::hashing::format_sha256_hex(&hasher.finalize())
+    }
+
+    fn dirs_have_python_inputs(workspace_root: &Path, member_roots: &[std::path::PathBuf]) -> bool {
+        let py_markers = [
+            "requirements.txt",
+            "pyproject.toml",
+            "setup.py",
+            "Pipfile",
+            "uv.lock",
+            "poetry.lock",
+            ".python-version",
+            ".venv/pyvenv.cfg",
+        ];
+        std::iter::once(workspace_root)
+            .chain(member_roots.iter().map(std::path::PathBuf::as_path))
+            .any(|dir| py_markers.iter().any(|rel| dir.join(rel).is_file()))
     }
 
     fn resolve_member_dirs_with_exclusions(
@@ -264,6 +312,8 @@ impl DmzLockfile {
             "Pipfile",
             "uv.lock",
             "poetry.lock",
+            ".python-version",
+            ".venv/pyvenv.cfg",
             "go.mod",
             "go.sum",
             "composer.json",
@@ -336,6 +386,28 @@ impl DmzLockfile {
     ) -> bool {
         if self.is_stale_for_bundle(target_platform, include_dev, multi_workspace) {
             return true;
+        }
+
+        if self
+            .packages
+            .values()
+            .any(|p| p.ecosystem == Ecosystem::PyPI)
+        {
+            let member_roots = crate::toolchain::ToolchainDetector::collect_workspace_member_dirs(
+                workspace_root,
+                multi_workspace,
+            );
+            if let Some(current_py_abi) =
+                crate::toolchain::discovery::python::resolve_effective_python_abi(
+                    Some(workspace_root),
+                    &member_roots,
+                    target_platform,
+                )
+            {
+                if self.python_abi.as_deref() != Some(current_py_abi.cp_tag().as_str()) {
+                    return true;
+                }
+            }
         }
 
         if let Some(ref locked_digest) = self.inputs_digest {

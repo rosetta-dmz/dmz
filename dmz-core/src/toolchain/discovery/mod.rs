@@ -136,6 +136,27 @@ impl DiscoveryRegistry {
         }
         toolchains
     }
+
+    /// Discovers standalone host toolchains scoped strictly to `ecosystems` and `ctx`, surfacing
+    /// explicit discoverer errors such as cross-member version conflicts or unsatisfied version pins.
+    ///
+    /// # Errors
+    /// Propagates the first `ToolchainError` returned by an active ecosystem discoverer.
+    pub fn discover_for_ecosystems_with_context_checked(
+        &self,
+        ecosystems: &HashSet<ToolchainEcosystem>,
+        ctx: &ToolchainDiscoveryContext,
+    ) -> Result<Vec<DiscoveredToolchain>, ToolchainError> {
+        let mut toolchains = Vec::new();
+        for discoverer in &self.discoverers {
+            if ecosystems.contains(&discoverer.ecosystem()) {
+                if let Some(tc) = discoverer.discover_with_context(ctx)? {
+                    toolchains.push(tc);
+                }
+            }
+        }
+        Ok(toolchains)
+    }
 }
 
 /// Detects whether a path is non-standalone / non-relocatable (e.g. managed by system package managers

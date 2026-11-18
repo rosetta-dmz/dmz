@@ -261,3 +261,50 @@ fn test_lockfile_staleness_detects_new_cargo_crate_and_digest_drift() {
     .unwrap();
     assert!(legacy_lock.is_stale_for_workspace(root, None, true, Some(&project)));
 }
+
+#[test]
+fn test_lockfile_staleness_detects_python_abi_drift() {
+    let temp = tempfile::tempdir().unwrap();
+    let ws = temp.path();
+    std::fs::create_dir_all(ws.join(".venv")).unwrap();
+    std::fs::write(ws.join("requirements.txt"), "PyYAML==6.0.3\n").unwrap();
+    std::fs::write(
+        ws.join(".venv/pyvenv.cfg"),
+        "version_info = 3.14.2.final.0\n",
+    )
+    .unwrap();
+
+    let mut lock = DmzLockfile::new(vec![LockedPackage {
+        name: "PyYAML".to_string(),
+        version: "6.0.3".to_string(),
+        ecosystem: Ecosystem::PyPI,
+        sha256: "abc".to_string(),
+        source_url: None,
+        dependencies: Vec::new(),
+        member_id: None,
+    }]);
+    lock.include_dev = Some(true);
+
+    // Legacy PyPI lockfile with python_abi = None must be treated as stale when 3.14 is resolved.
+    assert!(lock.is_stale_for_workspace(ws, None, true, None));
+
+    // Stamped cp314 lockfile with current digest is fresh.
+    lock.python_abi = Some("cp314".to_string());
+    lock.inputs_digest = Some(DmzLockfile::compute_workspace_inputs_digest(
+        ws, None, true, None,
+    ));
+    assert!(!lock.is_stale_for_workspace(ws, None, true, None));
+
+    // Mismatched cp312 python_abi must trigger staleness even if inputs_digest matched previously.
+    let mut old_abi_lock = lock.clone();
+    old_abi_lock.python_abi = Some("cp312".to_string());
+    assert!(old_abi_lock.is_stale_for_workspace(ws, None, true, None));
+
+    // Switching .venv/pyvenv.cfg to 3.13 invalidates inputs_digest cleanly.
+    std::fs::write(
+        ws.join(".venv/pyvenv.cfg"),
+        "version_info = 3.13.1.final.0\n",
+    )
+    .unwrap();
+    assert!(lock.is_stale_for_workspace(ws, None, true, None));
+}

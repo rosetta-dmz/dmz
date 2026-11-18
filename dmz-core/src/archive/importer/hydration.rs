@@ -233,7 +233,10 @@ pub fn hydrate_offline_dependencies_with_options(
             if member_venv.is_dir()
                 || crate::install::mappers::PyPiMapper::has_available_base_python(dir)
             {
-                let py_ver = crate::install::mappers::PyPiMapper::detect_python_version(dir);
+                let py_ver = crate::install::mappers::PyPiMapper::detect_python_version_with_root(
+                    dir,
+                    Some(workspace_root),
+                );
                 if let Err(e) = crate::install::mappers::PyPiMapper::hydrate_venv_environment(
                     dir,
                     &member_venv,

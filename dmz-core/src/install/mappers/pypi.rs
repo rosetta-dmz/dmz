@@ -2,10 +2,8 @@ use crate::install::archive::SafeArchiveExtractor;
 use crate::install::InstallError;
 use crate::resolver::lockfile::LockedPackage;
 use crate::resolver::manifest::ManifestScanner;
-use crate::toolchain::discovery::python::{
-    find_highest_python_minor_dir, resolve_workspace_python_minor,
-};
-use crate::toolchain::PythonTargetAbi;
+use crate::toolchain::discovery::python::resolve_workspace_python_constraint;
+use crate::toolchain::{PythonTargetAbi, PythonVersionConstraint};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -15,10 +13,6 @@ use tracing::warn;
 pub struct PyPiMapper;
 
 impl PyPiMapper {
-    fn find_python_minor_dir(lib_dir: &Path) -> Option<String> {
-        find_highest_python_minor_dir(lib_dir).map(|(_, name)| name)
-    }
-
     fn remove_stale_typing_backport(site_packages: &Path, target_py: Option<(u8, u8)>) {
         if !target_py.is_some_and(|v| v >= (3, 5)) {
             return;
@@ -31,35 +25,81 @@ impl PyPiMapper {
         }
     }
 
-    /// Detects the target Python version from bundled toolchains, workspace manifests,
-    /// or existing environments, defaulting to `python3.11` for backward compatibility.
+    /// Detects the target Python version from bundled toolchains, exact pins, existing venvs,
+    /// or workspace range manifests, defaulting to `python3.11` for backward compatibility.
     #[must_use]
     pub fn detect_python_version(workspace_path: &Path) -> String {
-        // 1. Prefer bundled toolchain .dmz/toolchains/python/lib/python3.X
-        let tc_lib = workspace_path
-            .join(".dmz")
-            .join("toolchains")
-            .join("python")
-            .join("lib");
-        if let Some(ver) = Self::find_python_minor_dir(&tc_lib) {
+        Self::detect_python_version_with_root(workspace_path, None)
+    }
+
+    /// Finds the highest `python<major>.<minor>[t]` subdirectory matching `rel_subpath` across
+    /// ordered `search_roots`, optionally requiring satisfaction of a `PythonVersionConstraint`.
+    fn find_python_minor_in_roots(
+        search_roots: &[&Path],
+        rel_subpath: &[&str],
+        constraint: Option<PythonVersionConstraint>,
+    ) -> Option<String> {
+        for root in search_roots {
+            let mut dir = (*root).to_path_buf();
+            for segment in rel_subpath {
+                dir.push(segment);
+            }
+            if let Some((abi, ver)) = crate::toolchain::PythonTargetAbi::find_highest_lib_dir(&dir)
+            {
+                if constraint.is_none_or(|spec| spec.satisfies(abi)) {
+                    return Some(ver);
+                }
+            }
+        }
+        None
+    }
+
+    /// Detects the target Python version, checking `root_workspace` for shared dual-repo
+    /// `.dmz/toolchains/python` runtimes before falling back to local manifests or venvs.
+    #[must_use]
+    pub fn detect_python_version_with_root(
+        workspace_path: &Path,
+        root_workspace: Option<&Path>,
+    ) -> String {
+        let mut search_roots = vec![workspace_path];
+        if let Some(root) = root_workspace {
+            if !search_roots.contains(&root) {
+                search_roots.push(root);
+            }
+        }
+
+        // 1. Prefer bundled toolchain `.dmz/toolchains/python/lib/python3.X`
+        if let Some(ver) = Self::find_python_minor_in_roots(
+            &search_roots,
+            &[".dmz", "toolchains", "python", "lib"],
+            None,
+        ) {
             return ver;
         }
 
-        // 2. Consult workspace manifest Python version constraints (.python-version / pyproject.toml / uv.lock)
-        if let Some((major, minor)) = resolve_workspace_python_minor(Some(workspace_path), &[]) {
-            return format!("python{major}.{minor}");
+        // 2. Respect explicit workspace pins (.python-version / `==3.X`) over stale venvs.
+        let extra_roots: Vec<PathBuf> = root_workspace.into_iter().map(Path::to_path_buf).collect();
+        let constraint = resolve_workspace_python_constraint(Some(workspace_path), &extra_roots);
+        if let Some(PythonVersionConstraint::Exact(pin)) = constraint {
+            return pin.lib_dir_name();
         }
 
-        // 3. Check existing .venv/lib/python3.X
-        let venv_lib = workspace_path.join(".venv").join("lib");
-        if let Some(ver) = Self::find_python_minor_dir(&venv_lib) {
+        // 3. Check existing `.venv/lib/python3.X` (honoring range constraint when present).
+        if let Some(ver) =
+            Self::find_python_minor_in_roots(&search_roots, &[".venv", "lib"], constraint)
+        {
             return ver;
         }
 
-        // 4. Check existing .dmz/venv/lib/python3.X
-        let dmz_venv_lib = workspace_path.join(".dmz").join("venv").join("lib");
-        if let Some(ver) = Self::find_python_minor_dir(&dmz_venv_lib) {
+        // 4. For range specs like `>=3.12`, prefer `.dmz/venv` when it satisfies the range.
+        if let Some(ver) =
+            Self::find_python_minor_in_roots(&search_roots, &[".dmz", "venv", "lib"], constraint)
+        {
             return ver;
+        }
+
+        if let Some(spec @ PythonVersionConstraint::Range { .. }) = constraint {
+            return spec.fallback_abi().lib_dir_name();
         }
 
         "python3.11".to_string()
@@ -256,13 +296,27 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
     /// and hydrates the virtual environment interpreter.
     ///
     /// # Errors
-    /// Returns `InstallError` if archive extraction, `.venv` wiring, ABI validation, or I/O fails.
+    /// Returns `InstallError` if archive extraction, `.venv` wiring, or I/O fails.
     pub fn map_package(
         workspace_path: &Path,
         pkg: &LockedPackage,
         archive_path: &Path,
     ) -> Result<(), InstallError> {
-        let py_ver = Self::detect_python_version(workspace_path);
+        Self::map_package_with_root(workspace_path, None, pkg, archive_path)
+    }
+
+    /// Unpacks a Python package archive into `.dmz/venv`, resolving any shared umbrella toolchain
+    /// from `root_workspace` when installing a dual-repo member.
+    ///
+    /// # Errors
+    /// Returns `InstallError` if archive extraction, `.venv` wiring, or I/O fails.
+    pub fn map_package_with_root(
+        workspace_path: &Path,
+        root_workspace: Option<&Path>,
+        pkg: &LockedPackage,
+        archive_path: &Path,
+    ) -> Result<(), InstallError> {
+        let py_ver = Self::detect_python_version_with_root(workspace_path, root_workspace);
         let target_abi = PythonTargetAbi::parse_runtime_spec(&py_ver);
         let target_py = target_abi.map(|a| (a.major, a.minor));
         let venv_site_packages = workspace_path
@@ -283,6 +337,8 @@ python -c "import sys; from {module} import {func}; sys.exit({func}())" @args
             return Ok(());
         }
 
+        // Strict Bazel Mode (Option 2): zero tolerance for compiled wheel extension ABI/OS
+        // mismatches so incompatible wheels fail immediately before site-packages extraction.
         Self::verify_wheel_extension_abi(&pkg.name, archive_path, target_abi)?;
 
         fs::create_dir_all(&venv_site_packages).map_err(|e| {
@@ -835,10 +891,20 @@ mod tests {
             member_id: None,
         };
 
-        let err = PyPiMapper::map_package(ws, &pkg, &wheel_311)
-            .expect_err("cp311 native extension must be rejected for python3.12 runtime");
+        let err = PyPiMapper::verify_wheel_extension_abi(
+            "pydantic_core",
+            &wheel_311,
+            Some(PythonTargetAbi::new(3, 12, false)),
+        )
+        .expect_err("cp311 native extension diagnostic must trigger for python3.12 runtime");
         assert!(err.to_string().contains("cp311"));
         assert!(err.to_string().contains("python3.12"));
+
+        // Strict Bazel Mode (Option 2): map_package rejects mismatched compiled C extensions.
+        let map_err = PyPiMapper::map_package(ws, &pkg, &wheel_311)
+            .expect_err("cp311 native extension must be rejected for python3.12 runtime");
+        assert!(map_err.to_string().contains("cp311"));
+        assert!(map_err.to_string().contains("python3.12"));
 
         let abi3_entry = if cfg!(windows) {
             "cryptography/hazmat/bindings/_rust.pyd"
@@ -865,7 +931,7 @@ mod tests {
         write_mock_wheel_with_entry(&wheel_312, host_ext_entry, b"fake-native-312")?;
         PyPiMapper::map_package(ws, &pkg, &wheel_312)?;
 
-        // Foreign-OS compiled extension with matching minor must also fail fast.
+        // Foreign-OS compiled extension with matching minor must also report diagnostics cleanly.
         let wheel_linux_312 =
             ws.join("pydantic_core-2.27.1-cp312-cp312-manylinux_2_17_x86_64.archive");
         write_mock_wheel_with_entry(
@@ -879,14 +945,22 @@ mod tests {
             Some(PythonTargetAbi::new(3, 12, false)),
             "macos",
         )
-        .expect_err("linux-gnu.so extension must be rejected for macos runtime");
+        .expect_err("linux-gnu.so extension must be flagged for macos runtime");
         assert!(os_err.to_string().contains("foreign-os"));
 
-        // Python 3.14 & free-threaded 3.14t ABI verification
+        // Python 3.14 & free-threaded 3.14t ABI verification + dual-repo root detection
         let ws_314_dir = tempdir()?;
         let ws_314 = ws_314_dir.path();
         fs::create_dir_all(ws_314.join(".dmz/toolchains/python/lib/python3.14"))?;
         assert_eq!(PyPiMapper::detect_python_version(ws_314), "python3.14");
+
+        let sidecar_dir = ws_314.join("python_sidecar");
+        fs::create_dir_all(sidecar_dir.join(".venv/lib/python3.12"))?;
+        assert_eq!(
+            PyPiMapper::detect_python_version_with_root(&sidecar_dir, Some(ws_314)),
+            "python3.14",
+            "dual-repo sidecar must align with root bundled python3.14 toolchain"
+        );
 
         let yaml_312 = ws_314.join("PyYAML-6.0.2-cp312-cp312-macosx_11_0_arm64.archive");
         write_mock_wheel_with_entry(&yaml_312, "yaml/_yaml.cpython-312-darwin.so", b"cp312")?;
@@ -895,10 +969,19 @@ mod tests {
             version: "6.0.2".to_string(),
             ..pkg.clone()
         };
-        let err_314 = PyPiMapper::map_package(ws_314, &yaml_pkg, &yaml_312)
-            .expect_err("cp312 PyYAML wheel must be rejected for python3.14 runtime");
+        let err_314 = PyPiMapper::verify_wheel_extension_abi_for_os(
+            "PyYAML",
+            &yaml_312,
+            Some(PythonTargetAbi::new(3, 14, false)),
+            "macos",
+        )
+        .expect_err("cp312 PyYAML wheel diagnostic must flag python3.14 mismatch");
         assert!(err_314.to_string().contains("cp312"));
         assert!(err_314.to_string().contains("python3.14"));
+        // Strict Bazel Mode (Option 2): cp312 PyYAML wheel must be rejected on python3.14 runtime.
+        let yaml_err = PyPiMapper::map_package(ws_314, &yaml_pkg, &yaml_312)
+            .expect_err("Strict Bazel mode must reject cp312 PyYAML wheel on python3.14 runtime");
+        assert!(yaml_err.to_string().contains("cp312"));
 
         let yaml_314 = ws_314.join("PyYAML-6.0.3-cp314-cp314-macosx_11_0_arm64.archive");
         write_mock_wheel_with_entry(&yaml_314, "yaml/_yaml.cpython-314-darwin.so", b"cp314")?;
