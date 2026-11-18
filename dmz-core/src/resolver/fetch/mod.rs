@@ -112,6 +112,8 @@ impl DependencyFetcher {
 
         // Defensive sanitation of lockfile packages against stale/dirty names (e.g. from prior PEP 508 bugs)
         let mut sanitized_packages = std::collections::BTreeMap::new();
+        let mut seen_sanitized_pypi: std::collections::HashSet<(Option<String>, String)> =
+            std::collections::HashSet::new();
         let mut mutated_lockfile = false;
 
         for (key, mut pkg) in std::mem::take(&mut lockfile.packages) {
@@ -132,6 +134,12 @@ impl DependencyFetcher {
                 let norm = ManifestScanner::normalize_pypi_name(&pkg.name);
                 if ManifestScanner::is_obsolete_python_backport(&norm, target_py_minor) {
                     // Strip stdlib backports (e.g. `typing`, `enum34`) inherited from stale lockfiles.
+                    mutated_lockfile = true;
+                    continue;
+                }
+                // Collapse PEP 503 case/separator aliases (e.g. `Jinja2` vs `jinja2`) to avoid
+                // parallel worker races on case-insensitive filesystems such as macOS APFS.
+                if !seen_sanitized_pypi.insert((pkg.member_id.clone(), norm)) {
                     mutated_lockfile = true;
                     continue;
                 }

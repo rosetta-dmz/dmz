@@ -60,7 +60,11 @@ pub fn fetch_single_package(
         }
     }
 
-    let safe_pkg_name = clean_pkg_name.replace('/', "__");
+    let safe_pkg_name = if is_pypi {
+        clean_pkg_name.replace('/', "__").to_ascii_lowercase()
+    } else {
+        clean_pkg_name.replace('/', "__")
+    };
     let pkg_dir = store_path.join(&safe_pkg_name);
     std::fs::create_dir_all(&pkg_dir).map_err(|e| {
         ResolverError::Io(format!(

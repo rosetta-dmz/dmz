@@ -637,16 +637,27 @@ impl InstallerEngine {
     }
 }
 
-fn collect_matching_store_archives(dir: &Path, prefix: &str, version: &str) -> Vec<PathBuf> {
+fn collect_matching_store_archives(
+    dir: &Path,
+    raw_name: &str,
+    version: &str,
+    is_pypi: bool,
+) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = fs::read_dir(dir) else {
         return out;
     };
+    let prefix = format!("{}-", raw_name);
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_some_and(|ext| ext == "archive") && path.is_file() {
             if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
-                if fname.starts_with(prefix) && fname.contains(version) {
+                let matched = (fname.starts_with(&prefix) && fname.contains(version))
+                    || (is_pypi
+                        && crate::resolver::fetch::cache::pypi_archive_matches_name_and_version(
+                            fname, raw_name, version,
+                        ));
+                if matched {
                     out.push(path);
                 }
             }
@@ -674,19 +685,44 @@ pub fn locate_locked_store_artifact(
         )));
     }
 
-    let pkg_store_dir = store_dir.join(&safe_name);
-    let v2_dir = pkg_store_dir.join("v2");
-    let exact_name = format!("{}-{}.archive", safe_name, pkg.version);
-    let exact_path = pkg_store_dir.join(&exact_name);
-    let prefix = format!("{}-", safe_name);
+    let is_pypi = pkg.ecosystem == crate::resolver::manifest::Ecosystem::PyPI;
+    let mut store_dir_names = vec![safe_name.clone()];
+    if is_pypi {
+        let lower_name = safe_name.to_ascii_lowercase();
+        if !store_dir_names.contains(&lower_name) {
+            store_dir_names.push(lower_name);
+        }
+        let norm_name = crate::resolver::manifest::ManifestScanner::normalize_pypi_name(&pkg.name);
+        if !norm_name.is_empty() && !store_dir_names.contains(&norm_name) {
+            store_dir_names.push(norm_name);
+        }
+    }
 
-    let mut candidates = collect_matching_store_archives(&v2_dir, &prefix, &pkg.version);
+    let primary_pkg_dir = store_dir.join(&safe_name);
+    let exact_name = format!("{}-{}.archive", safe_name, pkg.version);
+    let exact_path = primary_pkg_dir.join(&exact_name);
+
+    let mut candidates = Vec::new();
+    for dir_name in &store_dir_names {
+        let pkg_store_dir = store_dir.join(dir_name);
+        let v2_dir = pkg_store_dir.join("v2");
+        for path in collect_matching_store_archives(&v2_dir, &safe_name, &pkg.version, is_pypi) {
+            if !candidates.contains(&path) {
+                candidates.push(path);
+            }
+        }
+    }
     if exact_path.is_file() {
         candidates.push(exact_path.clone());
     }
-    for path in collect_matching_store_archives(&pkg_store_dir, &prefix, &pkg.version) {
-        if !candidates.contains(&path) {
-            candidates.push(path);
+    for dir_name in &store_dir_names {
+        let pkg_store_dir = store_dir.join(dir_name);
+        for path in
+            collect_matching_store_archives(&pkg_store_dir, &safe_name, &pkg.version, is_pypi)
+        {
+            if !candidates.contains(&path) {
+                candidates.push(path);
+            }
         }
     }
 

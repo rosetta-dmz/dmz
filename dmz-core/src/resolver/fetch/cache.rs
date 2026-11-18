@@ -52,6 +52,27 @@ pub(crate) fn verify_file_sha256(path: &Path, expected_hex: &str) -> bool {
     actual_hex.eq_ignore_ascii_case(expected_hex.trim())
 }
 
+pub(crate) fn pypi_archive_matches_name_and_version(
+    archive_filename: &str,
+    pkg_name: &str,
+    version: &str,
+) -> bool {
+    let Some(stem) = archive_filename.strip_suffix(".archive") else {
+        return false;
+    };
+    let exact_ver_suffix = format!("-{version}");
+    let tagged_ver_marker = format!("-{version}-");
+    let candidate_pkg_part = if let Some(prefix) = stem.strip_suffix(&exact_ver_suffix) {
+        prefix
+    } else if let Some((prefix, _)) = stem.split_once(&tagged_ver_marker) {
+        prefix
+    } else {
+        return false;
+    };
+    crate::resolver::manifest::ManifestScanner::normalize_pypi_name(candidate_pkg_part)
+        == crate::resolver::manifest::ManifestScanner::normalize_pypi_name(pkg_name)
+}
+
 /// Checks the immutable `v2/` PyPI cache bucket inside `pkg_dir`, validating both
 /// PEP 425 ABI/platform filename tags and SHA-256 integrity.
 #[must_use]
@@ -69,7 +90,6 @@ pub fn check_cached_pypi_artifact(
         return None;
     };
 
-    let archive_prefix = format!("{}-{}-", safe_pkg_name, clean_version);
     let mut best: Option<(i32, PathBuf, LockedPackage)> = None;
 
     for entry in entries.flatten() {
@@ -81,7 +101,7 @@ pub fn check_cached_pypi_artifact(
             continue;
         };
         let archive_filename = format!("{stem}.archive");
-        if !archive_filename.starts_with(&archive_prefix) {
+        if !pypi_archive_matches_name_and_version(&archive_filename, safe_pkg_name, clean_version) {
             continue;
         }
         let Some(compat_score) = crate::resolver::fetch::pypi::cached_pypi_v2_compatibility_score(

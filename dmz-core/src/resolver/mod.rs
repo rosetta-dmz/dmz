@@ -324,9 +324,14 @@ impl ResolverEngine {
                 );
 
                 if !locked_packages.iter().any(|p: &LockedPackage| {
-                    p.name == dep.name
+                    p.ecosystem == dep.ecosystem
                         && p.version == dep.version_req
-                        && p.ecosystem == dep.ecosystem
+                        && if dep.ecosystem == Ecosystem::PyPI {
+                            ManifestScanner::normalize_pypi_name(&p.name)
+                                == ManifestScanner::normalize_pypi_name(&dep.name)
+                        } else {
+                            p.name == dep.name
+                        }
                 }) {
                     locked_packages.push(LockedPackage {
                         name: dep.name,

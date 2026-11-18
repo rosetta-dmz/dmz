@@ -845,3 +845,82 @@ fn test_fetch_dependencies_rejects_pypi_sha256_digest_mismatch() {
         "Tampered download must be removed instead of remaining cached"
     );
 }
+
+#[test]
+fn test_fetch_and_locate_pypi_pep503_case_aliases_jinja2() {
+    let (bases, _base_url, shutdown, handle) =
+        spawn_mock_registry_server(|path, base| match path {
+            "/pypi/Jinja2/3.1.6/json"
+            | "/pypi/Jinja2/json"
+            | "/pypi/jinja2/3.1.6/json"
+            | "/pypi/jinja2/json" => pypi_json_response(
+                base,
+                "Jinja2",
+                "3.1.6",
+                &[],
+                &["jinja2-3.1.6-py3-none-any.whl"],
+            ),
+            "/files/jinja2-3.1.6-py3-none-any.whl" => (
+                "200 OK",
+                "application/octet-stream",
+                b"PK\x03\x04jinja2-3.1.6-wheel".to_vec(),
+            ),
+            _ => ("404 Not Found", "text/plain", b"not found".to_vec()),
+        });
+
+    let temp = tempdir().unwrap();
+    let lockfile_path = temp.path().join("dmz.lock");
+    let store_path = temp.path().join("store");
+
+    // Seed duplicate PEP 503 casing aliases (`Jinja2` and `jinja2`) as can happen across manifests/APFS.
+    let pkg_upper = LockedPackage {
+        name: "Jinja2".to_string(),
+        version: "3.1.6".to_string(),
+        ecosystem: Ecosystem::PyPI,
+        sha256: "dummy".to_string(),
+        source_url: None,
+        dependencies: Vec::new(),
+        member_id: None,
+    };
+    let pkg_lower = LockedPackage {
+        name: "jinja2".to_string(),
+        ..pkg_upper.clone()
+    };
+    DmzLockfile::new(vec![pkg_upper, pkg_lower])
+        .save(&lockfile_path)
+        .unwrap();
+
+    let res = DependencyFetcher::fetch_dependencies_with_bases(&lockfile_path, &store_path, &bases);
+    shutdown.store(true, Ordering::Relaxed);
+    let _ = handle.join();
+
+    assert!(res.is_ok(), "Fetch failed: {:?}", res.err());
+    assert_eq!(res.unwrap(), 1);
+
+    let reloaded = DmzLockfile::load_and_verify(&lockfile_path).unwrap();
+    for pkg in reloaded.packages.values() {
+        let located = crate::install::locate_locked_store_artifact(&store_path, pkg)
+            .expect("locate_locked_store_artifact must resolve Jinja2/jinja2 case-insensitively");
+        assert!(located.is_file());
+    }
+
+    // Even if a lockfile retains mixed-case `Jinja2@3.1.6`, it must still locate lowercase `store/jinja2/v2/...`.
+    let mixed_case_lookup = LockedPackage {
+        name: "Jinja2".to_string(),
+        version: "3.1.6".to_string(),
+        ecosystem: Ecosystem::PyPI,
+        sha256: reloaded
+            .packages
+            .values()
+            .next()
+            .map(|p| p.sha256.clone())
+            .unwrap_or_default(),
+        source_url: None,
+        dependencies: Vec::new(),
+        member_id: None,
+    };
+    assert!(
+        crate::install::locate_locked_store_artifact(&store_path, &mixed_case_lookup).is_ok(),
+        "Mixed-case Jinja2@3.1.6 must resolve lowercase v2 store entry"
+    );
+}
