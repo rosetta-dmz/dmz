@@ -982,7 +982,16 @@ mod tests {
         assert!(err_314.to_string().contains("cp312"));
         assert!(err_314.to_string().contains("python3.14"));
         // Strict Bazel Mode (Option 2): cp312 PyYAML wheel must be rejected on python3.14 runtime.
-        let yaml_err = PyPiMapper::map_package(ws_314, &yaml_pkg, &yaml_312)
+        let host_yaml_312_entry = if cfg!(target_os = "macos") {
+            "yaml/_yaml.cpython-312-darwin.so"
+        } else if cfg!(target_os = "linux") {
+            "yaml/_yaml.cpython-312-x86_64-linux-gnu.so"
+        } else {
+            "yaml/_yaml.cp312-win_amd64.pyd"
+        };
+        let host_yaml_312 = ws_314.join("PyYAML-6.0.2-cp312-cp312-host.archive");
+        write_mock_wheel_with_entry(&host_yaml_312, host_yaml_312_entry, b"cp312")?;
+        let yaml_err = PyPiMapper::map_package(ws_314, &yaml_pkg, &host_yaml_312)
             .expect_err("Strict Bazel mode must reject cp312 PyYAML wheel on python3.14 runtime");
         assert!(yaml_err.to_string().contains("cp312"));
 
